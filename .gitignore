@@ -1,0 +1,15 @@
+# Build artifacts
+/target/
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Built plugin bundles
+*.vst3
+*.clap
+*.component

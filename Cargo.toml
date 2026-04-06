@@ -1,0 +1,40 @@
+[workspace]
+members = [".", "xtask"]
+resolver = "2"
+
+[package]
+name = "ethertap"
+version = "0.1.0"
+edition = "2021"
+description = "EtherTap – VST3 OSC bridge for Behringer X32 / Midas M32"
+
+[lib]
+name = "ethertap"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+standalone = ["nih_plug/standalone"]
+
+[[bin]]
+name = "ethertap-gui"
+path = "src/bin/gui_test.rs"
+required-features = ["standalone"]
+
+[dependencies]
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["vst3"] }
+nih_plug_iced = { git = "https://github.com/robbert-vdh/nih-plug.git" }
+crossbeam-channel = "0.5"
+rosc = "0.10"
+parking_lot = "0.12"
+
+# Pin both baseview revisions (579130e used by nih-plug standalone, 1d9806d5
+# used by iced_baseview) to the newer revision.  The older one crashes on ARM64
+# macOS in become_first_responder when [view window] returns nil during
+# setContentView_.  The newer revision removes that callback entirely.
+[patch."https://github.com/RustAudio/baseview.git"]
+baseview = { path = "vendor/baseview" }
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
+opt-level = 3

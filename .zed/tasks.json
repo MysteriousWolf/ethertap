@@ -1,0 +1,44 @@
+[
+  {
+    "label": "Check / Lint",
+    "command": "cargo",
+    "args": ["clippy", "--all-targets", "--", "-D", "warnings"],
+    "cwd": "$ZED_WORKTREE_ROOT"
+  },
+  {
+    "label": "Format",
+    "command": "cargo",
+    "args": ["fmt", "--all"],
+    "cwd": "$ZED_WORKTREE_ROOT"
+  },
+  {
+    "label": "Test: BPM Scaling",
+    "command": "cargo",
+    "args": ["test", "--lib", "osc::tests", "--", "--nocapture"],
+    "cwd": "$ZED_WORKTREE_ROOT"
+  },
+  {
+    "label": "Test: All",
+    "command": "cargo",
+    "args": ["test", "--all"],
+    "cwd": "$ZED_WORKTREE_ROOT"
+  },
+  {
+    "label": "Build (debug)",
+    "command": "cargo",
+    "args": ["build"],
+    "cwd": "$ZED_WORKTREE_ROOT"
+  },
+  {
+    "label": "Export: Bundle VST3 (release)",
+    "command": "cargo",
+    "args": ["xtask", "bundle", "ethertap", "--release"],
+    "cwd": "$ZED_WORKTREE_ROOT"
+  },
+  {
+    "label": "Run: GUI test (standalone)",
+    "command": "cargo",
+    "args": ["run", "--bin", "ethertap-gui", "--features", "standalone"],
+    "cwd": "$ZED_WORKTREE_ROOT"
+  }
+]
