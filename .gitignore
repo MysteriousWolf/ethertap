@@ -1,6 +1,9 @@
 # Build artifacts
 /target/
 
+# Vendored dependencies (populated by scripts/setup.sh)
+/vendor/
+
 # macOS
 .DS_Store
 

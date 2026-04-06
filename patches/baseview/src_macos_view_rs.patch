@@ -1,0 +1,15 @@
+--- a/src/macos/view.rs
++++ b/src/macos/view.rs
+@@ -245,6 +245,12 @@
+     let state = unsafe { WindowState::from_view(this) };
+     let is_key_window = unsafe {
+         let window: id = msg_send![this, window];
++        // Guard: [view window] returns nil during setContentView_ on ARM64
++        // macOS before the view is attached.  msg_send![nil, isKeyWindow]
++        // crashes instead of returning NO on Apple Silicon.
++        if window.is_null() {
++            return YES;
++        }
+         let is_key_window: BOOL = msg_send![window, isKeyWindow];
+         is_key_window == YES
+     };

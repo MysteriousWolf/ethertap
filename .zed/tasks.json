@@ -40,5 +40,29 @@
     "command": "cargo",
     "args": ["run", "--bin", "ethertap-gui", "--features", "standalone"],
     "cwd": "$ZED_WORKTREE_ROOT"
+  },
+  {
+    "label": "Setup: Populate vendor/",
+    "command": "bash",
+    "args": ["scripts/setup.sh"],
+    "cwd": "$ZED_WORKTREE_ROOT"
+  },
+  {
+    "label": "Setup: Check patches (dry-run)",
+    "command": "bash",
+    "args": ["scripts/setup.sh", "--check"],
+    "cwd": "$ZED_WORKTREE_ROOT"
+  },
+  {
+    "label": "Clean: vendor/",
+    "command": "bash",
+    "args": ["scripts/clean.sh"],
+    "cwd": "$ZED_WORKTREE_ROOT"
+  },
+  {
+    "label": "Clean: vendor/ + target/",
+    "command": "bash",
+    "args": ["scripts/clean.sh", "--all"],
+    "cwd": "$ZED_WORKTREE_ROOT"
   }
 ]

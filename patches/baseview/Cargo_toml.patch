@@ -1,0 +1,12 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -21,6 +21,9 @@
+ [dependencies]
+ keyboard-types = { version = "0.6.1", default-features = false }
+ raw-window-handle = "0.5"
++# Alias so that iced_baseview (rwh 0.4) and nih-plug standalone (rwh 0.5) can
++# both resolve to this single patched crate via the workspace [patch] override.
++rwh04 = { package = "raw-window-handle", version = "0.4" }
+ 
+ [target.'cfg(target_os="linux")'.dependencies]
+ x11rb = { version = "0.13.0", features = ["cursor", "resource_manager", "allow-unsafe-code"] }

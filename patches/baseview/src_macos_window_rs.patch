@@ -1,0 +1,77 @@
+--- a/src/macos/window.rs
++++ b/src/macos/window.rs
+@@ -19,6 +19,7 @@
+     AppKitDisplayHandle, AppKitWindowHandle, HasRawDisplayHandle, HasRawWindowHandle,
+     RawDisplayHandle, RawWindowHandle,
+ };
++extern crate rwh04;
+ 
+ use crate::{
+     Event, EventStatus, MouseCursor, Size, WindowHandler, WindowInfo, WindowOpenOptions,
+@@ -129,7 +130,10 @@
+ impl<'a> Window<'a> {
+     pub fn open_parented<P, H, B>(parent: &P, options: WindowOpenOptions, build: B) -> WindowHandle
+     where
+-        P: HasRawWindowHandle,
++        // Accept the rwh 0.4 trait so that iced_baseview (which pins 0.4) can
++        // call this function.  The implementation extracts the ns_view pointer
++        // which has the same layout in both crate versions.
++        P: rwh04::HasRawWindowHandle,
+         H: WindowHandler + 'static,
+         B: FnOnce(&mut crate::Window) -> H,
+         B: Send + 'static,
+@@ -143,7 +147,7 @@
+ 
+         let window_info = WindowInfo::from_logical_size(options.size, scaling);
+ 
+-        let handle = if let RawWindowHandle::AppKit(handle) = parent.raw_window_handle() {
++        let handle = if let rwh04::RawWindowHandle::AppKit(handle) = parent.raw_window_handle() {
+             handle
+         } else {
+             panic!("Not a macOS window");
+@@ -174,6 +178,45 @@
+         window_handle
+     }
+ 
++    /// Create a view without attaching it to a real parent window.
++    /// The caller (typically an audio host) attaches it via `addSubview:`.
++    pub fn open_as_if_parented<H, B>(options: WindowOpenOptions, build: B) -> WindowHandle
++    where
++        H: WindowHandler + 'static,
++        B: FnOnce(&mut crate::Window) -> H,
++        B: Send + 'static,
++    {
++        let pool = unsafe { NSAutoreleasePool::new(nil) };
++
++        let scaling = match options.scale {
++            WindowScalePolicy::ScaleFactor(scale) => scale,
++            WindowScalePolicy::SystemScaleFactor => 1.0,
++        };
++
++        let window_info = WindowInfo::from_logical_size(options.size, scaling);
++        let ns_view = unsafe { create_view(&options) };
++
++        let window_inner = WindowInner {
++            open: Cell::new(true),
++            ns_app: Cell::new(None),
++            ns_window: Cell::new(None),
++            ns_view,
++
++            #[cfg(feature = "opengl")]
++            gl_context: options
++                .gl_config
++                .map(|gl_config| Self::create_gl_context(None, ns_view, gl_config)),
++        };
++
++        let window_handle = Self::init(window_inner, window_info, build);
++
++        unsafe {
++            let () = msg_send![pool, drain];
++        }
++
++        window_handle
++    }
++
+     pub fn open_blocking<H, B>(options: WindowOpenOptions, build: B)
+     where
+         H: WindowHandler + 'static,
