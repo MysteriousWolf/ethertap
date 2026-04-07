@@ -1,0 +1,118 @@
+name: Release
+
+# Triggered automatically when a version tag is pushed (e.g. v1.0.0),
+# or manually via the Actions tab with an optional version label.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version label (e.g. v1.0.0) — defaults to dev'
+        required: false
+        default: 'dev'
+
+jobs:
+  # ── Per-platform build ───────────────────────────────────────────────────────
+  build:
+    name: Build / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            build_args: --universal
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            artifact_pattern: dist/*.zip
+
+          - os: windows-latest
+            build_args: ''
+            rust_targets: ''
+            artifact_pattern: dist/*.zip
+
+          - os: ubuntu-latest
+            build_args: ''
+            rust_targets: ''
+            artifact_pattern: dist/*.tar.gz
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+
+      # Cache the cargo registry and compiled git deps across runs.
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # Cache the vendored baseview source so setup.sh is a no-op on warm runs.
+      - name: Cache vendor
+        uses: actions/cache@v4
+        with:
+          path: vendor/
+          key: ${{ runner.os }}-vendor-${{ hashFiles('scripts/setup.sh', 'patches/**') }}
+
+      # Cache per-platform cargo build artifacts.
+      - name: Cache build artifacts
+        uses: actions/cache@v4
+        with:
+          path: target/
+          key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}-release
+          restore-keys: ${{ runner.os }}-target-
+
+      - name: Install zip (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y zip
+
+      - name: Set up vendor
+        run: bash ./scripts/setup.sh
+        shell: bash
+
+      - name: Build and package
+        env:
+          VERSION: ${{ github.ref_type == 'tag' && github.ref_name || inputs.version || 'dev' }}
+        run: bash ./scripts/build.sh ${{ matrix.build_args }}
+        shell: bash
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ethertap-${{ matrix.os }}
+          path: ${{ matrix.artifact_pattern }}
+          if-no-files-found: error
+
+  # ── GitHub Release (tag builds only) ────────────────────────────────────────
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref_type == 'tag'
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: EtherTap ${{ github.ref_name }}
+          files: artifacts/**
+          draft: false
+          generate_release_notes: true

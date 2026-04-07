@@ -38,7 +38,7 @@ mod mock;
 
 use editor::EditorData;
 use network::{NetworkCommand, NetworkStatus, NetworkWorker, now_ms};
-use params::EtherTapParams;
+use params::{EtherTapParams, SyncMode};
 
 // ─── Settling constant ───────────────────────────────────────────────────────
 
@@ -68,7 +68,14 @@ pub struct EtherTap {
     /// Set by the UI button; swap()-cleared by the audio thread to trigger an
     /// immediate Hard Reset without relying on the unimplemented param setter.
     force_sync_trigger: Arc<AtomicBool>,
-    compatible_slots: Arc<Mutex<Vec<u8>>>,
+    /// Set by the Rate Sync "Force" button — fires an immediate rate-only sync.
+    force_rate_trigger: Arc<AtomicBool>,
+    compatible_slots:  Arc<Mutex<Vec<u8>>>,
+    occupied_slots:    Arc<Mutex<Vec<u8>>>,
+    all_slots_mode:    Arc<AtomicBool>,
+    scan_targets:      Arc<Mutex<Vec<network::DeviceInfo>>>,
+    /// Name and model of the currently connected device, from /info responses.
+    connected_device:  Arc<Mutex<(String, String)>>,
 
     // ── BPM settle state machine ──────────────────────────────────────────
     last_bpm: f64,
@@ -84,7 +91,12 @@ pub struct EtherTap {
     last_pos_beats: f64,
 
     // ── Force-sync rising-edge detection (for VST automation) ─────────────
-    prev_force_sync: bool,
+    prev_force_sync:       bool,
+    prev_connect_to_last:  bool,
+    prev_disconnect_param: bool,
+    prev_force_sync_rate:  bool,
+    prev_force_sync_phase: bool,
+    prev_force_sync_both:  bool,
 }
 
 impl Default for EtherTap {
@@ -97,10 +109,15 @@ impl Default for EtherTap {
         let hardware_float = Arc::new(AtomicU32::new(0u32));
         let host_bpm = Arc::new(AtomicU32::new(0u32));
         let force_sync_trigger = Arc::new(AtomicBool::new(false));
+        let force_rate_trigger = Arc::new(AtomicBool::new(false));
         let conn_status = Arc::new(AtomicBool::new(false));
         let tx_activity_ts = Arc::new(AtomicU64::new(0));
         let rx_activity_ts = Arc::new(AtomicU64::new(0));
         let compatible_slots = Arc::new(Mutex::new(Vec::new()));
+        let occupied_slots   = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let all_slots_mode   = Arc::new(AtomicBool::new(true));
+        let scan_targets     = Arc::new(Mutex::new(Vec::<network::DeviceInfo>::new()));
+        let connected_device = Arc::new(Mutex::new((String::new(), String::new())));
 
         let (cmd_tx, cmd_rx) = crossbeam_channel::bounded::<NetworkCommand>(64);
         let (status_tx, status_rx) = crossbeam_channel::bounded::<NetworkStatus>(64);
@@ -126,14 +143,24 @@ impl Default for EtherTap {
             hardware_float,
             host_bpm,
             force_sync_trigger,
+            force_rate_trigger,
             compatible_slots,
+            occupied_slots,
+            all_slots_mode,
+            scan_targets,
+            connected_device,
             last_bpm: 0.0,
             bpm_change_ts: 0,
             bpm_is_settling: false,
             hr_pending: false,
             hr_target_beat: 0.0,
             last_pos_beats: 0.0,
-            prev_force_sync: false,
+            prev_force_sync:       false,
+            prev_connect_to_last:  false,
+            prev_disconnect_param: false,
+            prev_force_sync_rate:  false,
+            prev_force_sync_phase: false,
+            prev_force_sync_both:  false,
         }
     }
 }
@@ -148,8 +175,8 @@ impl Plugin for EtherTap {
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
     const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[AudioIOLayout {
-        main_input_channels: NonZeroU32::new(2),
-        main_output_channels: NonZeroU32::new(2),
+        main_input_channels: None,
+        main_output_channels: None,
         ..AudioIOLayout::const_default()
     }];
 
@@ -166,10 +193,19 @@ impl Plugin for EtherTap {
 
     fn initialize(
         &mut self,
-        _layout: &AudioIOLayout,
+        layout: &AudioIOLayout,
         _config: &BufferConfig,
         _context: &mut impl InitContext<Self>,
     ) -> bool {
+        #[cfg(feature = "standalone")]
+        {
+            let ins = layout.main_input_channels.map_or(0, |n| n.get());
+            let outs = layout.main_output_channels.map_or(0, |n| n.get());
+            nih_log!("EtherTap standalone — audio I/O: {ins} in / {outs} out");
+        }
+        #[cfg(not(feature = "standalone"))]
+        let _ = layout;
+
         let ip = self.params.target_ip.lock().clone();
         let port = *self.params.target_port.lock();
         let _ = self.cmd_tx.try_send(NetworkCommand::UpdateTarget { ip, port });
@@ -199,8 +235,15 @@ impl Plugin for EtherTap {
                     // the status message is used here only for the rx LED.
                     let _ = f; // value already in hardware_float via Arc<AtomicU32>
                 }
-                NetworkStatus::CompatibleSlots(slots) => {
-                    *self.compatible_slots.lock() = slots;
+                NetworkStatus::SlotScan { compatible, occupied } => {
+                    *self.compatible_slots.lock() = compatible;
+                    *self.occupied_slots.lock()   = occupied;
+                }
+                NetworkStatus::TargetsFound(targets) => {
+                    *self.scan_targets.lock() = targets;
+                }
+                NetworkStatus::DeviceIdentified { name, model } => {
+                    *self.connected_device.lock() = (name, model);
                 }
             }
         }
@@ -214,7 +257,7 @@ impl Plugin for EtherTap {
         // ── 3. Publish host BPM for the editor ───────────────────────────
         self.host_bpm.store((bpm as f32).to_bits(), Ordering::Relaxed);
 
-        // ── 4. BPM settle detection ("Sync on Change") ───────────────────
+        // ── 4. BPM settle detection ("On Change" modes) ──────────────────
         if self.last_bpm > 0.0 && (bpm - self.last_bpm).abs() > 0.01 {
             // BPM just changed — restart settle timer.
             self.bpm_change_ts = now_ms();
@@ -223,13 +266,15 @@ impl Plugin for EtherTap {
             let elapsed = now_ms().saturating_sub(self.bpm_change_ts);
             if elapsed >= SETTLE_MS {
                 self.bpm_is_settling = false;
-                if self.params.sync_on_change.value() && playing {
-                    if self.params.hard_reset_auto.value() {
+                if playing {
+                    let phase_mode = self.params.phase_sync_mode.value();
+                    let rate_mode = self.params.rate_sync_mode.value();
+                    if phase_mode == SyncMode::OnChange {
                         // Quantise the Hard Reset to the next beat boundary.
                         let next = pos_beats.ceil();
                         self.hr_target_beat = if next > pos_beats { next } else { next + 1.0 };
                         self.hr_pending = true;
-                    } else {
+                    } else if rate_mode == SyncMode::OnChange {
                         self.dispatch(bpm, false);
                     }
                 }
@@ -243,9 +288,13 @@ impl Plugin for EtherTap {
         }
 
         // ── 6. Continuous sync (fires on every beat crossing) ────────────
-        if self.params.sync_continuous.value() && playing {
-            if pos_beats.floor() > self.last_pos_beats.floor() {
-                self.dispatch(bpm, false); // continuous = plain sync, no Hard Reset
+        if playing && pos_beats.floor() > self.last_pos_beats.floor() {
+            let phase_mode = self.params.phase_sync_mode.value();
+            let rate_mode = self.params.rate_sync_mode.value();
+            if phase_mode == SyncMode::Continuous {
+                self.dispatch(bpm, true); // continuous phase reset
+            } else if rate_mode == SyncMode::Continuous {
+                self.dispatch(bpm, false); // continuous rate sync only
             }
         }
         if playing {
@@ -254,14 +303,48 @@ impl Plugin for EtherTap {
             self.last_pos_beats = -1.0; // reset so the first beat after play fires
         }
 
-        // ── 7. Force Sync — dual trigger (param rising edge + UI atomic) ──
-        let force_param = self.params.force_sync.value();
+        // ── 7. Force triggers — param automation edges + UI atomics ─────────
+
+        // Connection control via automation.
+        let connect_param = self.params.connect_to_last.value();
+        if connect_param && !self.prev_connect_to_last {
+            let ip   = self.params.target_ip.lock().clone();
+            let port = *self.params.target_port.lock();
+            let _ = self.cmd_tx.try_send(NetworkCommand::UpdateTarget { ip, port });
+            let _ = self.cmd_tx.try_send(NetworkCommand::AuditSlots);
+            self.all_slots_mode.store(true, Ordering::Relaxed);
+        }
+        self.prev_connect_to_last = connect_param;
+
+        let disconnect_param = self.params.disconnect.value();
+        if disconnect_param && !self.prev_disconnect_param {
+            let _ = self.cmd_tx.try_send(NetworkCommand::Disconnect);
+        }
+        self.prev_disconnect_param = disconnect_param;
+
+        // Rate-only sync: new automation param + legacy UI atomic.
+        let force_rate_param = self.params.force_sync_rate.value();
+        let force_rate_trigger = self.force_rate_trigger.swap(false, Ordering::AcqRel);
+        if (force_rate_param && !self.prev_force_sync_rate) || force_rate_trigger {
+            self.dispatch(bpm, false);
+        }
+        self.prev_force_sync_rate = force_rate_param;
+
+        // Phase (hard reset) sync: new automation params + legacy params + UI atomic.
+        let force_phase_param = self.params.force_sync_phase.value();
+        let force_both_param  = self.params.force_sync_both.value();
+        let force_legacy_param = self.params.force_sync.value();
         let force_trigger = self.force_sync_trigger.swap(false, Ordering::AcqRel);
-        if (force_param && !self.prev_force_sync) || force_trigger {
-            // ForceSync is always immediate (no beat quantisation) + Hard Reset.
+        if (force_phase_param && !self.prev_force_sync_phase)
+            || (force_both_param  && !self.prev_force_sync_both)
+            || (force_legacy_param && !self.prev_force_sync)
+            || force_trigger
+        {
             self.dispatch(bpm, true);
         }
-        self.prev_force_sync = force_param;
+        self.prev_force_sync_phase = force_phase_param;
+        self.prev_force_sync_both  = force_both_param;
+        self.prev_force_sync       = force_legacy_param;
 
         self.last_bpm = bpm;
 
@@ -277,7 +360,12 @@ impl Plugin for EtherTap {
             hardware_float: self.hardware_float.clone(),
             host_bpm: self.host_bpm.clone(),
             force_sync_trigger: self.force_sync_trigger.clone(),
-            compatible_slots: self.compatible_slots.clone(),
+            force_rate_trigger: self.force_rate_trigger.clone(),
+            compatible_slots:  self.compatible_slots.clone(),
+            occupied_slots:    self.occupied_slots.clone(),
+            all_slots_mode:    self.all_slots_mode.clone(),
+            scan_targets:      self.scan_targets.clone(),
+            connected_device:  self.connected_device.clone(),
             cmd_tx: self.cmd_tx.clone(),
         });
         editor::create(data)
@@ -288,12 +376,32 @@ impl Plugin for EtherTap {
 
 impl EtherTap {
     /// Dispatch a sync command.  `hard_reset = true` → `HardReset`, else `SyncNow`.
+    ///
+    /// When "all slots" mode is active every compatible slot receives the
+    /// command; falls back to the single selected slot when none are known yet.
     fn dispatch(&self, bpm: f64, hard_reset: bool) {
-        let slot = *self.params.fx_slot.lock();
-        if hard_reset {
-            let _ = self.cmd_tx.try_send(NetworkCommand::HardReset { slot, bpm });
+        let slots: Vec<u8> = if self.all_slots_mode.load(Ordering::Relaxed) {
+            let cs = self.compatible_slots.lock();
+            if cs.is_empty() {
+                vec![*self.params.fx_slot.lock()]
+            } else {
+                cs.clone()
+            }
         } else {
-            let _ = self.cmd_tx.try_send(NetworkCommand::SyncNow { slot, bpm });
+            vec![*self.params.fx_slot.lock()]
+        };
+
+        if hard_reset {
+            // Pack into a fixed-size array — no heap allocation on the audio thread.
+            let mut arr = [None::<u8>; 8];
+            for (dst, &src) in arr.iter_mut().zip(slots.iter()) {
+                *dst = Some(src);
+            }
+            let _ = self.cmd_tx.try_send(NetworkCommand::HardResetBatch { slots: arr, bpm });
+        } else {
+            for slot in slots {
+                let _ = self.cmd_tx.try_send(NetworkCommand::SyncNow { slot, bpm });
+            }
         }
     }
 }

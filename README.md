@@ -1,138 +1,131 @@
 # EtherTap
 
-A high-performance **VST3 OSC control bridge** built in Rust.  
-EtherTap synchronises hardware FX engines (Behringer X32 / Midas M32) with a DAW's musical timeline via OSC over UDP, and provides real-time telemetry so you always know whether the hardware is in sync.
+**VST3 OSC bridge for Behringer X32 / Midas M32.**  
+Keeps your mixer's delay time locked to the DAW BPM — automatically or on demand.
+
+![EtherTap UI](assets/preview.png)
 
 ---
 
-## Quick Start
+## What it does
 
-```bash
-# Build & bundle the VST3 (macOS or Windows)
-cargo xtask bundle ethertap --release
+EtherTap runs as a zero-audio VST3 plugin and talks to the mixer over UDP/OSC.  
+When the host BPM changes, or on a manual trigger, it calculates the correct delay value and sends it to one or more Stereo Delay FX slots on the X32/M32.
 
-# Run unit tests (BPM math + OSC encoding)
-cargo test --lib
+**Rate sync** — updates the delay parameter derived from the current BPM.  
+**Phase sync** — performs a hard reset: mute → set → unmute, removing residual echoes.
 
-# Lint
-cargo clippy --all-targets -- -D warnings
+Both can fire on BPM change, on every beat, or only when you press the button.
+
+---
+
+## Install
+
+Download the latest release from the [Releases](../../releases) page and copy the `.vst3`
+bundle to your plugin folder:
+
+| Platform | Folder |
+|---|---|
+| macOS | `~/Library/Audio/Plug-Ins/VST3/` |
+| Windows | `C:\Program Files\Common Files\VST3\` |
+| Linux | `~/.vst3/` |
+
+---
+
+## Connecting
+
+1. Load the plugin in any track in your DAW.
+2. Enter the mixer's IP address and port (`10023` is the X32/M32 default).
+3. Press **Connect** — the status indicator turns green once the device responds.
+4. Select which FX slot holds a Stereo Delay, or press **Query** to auto-detect.
+
+EtherTap sends a heartbeat every 5 seconds. If the mixer stops responding it shows
+a disconnected state and retries automatically every 2 seconds until it comes back.
+Pressing **Disconnect** stops all retries.
+
+---
+
+## Sync modes
+
+| Mode | Rate Sync | Phase Sync |
+|---|---|---|
+| **Manual** | Force button only | Force button only |
+| **On Change** | After BPM settles for 500 ms | Hard reset at next beat boundary |
+| **Continuous** | Every quarter-note beat | Hard reset every beat |
+
+**Hard reset sequence:** mute → 75 ms → update delay → 75 ms → unmute.  
+This re-anchors the hardware delay buffer and eliminates phase drift.
+
+---
+
+## Building from source
+
+**Prerequisites:** Rust (stable), Git, `patch`
+
+```sh
+git clone <repo-url>
+cd ethertap
+./scripts/setup.sh                             # vendor baseview, apply patches
+cargo run -p xtask -- bundle ethertap --release
+# → target/bundled/ethertap.vst3
 ```
 
-The `.vst3` bundle is written to `target/bundled/`.
+**macOS universal binary (Intel + Apple Silicon):**
+
+```sh
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+./scripts/build.sh --universal
+# → dist/ethertap-<version>-macos-universal.zip
+```
 
 ---
 
-## BPM ↔ Float Conversion
+## BPM ↔ delay float
 
-The X32/M32 stores delay time as a **normalised float** in the range `[0.0, 1.0]`,  
-where `1.0` corresponds to the maximum delay ceiling of **3 000 ms** (from `X32Tap.c`).
+The X32/M32 stores delay time as a normalised float `[0, 1]` where `1.0 = 3000 ms`.
 
-### Host BPM → X32 Float
-
-$$\text{float} = \frac{60\,000}{BPM \times 3\,000} = \frac{20}{BPM}$$
-
-| BPM  | Beat (ms) | Float  |
-|------|-----------|--------|
-|  20  | 3 000     | 1.0000 |
-|  60  | 1 000     | 0.3333 |
-| 120  |   500     | 0.1667 |
-| 180  |   333     | 0.1111 |
-
-Values outside `[0, 1]` are clamped.  Source: [`src/osc.rs`](src/osc.rs) `bpm_to_float()`.
-
-### X32 Float → BPM (Telemetry Read-Back)
-
-$$BPM = \frac{20}{\text{float}}$$
-
-Source: [`src/osc.rs`](src/osc.rs) `float_to_bpm()`.
+```
+delay_float = 20 / bpm     (e.g. 120 BPM → 0.1667)
+bpm         = 20 / delay_float
+```
 
 ---
 
-## OSC Address Map
+## OSC reference
 
-| Address | Direction | Type | Description |
+| Address | Dir | Type | Description |
 |---|---|---|---|
-| `/info` | TX (query) | — | Heartbeat probe; console replies with metadata |
-| `/fx/{n}/type` | TX (query) | — | Request effect type for slot `n` (1–8) |
-| `/fx/{n}/par/02` | TX (set) | `float` | Write normalised delay time |
-| `/fx/{n}/par/02` | TX (query) | — | Request current delay time (no args) |
-| `/fxrtn/{n}/mix/on` | TX (set) | `int` | Mute (`0`) / unmute (`1`) FX return |
-
-**Effect type IDs** (response to `/fx/{n}/type`):
-
-| ID | Effect |
-|---|---|
-| 10 | Stereo Delay (`DLY`) — the only type EtherTap syncs |
-
----
-
-## Sync Modes
-
-| Mode | Behaviour |
-|---|---|
-| **Sync on Change** | Fires OSC once the host BPM has been stable for ≥ 500 ms after a change |
-| **Sync Continuous** | Fires a plain sync on every quarter-note beat crossing while the transport is rolling |
-
-### Hard Reset Modes
-
-The Hard Reset sequence performs: **Mute FX return → 75 ms dwell → update delay time → 75 ms dwell → Unmute**.  
-This eliminates rhythmic phase drift by forcing the hardware delay buffer to re-anchor.
-
-| Mode | Hard Reset triggers |
-|---|---|
-| **Manual Only** | Only via the ⚡ FORCE SYNC button |
-| **Auto + Manual** | Via FORCE SYNC **and** every settled BPM change (quantised to the next beat boundary) |
-
-### Force Sync
-
-The **⚡ FORCE SYNC** button is an **immediate**, non-quantised trigger that always executes a Hard Reset regardless of mode.  It is also exposed as a VST3 automation parameter (`force_sync`) for DAW control surfaces.
-
----
-
-## Hardware Telemetry
-
-Every **3 seconds** the background worker queries `/fx/{slot}/par/02` from the console and reports back:
-
-- **Host float** — calculated from the current DAW BPM
-- **Mixer float** — the actual value stored in the hardware
-- **Sync LED** — green (`● MATCH`) if `|host − mixer| < 0.001`, red (`● DRIFT`) otherwise
-
-This is a **read-only, observer-only** path.  EtherTap never automatically retries a failed sync.
+| `/info` | TX | — | Heartbeat probe |
+| `/fx/{n}/type` | TX | — | Query effect type (DLY = 10) |
+| `/fx/{n}/par/02` | TX | `float` | Set / query delay time |
+| `/fxrtn/{n}/mix/on` | TX | `int` | Mute (0) / unmute (1) FX return |
 
 ---
 
 ## Architecture
 
 ```
-┌──────────────────────��──────────────────────────────────┐
-│  Host / DAW                                             │
-│  ┌────────────────┐     ┌───────────────────────────┐  │
-│  │  Audio Thread  │     │  GUI Thread (Iced editor)  │  │
-│  │  process()     │     │  Telemetry + controls      │  │
-│  └───────┬────────┘     └──────────────┬────────────┘  │
-└──────────┼──────────────────────────   │  ─────────────┘
-           │ crossbeam_channel (bounded, lock-free) │
-           └──────────────┬─────────────────────────┘
-                          ▼
-              ┌───────────────────────┐
-              │   NetworkWorker       │
-              │   UDP  →  X32 / M32   │
-              └───────────────────────┘
+┌────────────────────────────────────────────────────────┐
+│  Host / DAW                                            │
+│  ┌─────────────────┐    ┌──────────────────────────┐  │
+│  │  Audio Thread   │    │  GUI Thread (Iced editor) │  │
+│  │  process()      │    │  Telemetry + controls     │  │
+│  └────────┬────────┘    └──────────────┬────────────┘  │
+└───────────┼─────────────────────────── │ ──────────────┘
+            │ crossbeam_channel (bounded, lock-free)  │
+            └──────────────┬─────────────────────────┘
+                           ▼
+               ┌───────────────────────┐
+               │   NetworkWorker       │
+               │   UDP  →  X32 / M32   │
+               └───────────────────────┘
 ```
 
-**Real-time safety contract:** `process()` never allocates, blocks, or locks a contended mutex.  
-All network I/O is delegated via bounded `crossbeam-channel` queues.
+`process()` never allocates, blocks, or locks a contended mutex.  
+All network I/O is delegated via bounded lock-free channels.
 
 ---
 
-## Project Structure
+## License
 
-| Path | Purpose |
-|---|---|
-| `src/osc.rs` | BPM math, OSC packet builders, `bpm_to_float` / `float_to_bpm` |
-| `src/network.rs` | `NetworkWorker` — UDP I/O, heartbeat, telemetry poll |
-| `src/params.rs` | VST3 parameters and persistence |
-| `src/lib.rs` | `EtherTap` plugin — sync state machine, transport sampling |
-| `src/editor.rs` | Iced dark-theme editor (nih-plug-iced stateful-widget API) |
-| `xtask/` | `cargo xtask bundle` — generates platform-correct `.vst3` bundles |
-| `.zed/tasks.json` | Zed editor task shortcuts (Check, Test, Export) |
+[MIT](LICENSE)

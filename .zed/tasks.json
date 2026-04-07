@@ -3,66 +3,54 @@
     "label": "Check / Lint",
     "command": "cargo",
     "args": ["clippy", "--all-targets", "--", "-D", "warnings"],
-    "cwd": "$ZED_WORKTREE_ROOT"
+    "cwd": "$ZED_WORKTREE_ROOT",
   },
   {
     "label": "Format",
     "command": "cargo",
     "args": ["fmt", "--all"],
-    "cwd": "$ZED_WORKTREE_ROOT"
-  },
-  {
-    "label": "Test: BPM Scaling",
-    "command": "cargo",
-    "args": ["test", "--lib", "osc::tests", "--", "--nocapture"],
-    "cwd": "$ZED_WORKTREE_ROOT"
-  },
-  {
-    "label": "Test: All",
-    "command": "cargo",
-    "args": ["test", "--all"],
-    "cwd": "$ZED_WORKTREE_ROOT"
+    "cwd": "$ZED_WORKTREE_ROOT",
   },
   {
     "label": "Build (debug)",
     "command": "cargo",
     "args": ["build"],
-    "cwd": "$ZED_WORKTREE_ROOT"
+    "cwd": "$ZED_WORKTREE_ROOT",
   },
   {
-    "label": "Export: Bundle VST3 (release)",
+    "label": "Test",
     "command": "cargo",
-    "args": ["xtask", "bundle", "ethertap", "--release"],
-    "cwd": "$ZED_WORKTREE_ROOT"
+    "args": ["test", "--all"],
+    "cwd": "$ZED_WORKTREE_ROOT",
   },
   {
-    "label": "Run: GUI test (standalone)",
+    "label": "Run: Mock mixer",
+    "command": "python3",
+    "args": ["scripts/mock_mixer.py"],
+    "cwd": "$ZED_WORKTREE_ROOT",
+  },
+  {
+    "label": "Run: GUI test",
+    "command": "bash",
+    "args": ["scripts/gui_test.sh"],
+    "cwd": "$ZED_WORKTREE_ROOT",
+  },
+  {
+    "label": "Export: VST3 (release)",
     "command": "cargo",
-    "args": ["run", "--bin", "ethertap-gui", "--features", "standalone"],
-    "cwd": "$ZED_WORKTREE_ROOT"
+    "args": ["run", "--package", "xtask", "--", "bundle", "ethertap", "--release"],
+    "cwd": "$ZED_WORKTREE_ROOT",
   },
   {
-    "label": "Setup: Populate vendor/",
+    "label": "Setup: vendor/",
     "command": "bash",
     "args": ["scripts/setup.sh"],
-    "cwd": "$ZED_WORKTREE_ROOT"
+    "cwd": "$ZED_WORKTREE_ROOT",
   },
   {
-    "label": "Setup: Check patches (dry-run)",
-    "command": "bash",
-    "args": ["scripts/setup.sh", "--check"],
-    "cwd": "$ZED_WORKTREE_ROOT"
-  },
-  {
-    "label": "Clean: vendor/",
-    "command": "bash",
-    "args": ["scripts/clean.sh"],
-    "cwd": "$ZED_WORKTREE_ROOT"
-  },
-  {
-    "label": "Clean: vendor/ + target/",
+    "label": "Clean",
     "command": "bash",
     "args": ["scripts/clean.sh", "--all"],
-    "cwd": "$ZED_WORKTREE_ROOT"
-  }
+    "cwd": "$ZED_WORKTREE_ROOT",
+  },
 ]

@@ -43,14 +43,15 @@ fn run() {
             return;
         }
     };
-    socket.set_read_timeout(Some(Duration::from_millis(200))).ok();
+    socket
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .ok();
     eprintln!("[mock-x32] ready on 127.0.0.1:10023  (mock BPM = {MOCK_BPM})");
 
     let mut buf = [0u8; 1024];
     loop {
-        match socket.recv_from(&mut buf) {
-            Ok((len, from)) => respond(&socket, &buf[..len], from),
-            Err(_) => {} // timeout — just loop
+        if let Ok((len, from)) = socket.recv_from(&mut buf) {
+            respond(&socket, &buf[..len], from);
         }
     }
 }
@@ -72,7 +73,10 @@ fn respond(socket: &UdpSocket, data: &[u8], from: std::net::SocketAddr) {
         return; // SET commands and anything else are ignored
     };
 
-    let reply = OscPacket::Message(OscMessage { addr: msg.addr, args });
+    let reply = OscPacket::Message(OscMessage {
+        addr: msg.addr,
+        args,
+    });
     if let Ok(bytes) = encoder::encode(&reply) {
         socket.send_to(&bytes, from).ok();
     }

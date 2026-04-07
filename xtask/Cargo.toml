@@ -8,4 +8,6 @@ name = "xtask"
 path = "src/main.rs"
 
 [dependencies]
+# This provides the Result type used in your main.rs
+anyhow = "1.0"
 nih_plug_xtask = { git = "https://github.com/robbert-vdh/nih-plug.git" }

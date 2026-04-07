@@ -27,6 +27,8 @@ use crate::osc;
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+/// Retry interval used when the connection is lost (faster than normal heartbeat).
+const RECONNECT_INTERVAL: Duration = Duration::from_secs(2);
 const TELEMETRY_INTERVAL: Duration = Duration::from_secs(3);
 /// Per-recv timeout used for heartbeat / telemetry reads.
 const RECV_TIMEOUT: Duration = Duration::from_millis(250);
@@ -35,6 +37,32 @@ const HARD_RESET_DWELL: Duration = Duration::from_millis(75);
 /// Worker loop sleep when idle.
 const LOOP_SLEEP: Duration = Duration::from_millis(10);
 
+// ─── Device info ─────────────────────────────────────────────────────────────
+
+/// A device that responded to a scan probe, with identifying metadata.
+#[derive(Debug, Clone)]
+pub struct DeviceInfo {
+    pub ip:    String,
+    pub port:  u16,
+    /// User-set name configured on the console (e.g. "Studio A Desk").
+    pub name:  String,
+    /// Hardware model string returned by the console (e.g. "X32", "M32").
+    pub model: String,
+}
+
+impl DeviceInfo {
+    /// Human-readable label: "name (model)", "name", "model", or "ip:port".
+    pub fn display_name(&self) -> String {
+        match (self.name.is_empty(), self.model.is_empty()) {
+            (false, false) if self.name != self.model =>
+                format!("{} ({})", self.name, self.model),
+            (false, _) => self.name.clone(),
+            (_, false)  => self.model.clone(),
+            _           => format!("{}:{}", self.ip, self.port),
+        }
+    }
+}
+
 // ─── Command / Status types ──────────────────────────────────────────────────
 
 /// Commands from the audio thread (or editor) to the network worker.
@@ -42,12 +70,17 @@ const LOOP_SLEEP: Duration = Duration::from_millis(10);
 pub enum NetworkCommand {
     /// Bind a new UDP socket and connect to the given target.
     UpdateTarget { ip: String, port: u16 },
+    /// Drop the socket and mark as disconnected.
+    Disconnect,
     /// Dispatch the BPM-derived delay time to the given FX slot immediately.
     SyncNow { slot: u8, bpm: f64 },
-    /// Mute → update BPM → unmute to realign hardware phase.
-    HardReset { slot: u8, bpm: f64 },
+    /// Batched hard reset: mute all slots → wait → set all → wait → unmute all.
+    /// Uses a fixed-size array to avoid heap allocation on the audio thread.
+    HardResetBatch { slots: [Option<u8>; 8], bpm: f64 },
     /// Query all 8 FX slots and report which host a Stereo Delay (type 10).
     AuditSlots,
+    /// Broadcast an /info probe and collect responding devices.
+    ScanTargets,
 }
 
 /// Status events produced by the network worker.
@@ -61,8 +94,13 @@ pub enum NetworkStatus {
     RxPulse,
     /// Polled delay-time value returned by the mixer.
     DelayReadback(f32),
-    /// FX slot indices (1-based) confirmed to host a Stereo Delay after audit.
-    CompatibleSlots(Vec<u8>),
+    /// Scan results: which slots hold a compatible Stereo Delay (DLY) and
+    /// which hold any other effect (occupied but incompatible).
+    SlotScan { compatible: Vec<u8>, occupied: Vec<u8> },
+    /// Devices that responded to the broadcast /info probe.
+    TargetsFound(Vec<DeviceInfo>),
+    /// Name/model parsed from an /info heartbeat response.
+    DeviceIdentified { name: String, model: String },
 }
 
 // ─── Worker ──────────────────────────────────────────────────────────────────
@@ -78,6 +116,11 @@ pub struct NetworkWorker {
     fx_slot: Arc<Mutex<u8>>,
     /// Shared output for the last polled hardware delay float (f32 bits).
     hardware_float_out: Arc<AtomicU32>,
+    /// Set by an explicit `Disconnect` command; prevents automatic reconnect.
+    /// Cleared when a new `UpdateTarget` arrives.
+    user_disconnected: bool,
+    /// Last known connection state — used to pick the heartbeat vs reconnect interval.
+    connected: bool,
 }
 
 impl NetworkWorker {
@@ -97,6 +140,8 @@ impl NetworkWorker {
             telemetry_timer: now,
             fx_slot,
             hardware_float_out,
+            user_disconnected: false,
+            connected: false,
         }
     }
 
@@ -112,14 +157,24 @@ impl NetworkWorker {
                 }
             }
 
-            // Periodic heartbeat.
-            if self.last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
-                self.send_heartbeat();
-                self.last_heartbeat = Instant::now();
+            // Periodic heartbeat / reconnect.
+            // Skipped entirely when the user explicitly disconnected.
+            if !self.user_disconnected && self.target.is_some() {
+                let interval = if self.connected { HEARTBEAT_INTERVAL } else { RECONNECT_INTERVAL };
+                if self.last_heartbeat.elapsed() >= interval {
+                    // Socket may have been dropped after a send/recv error — rebind before retrying.
+                    if self.socket.is_none() {
+                        self.rebind();
+                    }
+                    self.send_heartbeat();
+                    // Advance by exactly one interval so the cadence stays
+                    // constant regardless of how long the heartbeat took.
+                    self.last_heartbeat = self.last_heartbeat + interval;
+                }
             }
 
-            // Periodic hardware telemetry poll.
-            if self.telemetry_timer.elapsed() >= TELEMETRY_INTERVAL {
+            // Periodic hardware telemetry poll — only while connected.
+            if self.connected && self.telemetry_timer.elapsed() >= TELEMETRY_INTERVAL {
                 self.poll_delay();
                 self.telemetry_timer = Instant::now();
             }
@@ -135,11 +190,24 @@ impl NetworkWorker {
             NetworkCommand::UpdateTarget { ip, port } => {
                 match format!("{ip}:{port}").parse::<SocketAddr>() {
                     Ok(addr) => {
+                        self.user_disconnected = false;
                         self.target = Some(addr);
                         self.rebind();
+                        // Record the reference point *before* the blocking heartbeat
+                        // call so the next periodic heartbeat uses a clean baseline.
+                        self.last_heartbeat = Instant::now();
+                        self.send_heartbeat();
                     }
                     Err(_) => eprintln!("[EtherTap] invalid target: {ip}:{port}"),
                 }
+            }
+
+            NetworkCommand::Disconnect => {
+                self.socket = None;
+                self.target = None;
+                self.connected = false;
+                self.user_disconnected = true;
+                let _ = self.status_tx.try_send(NetworkStatus::Disconnected);
             }
 
             NetworkCommand::SyncNow { slot, bpm } => {
@@ -148,23 +216,30 @@ impl NetworkWorker {
                 self.pulse_tx();
             }
 
-            NetworkCommand::HardReset { slot, bpm } => {
-                // 1. Mute FX return.
-                self.send(&osc::set_fxrtn_mute(slot, true));
+            NetworkCommand::HardResetBatch { slots, bpm } => {
+                let value = osc::bpm_to_float(bpm);
+                // 1. Mute all slots simultaneously.
+                for slot in slots.iter().filter_map(|s| *s) {
+                    self.send(&osc::set_fxrtn_mute(slot, true));
+                }
                 self.pulse_tx();
                 std::thread::sleep(HARD_RESET_DWELL);
 
-                // 2. Update delay time.
-                let value = osc::bpm_to_float(bpm);
-                self.send(&osc::set_fx_delay(slot, value));
+                // 2. Update delay time on all slots.
+                for slot in slots.iter().filter_map(|s| *s) {
+                    self.send(&osc::set_fx_delay(slot, value));
+                }
                 std::thread::sleep(HARD_RESET_DWELL);
 
-                // 3. Unmute.
-                self.send(&osc::set_fxrtn_mute(slot, false));
+                // 3. Unmute all slots simultaneously.
+                for slot in slots.iter().filter_map(|s| *s) {
+                    self.send(&osc::set_fxrtn_mute(slot, false));
+                }
                 self.pulse_tx();
             }
 
             NetworkCommand::AuditSlots => self.audit_slots(),
+            NetworkCommand::ScanTargets => self.scan_targets(),
         }
     }
 
@@ -184,41 +259,58 @@ impl NetworkWorker {
         }
         self.pulse_tx();
 
-        // Short receive window for the response.
-        let _ = sock.set_read_timeout(Some(RECV_TIMEOUT));
         let mut buf = [0u8; 256];
         if let Ok((len, _)) = sock.recv_from(&mut buf) {
             if let Some(value) = parse_fx_delay_response(&buf[..len]) {
-                self.hardware_float_out.store(value.to_bits(), Ordering::Relaxed);
+                self.hardware_float_out
+                    .store(value.to_bits(), Ordering::Relaxed);
                 let _ = self.status_tx.try_send(NetworkStatus::DelayReadback(value));
                 self.pulse_rx();
             }
         }
-        // Restore normal timeout.
-        let _ = sock.set_read_timeout(Some(HEARTBEAT_INTERVAL));
     }
 
     // ── Heartbeat ────────────────────────────────────────────────────────
 
-    fn send_heartbeat(&self) {
-        self.send(&osc::heartbeat());
+    fn send_heartbeat(&mut self) {
+        let Some(target) = self.target else { return };
 
-        let Some(sock) = &self.socket else { return };
+        // Send the /info probe.  Use .map() so the borrow on self.socket is
+        // released before we need to mutate self.connected below.
+        let sent = self.socket.as_ref()
+            .map(|s| s.send_to(&osc::heartbeat(), target).is_ok())
+            .unwrap_or(false);
+
+        if !sent {
+            self.connected = false;
+            let _ = self.status_tx.try_send(NetworkStatus::Disconnected);
+            return;
+        }
+        self.pulse_tx();
+
+        // Wait briefly for the response.
         let mut buf = [0u8; 512];
-        // Short window — we don't want to stall the heartbeat check.
-        let _ = sock.set_read_timeout(Some(RECV_TIMEOUT));
-        match sock.recv_from(&mut buf) {
-            Ok((len, _)) => {
-                if decoder::decode_udp(&buf[..len]).is_ok() {
-                    let _ = self.status_tx.try_send(NetworkStatus::Connected);
-                    self.pulse_rx();
+        let recv_len = self.socket.as_ref().and_then(|sock| {
+            let _ = sock.set_read_timeout(Some(RECV_TIMEOUT));
+            sock.recv_from(&mut buf).ok().map(|(len, _)| len)
+        });
+
+        match recv_len.filter(|&len| decoder::decode_udp(&buf[..len]).is_ok()) {
+            Some(len) => {
+                self.connected = true;
+                let _ = self.status_tx.try_send(NetworkStatus::Connected);
+                self.pulse_rx();
+                let (name, model) = parse_info_strings(&buf[..len]);
+                if !name.is_empty() || !model.is_empty() {
+                    let _ = self.status_tx.try_send(
+                        NetworkStatus::DeviceIdentified { name, model });
                 }
             }
-            Err(_) => {
+            None => {
+                self.connected = false;
                 let _ = self.status_tx.try_send(NetworkStatus::Disconnected);
             }
         }
-        let _ = sock.set_read_timeout(Some(HEARTBEAT_INTERVAL));
     }
 
     // ── Slot audit ───────────────────────────────────────────────────────
@@ -230,6 +322,7 @@ impl NetworkWorker {
         let _ = sock.set_read_timeout(Some(RECV_TIMEOUT));
 
         let mut compatible = Vec::new();
+        let mut occupied   = Vec::new();
         for slot in 1u8..=8 {
             if sock.send_to(&osc::query_fx_type(slot), target).is_err() {
                 continue;
@@ -239,13 +332,59 @@ impl NetworkWorker {
                 if let Some(type_id) = parse_fx_type(&buf[..len]) {
                     if type_id == osc::DLY_TYPE_ID {
                         compatible.push(slot);
+                        occupied.push(slot);
+                    } else if type_id != 0 {
+                        occupied.push(slot); // occupied but not a DLY
                     }
+                    // type_id == 0  →  slot is empty, nothing pushed
                 }
             }
         }
+        let _ = self
+            .status_tx
+            .try_send(NetworkStatus::SlotScan { compatible, occupied });
+    }
 
-        let _ = sock.set_read_timeout(Some(HEARTBEAT_INTERVAL));
-        let _ = self.status_tx.try_send(NetworkStatus::CompatibleSlots(compatible));
+    // ── Network scan ─────────────────────────────────────────────────────
+
+    /// Broadcast `/info` and collect all responding device addresses.
+    fn scan_targets(&self) {
+        let Ok(sock) = UdpSocket::bind("0.0.0.0:0") else { return };
+        let _ = sock.set_broadcast(true);
+
+        let probe = osc::heartbeat();
+        // Broadcast to the network — may not loop back to localhost on macOS.
+        if let Ok(bcast) = "255.255.255.255:10023".parse::<SocketAddr>() {
+            let _ = sock.send_to(&probe, bcast);
+        }
+        // Also unicast to loopback so a local mock mixer is always reachable.
+        if let Ok(loopback) = "127.0.0.1:10023".parse::<SocketAddr>() {
+            let _ = sock.send_to(&probe, loopback);
+        }
+
+        let mut found: Vec<DeviceInfo> = Vec::new();
+        let mut buf = [0u8; 512];
+        let start = Instant::now();
+        let window = Duration::from_millis(600);
+
+        loop {
+            if start.elapsed() >= window { break; }
+            let remaining = window - start.elapsed();
+            let _ = sock.set_read_timeout(Some(remaining.min(RECV_TIMEOUT)));
+            match sock.recv_from(&mut buf) {
+                Ok((len, src)) => {
+                    if decoder::decode_udp(&buf[..len]).is_ok() {
+                        let ip = src.ip().to_string();
+                        if found.iter().any(|d| d.ip == ip) { continue; }
+                        let (name, model) = parse_info_strings(&buf[..len]);
+                        found.push(DeviceInfo { ip, port: 10023, name, model });
+                    }
+                }
+                Err(_) => {}  // timeout — keep looping until window expires
+            }
+        }
+
+        let _ = self.status_tx.try_send(NetworkStatus::TargetsFound(found));
     }
 
     // ── UDP helpers ───────────────────────────────────────────────────────
@@ -253,10 +392,8 @@ impl NetworkWorker {
     fn rebind(&mut self) {
         match UdpSocket::bind("0.0.0.0:0") {
             Ok(sock) => {
-                let _ = sock.set_read_timeout(Some(HEARTBEAT_INTERVAL));
+                let _ = sock.set_read_timeout(Some(RECV_TIMEOUT));
                 self.socket = Some(sock);
-                self.send_heartbeat();
-                self.last_heartbeat = Instant::now();
             }
             Err(e) => eprintln!("[EtherTap] failed to bind UDP socket: {e}"),
         }
@@ -290,6 +427,26 @@ fn parse_fx_type(data: &[u8]) -> Option<i32> {
             _ => None,
         },
         _ => None,
+    }
+}
+
+/// Parse the string arguments from an X32 `/info` response.
+///
+/// X32 format: `/info ,ssss  version  name  model  firmware`
+/// Returns `(name, model)` — empty strings if the args aren't present.
+fn parse_info_strings(data: &[u8]) -> (String, String) {
+    let Ok((_, OscPacket::Message(msg))) = decoder::decode_udp(data) else {
+        return (String::new(), String::new());
+    };
+    let strings: Vec<String> = msg.args.iter().filter_map(|a| {
+        if let OscType::String(s) = a { Some(s.clone()) } else { None }
+    }).collect();
+    match strings.len() {
+        0 => (String::new(), String::new()),
+        1 => (strings[0].clone(), String::new()),
+        2 => (strings[0].clone(), strings[1].clone()),
+        // 3+ args: X32 layout is version, name, model[, firmware]
+        _ => (strings[1].clone(), strings[2].clone()),
     }
 }
 
