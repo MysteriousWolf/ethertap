@@ -70,8 +70,12 @@ Examples:
 bpm_to_float(bpm) = (60_000 / bpm / 3_000).clamp(0, 1)   // = 20/bpm
 float_to_bpm(f)   = 20.0 / f
 
-/fx/{slot}/par/02  float  — set or query delay time
-/fx/{slot}/type    —      — query effect type (DLY = 10)
+/fx/{slot}/par/02  float  — delay time for DLY (type 10) — confirmed by X32Tap.c
+                            (mix=par/01, time=par/02)
+/fx/{slot}/par/01  float  — delay time for 3TAP/4TAP/MODD/D/RV/D/CR/D/FL (types 11/12/26/21/24/25)
+                            (time is the first effect param; confirmed fxparse1.c)
+/fx/{slot}/type    —      — query effect type (DLY=10, 3TAP=11, 4TAP=12, MODD=26,
+                            D/RV=21, D/CR=24, D/FL=25)
 /fxrtn/{slot}/mix/on  int — 0=mute, 1=unmute
 /info              —      — heartbeat / connectivity probe
 ```

@@ -1,8 +1,18 @@
 use std::sync::Arc;
 
 use nih_plug::prelude::*;
-use nih_plug_iced::IcedState;
+use nih_plug_iced::{Font, IcedState};
 use parking_lot::Mutex;
+
+// ─── UI font ─────────────────────────────────────────────────────────────────
+
+/// Monospace font used for the MIDI clock stats row (and any other
+/// fixed-width text).  Swap the `bytes` path to change the font family;
+/// the file must be a valid TTF/OTF at compile time.
+pub const MONO_FONT: Font = Font::External {
+    name:  "JetBrains Mono",
+    bytes: include_bytes!("../assets/JetBrainsMono-Regular.ttf"),
+};
 
 // ─── Sync mode enum ──────────────────────────────────────────────────────────
 
@@ -29,7 +39,8 @@ pub enum SyncMode {
 #[derive(Params)]
 pub struct EtherTapParams {
     // ── Editor window state ──────────────────────────────────────────────
-    #[persist = "editor-state"]
+    // Not persisted: window is fixed-size and non-resizable, so any saved
+    // size would only cause drift if we change the target dimensions.
     pub editor_state: Arc<IcedState>,
 
     // ── Network configuration (persisted, not automatable) ───────────────
@@ -41,6 +52,28 @@ pub struct EtherTapParams {
 
     #[persist = "fx-slot"]
     pub fx_slot: Arc<Mutex<u8>>,
+
+    /// Bitmask controlling which delay effect types are included when Auto mode
+    /// broadcasts to all compatible slots.
+    /// Bit→type: 0=DLY, 1=3TAP, 2=4TAP, 3=D/RV, 4=D/CR, 5=D/FL, 6=MODD.
+    /// Default 0x7F = all enabled.
+    #[persist = "fx-type-filter"]
+    pub fx_type_filter: Arc<Mutex<u32>>,
+
+    /// When true (default), the plugin emits MIDI clock on its MIDI output
+    /// while the host transport is playing.
+    #[persist = "midi-clock-enabled"]
+    pub midi_clock_enabled: Arc<Mutex<bool>>,
+
+    /// MIDI clock pulses per quarter note.
+    /// Options: 3, 4, 6, 8, 12, 16, 24, 32, 48, 96.  Default: 24 (MIDI spec).
+    #[persist = "midi-clock-ppq"]
+    pub midi_clock_ppq: Arc<Mutex<u8>>,
+
+    /// Physical MIDI output device to send clock to and bridge MIDI from.
+    /// `None` = virtual port only (legacy behaviour).
+    #[persist = "midi-out-device"]
+    pub midi_out_device: Arc<Mutex<Option<String>>>,
 
     // ── Rate Sync mode ───────────────────────────────────────────────────
     /// Controls when a plain delay-time (rate) sync fires.
@@ -94,7 +127,7 @@ pub struct EtherTapParams {
 impl Default for EtherTapParams {
     fn default() -> Self {
         Self {
-            editor_state: IcedState::from_size(360, 200),
+            editor_state: IcedState::from_size(360, 320),
             target_ip: Arc::new(Mutex::new(if cfg!(feature = "standalone") {
                 "127.0.0.1".to_owned()
             } else {
@@ -102,6 +135,10 @@ impl Default for EtherTapParams {
             })),
             target_port: Arc::new(Mutex::new(10023)),
             fx_slot: Arc::new(Mutex::new(1)),
+            fx_type_filter: Arc::new(Mutex::new(0x7F_u32)),
+            midi_clock_enabled: Arc::new(Mutex::new(true)),
+            midi_clock_ppq: Arc::new(Mutex::new(24_u8)),
+            midi_out_device: Arc::new(Mutex::new(None)),
             rate_sync_mode: EnumParam::new("Rate Sync Mode", SyncMode::OnChange),
             phase_sync_mode: EnumParam::new("Phase Sync Mode", SyncMode::Manual),
             connect_to_last: BoolParam::new("Connect to Last", false),

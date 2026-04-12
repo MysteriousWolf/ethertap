@@ -26,6 +26,8 @@ nih_plug_iced = { git = "https://github.com/robbert-vdh/nih-plug.git" }
 crossbeam-channel = "0.5"
 rosc = "0.10"
 parking_lot = "0.12"
+if-addrs = "0.10"
+midir = "0.9"
 
 # Pin both baseview revisions (579130e used by nih-plug standalone, 1d9806d5
 # used by iced_baseview) to the newer revision.  The older one crashes on ARM64
@@ -33,6 +35,12 @@ parking_lot = "0.12"
 # setContentView_.  The newer revision removes that callback entirely.
 [patch."https://github.com/RustAudio/baseview.git"]
 baseview = { path = "vendor/baseview" }
+
+# Vendor nih-plug to apply the ProcessContext::set_parameter patch.
+# Run ./scripts/setup.sh after cloning to populate vendor/nih-plug.
+[patch."https://github.com/robbert-vdh/nih-plug.git"]
+nih_plug      = { path = "vendor/nih-plug" }
+nih_plug_iced = { path = "vendor/nih-plug/nih_plug_iced" }
 
 [profile.release]
 lto = "thin"

@@ -1,0 +1,19 @@
+--- a/src/wrapper/vst3/context.rs
++++ b/src/wrapper/vst3/context.rs
+@@ -116,6 +116,16 @@
+     fn set_current_voice_capacity(&self, _capacity: u32) {
+         // This is only supported by CLAP
+     }
++
++    fn set_parameter<Pa: crate::params::Param>(&self, param: &Pa, value: Pa::Plain) {
++        let normalized = param.preview_normalized(value);
++        let param_ptr = param.as_ptr();
++        if let Some(&hash) = self.inner.param_ptr_to_hash.get(&param_ptr) {
++            // Updates internal atomic + schedules ParameterValueChanged on the
++            // GUI event loop so the host sees the new value via getParamNormalized.
++            self.inner.set_normalized_value_by_hash(hash, normalized, None);
++        }
++    }
+ }
+ 
+ impl<P: Vst3Plugin> GuiContext for WrapperGuiContext<P> {

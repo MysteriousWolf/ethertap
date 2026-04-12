@@ -11,18 +11,21 @@ use std::sync::{
     Arc,
 };
 
+use midir::MidiOutput;
+
 use nih_plug::prelude::{GuiContext, ParamSetter};
 use nih_plug_iced::{
-    button, container, create_iced_editor, executor, text_input,
-    widget::{Button, Column, Container, Row, Space, Text, TextInput},
-    Alignment, Background, Color, Command, Element, Font, IcedEditor, Length, WindowQueue,
+    button, container, create_iced_editor, executor, pick_list, text_input,
+    widget::{tooltip, Button, Column, Container, PickList, Row, Space, Text, TextInput},
+    Alignment, Background, Color, Command, Element, Font, IcedEditor,
+    Length, Subscription, WindowQueue, WindowSubs,
 };
 use parking_lot::Mutex;
 
 use crate::{
     network::{now_ms, DeviceInfo, NetworkCommand},
     osc,
-    params::{EtherTapParams, SyncMode},
+    params::{EtherTapParams, SyncMode, MONO_FONT},
 };
 
 // ─── Solar Icons Bold font ───────────────────────────────────────────────────
@@ -31,6 +34,15 @@ const SOLAR_BOLD: Font = Font::External {
     name: "Solar Icon Set Bold",
     bytes: include_bytes!("../assets/Solar-Icon-Set_Bold.ttf"),
 };
+
+// ─── Text helper ─────────────────────────────────────────────────────────────
+// Every text element in the UI uses MONO_FONT.  `t!(expr)` expands to
+// `t!(expr).font(MONO_FONT)` so callers can still chain `.size()`,
+// `.color()`, and `.font(SOLAR_BOLD)` (the last overrides for icon glyphs).
+
+macro_rules! t {
+    ($s:expr) => { Text::new($s).font(MONO_FONT) };
+}
 
 // TODO: add assets/Solaar.ttf and replace Font::Default with:
 // const LOGO_FONT: Font = Font::External { name: "Solaar", bytes: include_bytes!("../assets/Solaar.ttf") };
@@ -47,7 +59,13 @@ mod icon {
     pub const REFRESH: &str     = "\u{e910}"; // si-Refresh
     pub const BOLT: &str        = "\u{ea50}"; // si-Bolt — force / destructive
     pub const SCAN: &str        = "\u{ec8a}"; // si-Scanner
+    pub const CLOCK: &str       = "\u{ed1c}"; // si-Clock-Circle — MIDI clock
 }
+
+// ─── MIDI out device sentinel ─────────────────────────────────────────────────
+
+/// Displayed in the device PickList when no physical device is selected.
+const MIDI_OUT_NONE: &str = "\u{2014} None \u{2014}";
 
 // ─── Theme ───────────────────────────────────────────────────────────────────
 //
@@ -100,12 +118,12 @@ impl Theme {
             surface:         rgb( 32,  32,  42),
             surface_border:  rgb( 55,  55,  70),
             muted:           rgb(115, 115, 130),
-            selected_bg:     rgb( 28,  52,  90),
-            selected_border: rgb( 55, 105, 185),
-            selected_text:   rgb(100, 170, 255),
-            danger_bg:       rgb( 75,  35,  12),
-            danger_border:   rgb(175,  85,  25),
-            danger_text:     rgb(225, 175,  50),
+            selected_bg:     rgb( 45,  90, 170),
+            selected_border: rgb( 45,  90, 170),
+            selected_text:   rgb(200, 225, 255),
+            danger_bg:       rgb(130,  50,  15),
+            danger_border:   rgb(130,  50,  15),
+            danger_text:     rgb(255, 210,  90),
             text:            rgb(210, 210, 222),
             text_dim:        rgb( 95,  95, 110),
             ok:              rgb( 70, 190,  80),
@@ -125,7 +143,7 @@ const PULSE_MS: u64 = 100;
 // ─── Button stylesheet ───────────────────────────────────────────────────────
 
 #[derive(Clone, Copy)]
-enum BtnKind { Idle, Active, Force, Disabled }
+enum BtnKind { Idle, Active, Force, Disabled, Enabled, Error }
 
 struct EtherBtn(BtnKind);
 
@@ -141,34 +159,48 @@ impl button::StyleSheet for EtherBtn {
             },
             BtnKind::Active => button::Style {
                 background: Some(Background::Color(THEME.selected_bg)),
-                border_radius: 3.0, border_width: 1.0,
-                border_color: THEME.selected_border,
+                border_radius: 3.0, border_width: 0.0,
+                border_color: THEME.selected_bg,
                 text_color: THEME.selected_text,
                 ..Default::default()
             },
             BtnKind::Force => button::Style {
                 background: Some(Background::Color(THEME.danger_bg)),
-                border_radius: 3.0, border_width: 1.0,
-                border_color: THEME.danger_border,
+                border_radius: 3.0, border_width: 0.0,
+                border_color: THEME.danger_bg,
                 text_color: THEME.danger_text,
                 ..Default::default()
             },
             BtnKind::Disabled => button::Style {
                 background: Some(Background::Color(THEME.bg)),
                 border_radius: 3.0, border_width: 1.0,
-                border_color: rgb(38, 38, 50),
-                text_color: rgb(45, 45, 58),
+                border_color: THEME.surface,
+                text_color: THEME.surface_border,
+                ..Default::default()
+            },
+            BtnKind::Enabled => button::Style {
+                background: Some(Background::Color(rgb(25, 70, 35))),
+                border_radius: 3.0, border_width: 0.0,
+                border_color: THEME.ok,
+                text_color: THEME.ok,
+                ..Default::default()
+            },
+            BtnKind::Error => button::Style {
+                background: Some(Background::Color(rgb(75, 20, 20))),
+                border_radius: 3.0, border_width: 0.0,
+                border_color: THEME.err,
+                text_color: THEME.err,
                 ..Default::default()
             },
         }
     }
 
     fn hovered(&self) -> button::Style {
-        lighten(self.active(), 0.07)
+        lighten(self.active(), 0.04)
     }
 
     fn pressed(&self) -> button::Style {
-        lighten(self.active(), -0.05)
+        lighten(self.active(), -0.03)
     }
 }
 
@@ -211,17 +243,53 @@ struct EtherInputLocked;
 impl text_input::StyleSheet for EtherInputLocked {
     fn active(&self) -> text_input::Style {
         text_input::Style {
-            background: Background::Color(rgb(20, 20, 28)),
+            background: Background::Color(THEME.bg),
             border_radius: 3.0,
             border_width: 1.0,
-            border_color: rgb(38, 38, 50),
+            border_color: THEME.surface,
         }
     }
     fn focused(&self)      -> text_input::Style { self.active() }
     fn hovered(&self)      -> text_input::Style { self.active() }
-    fn placeholder_color(&self) -> Color { rgb(45, 45, 58) }
+    fn placeholder_color(&self) -> Color { THEME.surface_border }
     fn value_color(&self)       -> Color { THEME.text_dim }
     fn selection_color(&self)   -> Color { THEME.bg }
+}
+
+// ─── PickList stylesheet ──────────────────────────────────────────────────────
+
+struct PpqPickStyle;
+
+impl pick_list::StyleSheet for PpqPickStyle {
+    fn menu(&self) -> pick_list::Menu {
+        pick_list::Menu {
+            text_color:          THEME.text,
+            background:          Background::Color(THEME.surface),
+            border_width:        1.0,
+            border_color:        THEME.surface_border,
+            selected_text_color: THEME.selected_text,
+            selected_background: Background::Color(THEME.selected_bg),
+        }
+    }
+
+    fn active(&self) -> pick_list::Style {
+        pick_list::Style {
+            text_color:        THEME.text,
+            placeholder_color: THEME.muted,
+            background:        Background::Color(THEME.surface),
+            border_radius:     3.0,
+            border_width:      1.0,
+            border_color:      THEME.surface_border,
+            icon_size:         0.55,
+        }
+    }
+
+    fn hovered(&self) -> pick_list::Style {
+        pick_list::Style {
+            border_color: THEME.accent,
+            ..self.active()
+        }
+    }
 }
 
 // ─── Container stylesheets ────────────────────────────────────────────────────
@@ -232,10 +300,43 @@ impl container::StyleSheet for ModalCard {
     fn style(&self) -> container::Style {
         container::Style {
             background: Some(Background::Color(THEME.surface)),
-            border_radius: 6.0,
+            border_radius: 3.0,
             border_width: 1.0,
             border_color: THEME.surface_border,
             text_color: None,
+        }
+    }
+}
+
+/// Ghost button — no background or border, text only.  Used for close (×).
+struct GhostBtn;
+impl button::StyleSheet for GhostBtn {
+    fn active(&self) -> button::Style {
+        button::Style {
+            background: None,
+            border_radius: 0.0,
+            border_width: 0.0,
+            border_color: Color::TRANSPARENT,
+            text_color: THEME.text_dim,
+            ..Default::default()
+        }
+    }
+    fn hovered(&self) -> button::Style {
+        button::Style { text_color: THEME.text, ..self.active() }
+    }
+    fn pressed(&self) -> button::Style { self.hovered() }
+}
+
+/// Tooltip background card.
+struct TooltipCard;
+impl container::StyleSheet for TooltipCard {
+    fn style(&self) -> container::Style {
+        container::Style {
+            background: Some(Background::Color(THEME.surface)),
+            border_radius: 3.0,
+            border_width: 1.0,
+            border_color: THEME.surface_border,
+            text_color: Some(THEME.text_dim),
         }
     }
 }
@@ -259,19 +360,30 @@ impl container::StyleSheet for ModalBackdrop {
 pub struct EditorData {
     pub params:             Arc<EtherTapParams>,
     pub conn_status:        Arc<AtomicBool>,
-    pub tx_activity_ts:     Arc<AtomicU64>,
-    pub rx_activity_ts:     Arc<AtomicU64>,
+    pub tx_activity_ts:          Arc<AtomicU64>,
+    pub rx_activity_ts:          Arc<AtomicU64>,
+    pub midi_clock_activity_ts:  Arc<AtomicU64>,
     pub hardware_float:     Arc<AtomicU32>,
     pub host_bpm:           Arc<AtomicU32>,
     pub force_sync_trigger: Arc<AtomicBool>,
     pub force_rate_trigger: Arc<AtomicBool>,
     pub compatible_slots:   Arc<Mutex<Vec<u8>>>,
     pub occupied_slots:     Arc<Mutex<Vec<u8>>>,
+    /// Raw effect type ID for each slot (index = slot-1). Updated after AuditSlots.
+    pub slot_types:         Arc<Mutex<[Option<i32>; 8]>>,
     pub all_slots_mode:     Arc<AtomicBool>,
     pub scan_targets:       Arc<Mutex<Vec<DeviceInfo>>>,
+    /// Millisecond timestamp of the last completed scan (0 = never scanned).
+    pub scan_completed_ts:  Arc<AtomicU64>,
     /// Name and model parsed from /info heartbeat responses.
     pub connected_device:   Arc<Mutex<(String, String)>>,
     pub cmd_tx:             crossbeam_channel::Sender<NetworkCommand>,
+    /// Notifies the MIDI clock worker when the user changes the output device.
+    pub device_change_tx:   crossbeam_channel::Sender<Option<String>>,
+    /// True when the worker has an active connection to the selected MIDI output.
+    pub midi_bridge_connected: Arc<AtomicBool>,
+    /// Rolling timing statistics from the MIDI clock worker.
+    pub midi_clock_stats: Arc<Mutex<crate::midi_clock::ClockStats>>,
 }
 
 // ─── Editor entry point ───────────────────────────────────────────────────────
@@ -289,28 +401,37 @@ struct EtherTapEditor {
     port_buf:   String,
     ip_state:   text_input::State,
     port_state: text_input::State,
-    // Rate Sync radio group + force
+    // Rate Sync — 3 radio buttons + force (bolt-only)
     btn_rate_manual: button::State,
     btn_rate_change: button::State,
     btn_rate_cont:   button::State,
     btn_rate_force:  button::State,
-    // Phase Sync radio group + force
+    // Phase Sync — 3 radio buttons + force (bolt-only)
     btn_phase_manual: button::State,
     btn_phase_change: button::State,
     btn_phase_cont:   button::State,
     btn_phase_force:  button::State,
     // FX row controls
-    btn_all:     button::State,
+    btn_auto:    button::State,
     btn_query:   button::State,
     slot_states: [button::State; 8],
+    /// Per-effect-type toggles (bit order: Delay/3Tap/4Tap/D+Rev/D+Cho/D+Fln/Mod).
+    btn_fx_type: [button::State; 7],
+    // Output clock section — toggle button + PPQ pick list + MIDI out device
+    btn_clock_toggle:    button::State,
+    pick_ppq:            pick_list::State<u8>,
+    pick_midi_out:       pick_list::State<String>,
+    /// Available MIDI output port names — first entry is always the sentinel.
+    midi_out_ports:      Vec<String>,
+    /// ms-since-epoch of last port enumeration.
+    last_port_enum_ms:   u64,
     // Network scan — btn_scan doubles as the modal close button
-    btn_scan:           button::State,
-    btn_connect:        button::State,
-    scan_result_states: [button::State; 8],
-    show_scan_results:  bool,
-    // Track last values written to read-only DAW params to avoid spamming setter
-    last_param_connected: bool,
-    last_param_matched:   bool,
+    btn_scan:              button::State,
+    btn_connect:           button::State,
+    scan_result_states:    [button::State; 8],
+    show_scan_results:     bool,
+    /// ms-since-epoch when the last ScanTargets command was dispatched.
+    last_scan_trigger_ms:  u64,
 }
 
 // ─── Messages ────────────────────────────────────────────────────────────────
@@ -325,8 +446,19 @@ enum Message {
     ForceRateSync,
     ForcePhaseSync,
     QuerySlots,
-    ToggleAllSlots,
+    ToggleAutoSlots,
+    /// Flip one bit in the fx_type_filter bitmask (bit = 0..6).
+    ToggleFxType(u8),
+    /// Toggle MIDI clock output on/off.
+    ToggleMidiClock,
+    /// Set MIDI clock pulses per quarter note.
+    SetClockPpq(u8),
+    /// Select a MIDI output device for clock injection + passthrough bridging.
+    /// The sentinel value MIDI_OUT_NONE means "no device selected".
+    SetMidiOutDevice(String),
     ScanTargets,
+    /// Fired every render frame via `WindowSubs::on_frame`; gated to 5 s.
+    OnFrame,
     SelectTarget(String, u16),
     Connect,
     Disconnect,
@@ -356,21 +488,37 @@ impl IcedEditor for EtherTapEditor {
                 btn_phase_change: Default::default(),
                 btn_phase_cont:   Default::default(),
                 btn_phase_force:  Default::default(),
-                btn_all:          Default::default(),
+                btn_auto:         Default::default(),
                 btn_query:        Default::default(),
-                slot_states:      Default::default(),
-                btn_scan:           Default::default(),
-                btn_connect:        Default::default(),
-                scan_result_states: Default::default(),
-                show_scan_results:  false,
-                last_param_connected: false,
-                last_param_matched:   false,
+                btn_fx_type:      Default::default(),
+                btn_clock_toggle:  Default::default(),
+                pick_ppq:          Default::default(),
+                pick_midi_out:     Default::default(),
+                midi_out_ports:    vec![MIDI_OUT_NONE.to_string()],
+                last_port_enum_ms: 0,
+                slot_states:       Default::default(),
+                btn_scan:              Default::default(),
+                btn_connect:           Default::default(),
+                scan_result_states:    Default::default(),
+                show_scan_results:     false,
+                last_scan_trigger_ms:  0,
             },
             Command::none(),
         )
     }
 
     fn context(&self) -> &dyn GuiContext { self.context.as_ref() }
+
+    /// Hook `on_frame` so we can gate a periodic rescan to every 5 s.
+    fn subscription(
+        &self,
+        window_subs: &mut WindowSubs<Message>,
+    ) -> Subscription<Message> {
+        // on_frame fires every render frame; the actual scan is rate-limited
+        // to once every 5 s inside the OnFrame handler.
+        window_subs.on_frame = Some(Message::OnFrame);
+        Subscription::none()
+    }
 
     fn update(&mut self, _window: &mut WindowQueue, msg: Message) -> Command<Message> {
         match msg {
@@ -413,15 +561,60 @@ impl IcedEditor for EtherTapEditor {
             Message::QuerySlots => {
                 let _ = self.data.cmd_tx.try_send(NetworkCommand::AuditSlots);
             }
-            Message::ToggleAllSlots => {
+            Message::ToggleAutoSlots => {
                 let prev = self.data.all_slots_mode.load(Ordering::Relaxed);
                 self.data.all_slots_mode.store(!prev, Ordering::Relaxed);
+            }
+            Message::ToggleFxType(bit) => {
+                let mut filter = self.data.params.fx_type_filter.lock();
+                *filter ^= 1_u32 << bit;
+            }
+            Message::ToggleMidiClock => {
+                let mut enabled = self.data.params.midi_clock_enabled.lock();
+                *enabled = !*enabled;
+            }
+            Message::SetClockPpq(ppq) => {
+                *self.data.params.midi_clock_ppq.lock() = ppq;
+            }
+            Message::SetMidiOutDevice(name) => {
+                let device = if name == MIDI_OUT_NONE { None } else { Some(name) };
+                *self.data.params.midi_out_device.lock() = device.clone();
+                let _ = self.data.device_change_tx.try_send(device);
             }
             Message::ScanTargets => {
                 self.show_scan_results = !self.show_scan_results;
                 if self.show_scan_results {
+                    // Clear stale entries from a previous session so the panel
+                    // starts fresh; the first scan result arrives within ~600 ms.
                     self.data.scan_targets.lock().clear();
                     let _ = self.data.cmd_tx.try_send(NetworkCommand::ScanTargets);
+                    self.last_scan_trigger_ms = now_ms();
+                }
+            }
+            Message::OnFrame => {
+                // Rate-limit: only dispatch a rescan every 5 s while the panel is open.
+                if self.show_scan_results {
+                    let elapsed = now_ms().saturating_sub(self.last_scan_trigger_ms);
+                    if elapsed >= 5_000 {
+                        // Don't clear — merge so known devices stay visible.
+                        let _ = self.data.cmd_tx.try_send(NetworkCommand::ScanTargets);
+                        self.last_scan_trigger_ms = now_ms();
+                    }
+                }
+                // Refresh MIDI output port list every 2 s.
+                if now_ms().saturating_sub(self.last_port_enum_ms) >= 2_000 {
+                    self.last_port_enum_ms = now_ms();
+                    let mut ports = vec![MIDI_OUT_NONE.to_string()];
+                    if let Ok(out) = MidiOutput::new("EtherTap-Enum") {
+                        for p in out.ports() {
+                            if let Ok(name) = out.port_name(&p) {
+                                if name != "EtherTap MIDI Clock" {
+                                    ports.push(name);
+                                }
+                            }
+                        }
+                    }
+                    self.midi_out_ports = ports;
                 }
             }
             Message::SelectTarget(ip, port) => {
@@ -468,6 +661,7 @@ impl IcedEditor for EtherTapEditor {
         let cur_slot   = *self.data.params.fx_slot.lock();
         let compatible = self.data.compatible_slots.lock().clone();
         let occupied   = self.data.occupied_slots.lock().clone();
+        let slot_types = *self.data.slot_types.lock();
         let all_mode   = self.data.all_slots_mode.load(Ordering::Relaxed);
         let post_audit = !compatible.is_empty() || !occupied.is_empty();
 
@@ -477,54 +671,90 @@ impl IcedEditor for EtherTapEditor {
         // dark card) so the main layout height never changes.
         if self.show_scan_results {
             let scan_targets_snap = self.data.scan_targets.lock().clone();
+            let completed_ts = self.data.scan_completed_ts.load(Ordering::Relaxed);
+            let scanning_now  = now_ms().saturating_sub(self.last_scan_trigger_ms) < 1500;
+
+            // ── Title row ────────────────────────────────────────────────────
+            let status_str = if completed_ts == 0 {
+                "scanning\u{2026}".to_string()
+            } else {
+                let age_s = now_ms().saturating_sub(completed_ts) as f32 / 1000.0;
+                if scanning_now {
+                    format!("{:.1}s ago \u{2022} rescanning\u{2026}", age_s)
+                } else {
+                    format!("{:.1}s ago", age_s)
+                }
+            };
+            let status_color = if scanning_now { THEME.warn } else { THEME.text_dim };
 
             let mut card_col = Column::new()
                 .push(
                     Row::new()
-                        .push(Text::new("DISCOVERED DEVICES").size(9).color(THEME.text_dim))
+                        .push(t!("DISCOVERED DEVICES").size(11).color(THEME.text))
+                        .push(Space::with_width(Length::Units(10)))
+                        .push(t!(&status_str).size(9).color(status_color))
                         .push(Space::with_width(Length::Fill))
                         .push(
                             Button::new(
                                 &mut self.btn_scan,
-                                Text::new("\u{00d7}").size(13).color(THEME.muted),
+                                t!("\u{00d7}").size(16).color(THEME.text_dim),
                             )
                             .on_press(Message::ScanTargets)
-                            .style(EtherBtn(BtnKind::Idle))
-                            .padding([2, 7]),
+                            .style(GhostBtn)
+                            .padding([0, 4]),
                         )
                         .align_items(Alignment::Center),
                 )
-                .push(Space::with_height(Length::Units(8)))
+                .push(Space::with_height(Length::Units(6)))
                 .spacing(4);
 
-            if scan_targets_snap.is_empty() {
+            if scan_targets_snap.is_empty() && completed_ts == 0 {
                 card_col = card_col.push(
-                    Text::new("  Scanning\u{2026}").size(11).color(THEME.muted),
+                    t!("Waiting for responses\u{2026}").size(11).color(THEME.text_dim),
                 );
             } else {
                 for (state, dev) in self.scan_result_states.iter_mut()
                     .zip(scan_targets_snap.iter())
                 {
                     let name_line = dev.display_name();
-                    let addr_line = format!("{}:{}", dev.ip, dev.port);
-                    let entry = Column::new()
-                        .push(Text::new(name_line).size(11).color(THEME.text))
-                        .push(Text::new(addr_line).size(9).color(THEME.text_dim))
-                        .spacing(1);
+
+                    // Primary (preferred) address — brighter than alt routes.
+                    let lat_str = dev.latency_ms.map_or("\u{2014}".into(),
+                        |ms| format!("{:.1} ms", ms));
+                    let direct = dev.all_addrs.first().map(|(_, _, d)| *d).unwrap_or(false);
+                    let path_str = if direct { "direct" } else { "routed" };
+                    let addr_line = format!("{}  {}  {}", dev.ip, lat_str, path_str);
+
+                    let mut entry = Column::new()
+                        .push(t!(name_line).size(11).color(THEME.text))
+                        .push(t!(addr_line).size(9).color(THEME.muted))
+                        .spacing(2);
+
+                    // Alt IPs — dimmer than the preferred route.
+                    for (alt_ip, alt_lat, alt_direct) in dev.all_addrs.iter().skip(1) {
+                        let alt_lat_str = alt_lat.map_or("\u{2014}".into(),
+                            |ms| format!("{:.1} ms", ms));
+                        let alt_path = if *alt_direct { "direct" } else { "routed" };
+                        let alt_line = format!("{} (alt)  {}  {}", alt_ip, alt_lat_str, alt_path);
+                        entry = entry.push(
+                            t!(alt_line).size(9).color(THEME.text_dim),
+                        );
+                    }
+
                     card_col = card_col.push(
                         Button::new(state, entry)
                             .on_press(Message::SelectTarget(dev.ip.clone(), dev.port))
                             .style(EtherBtn(BtnKind::Idle))
-                            .padding([5, 10])
+                            .padding([5, 8])
                             .width(Length::Fill),
                     );
                 }
             }
 
             let card = Container::new(card_col)
-                .padding(14)
+                .padding(12)
                 .style(ModalCard)
-                .width(Length::Units(270));
+                .width(Length::Units(290));
 
             return Container::new(card)
                 .width(Length::Fill)
@@ -543,15 +773,21 @@ impl IcedEditor for EtherTapEditor {
         } else {
             (icon::LINK_BROKEN, THEME.err)
         };
+        let ck_on = { let ts = self.data.midi_clock_activity_ts.load(Ordering::Relaxed);
+                      ts > 0 && now.saturating_sub(ts) < PULSE_MS };
         let tx_color = if tx_on { THEME.warn   } else { THEME.text_dim };
         let rx_color = if rx_on { THEME.accent } else { THEME.text_dim };
+        let ck_color = if ck_on { THEME.ok     } else { THEME.text_dim };
 
         let target_ip   = self.data.params.target_ip.lock().clone();
         let target_port = *self.data.params.target_port.lock();
         let device_label = {
             let (name, model) = self.data.connected_device.lock().clone();
             if !name.is_empty() || !model.is_empty() {
-                let dev = DeviceInfo { ip: target_ip.clone(), port: target_port, name, model };
+                let dev = DeviceInfo {
+                    ip: target_ip.clone(), port: target_port, name, model,
+                    latency_ms: None, all_addrs: vec![],
+                };
                 dev.display_name()
             } else if connected {
                 format!("{}:{}", target_ip, target_port)
@@ -560,65 +796,50 @@ impl IcedEditor for EtherTapEditor {
             }
         };
 
-        // Update read-only DAW params whenever connected/matched state changes.
-        if connected != self.last_param_connected {
-            let setter = ParamSetter::new(self.context.as_ref());
-            setter.begin_set_parameter(&self.data.params.is_connected);
-            setter.set_parameter(&self.data.params.is_connected, connected);
-            setter.end_set_parameter(&self.data.params.is_connected);
-            self.last_param_connected = connected;
-        }
-        if in_sync != self.last_param_matched {
-            let setter = ParamSetter::new(self.context.as_ref());
-            setter.begin_set_parameter(&self.data.params.is_matched);
-            setter.set_parameter(&self.data.params.is_matched, in_sync);
-            setter.end_set_parameter(&self.data.params.is_matched);
-            self.last_param_matched = in_sync;
-        }
-
         let header = Row::new()
-            .push(Text::new("ETHER").size(20).font(Font::Default).color(THEME.accent))
-            .push(Text::new("TAP")  .size(20).font(Font::Default).color(THEME.text))
+            .push(t!("ETHER").size(20).font(Font::Default).color(THEME.accent))
+            .push(t!("TAP")  .size(20).font(Font::Default).color(THEME.text))
             .push(Space::with_width(Length::Fill))
-            .push(Text::new(conn_icon).size(11).font(SOLAR_BOLD).color(conn_color))
+            .push(t!(conn_icon).size(11).font(SOLAR_BOLD).color(conn_color))
             .push(Space::with_width(Length::Units(5)))
-            .push(Text::new(&device_label).size(11).color(
+            .push(t!(&device_label).size(11).color(
                 if connected { THEME.text_dim } else { THEME.muted }
             ))
             .push(Space::with_width(Length::Fill))
-            .push(Text::new("TX").size(10).color(tx_color))
+            .push(t!("TX").size(10).color(tx_color))
             .push(Space::with_width(Length::Units(8)))
-            .push(Text::new("RX").size(10).color(rx_color))
+            .push(t!("RX").size(10).color(rx_color))
+            .push(Space::with_width(Length::Units(8)))
+            .push(t!("CK").size(10).color(ck_color))
             .align_items(Alignment::Center);
 
         // ── Network config + scan + connect ──────────────────────────────
         let (ip_input, port_input): (Element<'_, Message>, Element<'_, Message>) = if connected {
             (
                 TextInput::new(&mut self.ip_state, "IP address", &self.ip_buf, Message::IpEdited)
-                    .size(11).padding(4).width(Length::FillPortion(3))
+                    .size(11).font(MONO_FONT).padding(4).width(Length::FillPortion(3))
                     .style(EtherInputLocked).into(),
                 TextInput::new(&mut self.port_state, "Port", &self.port_buf, Message::PortEdited)
-                    .size(11).padding(4).width(Length::FillPortion(1))
+                    .size(11).font(MONO_FONT).padding(4).width(Length::FillPortion(1))
                     .style(EtherInputLocked).into(),
             )
         } else {
             (
                 TextInput::new(&mut self.ip_state, "IP address", &self.ip_buf, Message::IpEdited)
-                    .size(11).padding(4).width(Length::FillPortion(3))
+                    .size(11).font(MONO_FONT).padding(4).width(Length::FillPortion(3))
                     .style(EtherInput).into(),
                 TextInput::new(&mut self.port_state, "Port", &self.port_buf, Message::PortEdited)
-                    .size(11).padding(4).width(Length::FillPortion(1))
+                    .size(11).font(MONO_FONT).padding(4).width(Length::FillPortion(1))
                     .style(EtherInput).into(),
             )
         };
 
         let scan_btn = {
+            let icon_color = if connected { THEME.surface_border } else { THEME.text_dim };
             let inner = Row::new()
-                .push(Text::new(icon::SCAN).size(11).font(SOLAR_BOLD)
-                    .color(if connected { rgb(45, 45, 58) } else { THEME.text_dim }))
+                .push(t!(icon::SCAN).size(11).font(SOLAR_BOLD).color(icon_color))
                 .push(Space::with_width(Length::Units(4)))
-                .push(Text::new("Scan").size(10)
-                    .color(if connected { rgb(45, 45, 58) } else { THEME.text_dim }))
+                .push(t!("Scan").size(10).color(icon_color))
                 .align_items(Alignment::Center);
             let btn = Button::new(&mut self.btn_scan, inner)
                 .style(EtherBtn(if connected { BtnKind::Disabled } else { BtnKind::Idle }))
@@ -631,29 +852,29 @@ impl IcedEditor for EtherTapEditor {
         let conn_btn = if connected {
             Button::new(
                 &mut self.btn_connect,
-                Container::new(Text::new("Disconnect").size(10).color(THEME.danger_text))
+                Container::new(t!("Disconnect").size(10).color(THEME.ok))
                     .width(Length::Fill).center_x(),
             )
             .on_press(Message::Disconnect)
-            .style(EtherBtn(BtnKind::Force))
+            .style(EtherBtn(BtnKind::Enabled))
             .padding([4, 6])
             .width(Length::Units(74))
         } else {
             Button::new(
                 &mut self.btn_connect,
-                Container::new(Text::new("Connect").size(10).color(THEME.selected_text))
+                Container::new(t!("Connect").size(10).color(THEME.err))
                     .width(Length::Fill).center_x(),
             )
             .on_press(Message::Connect)
-            .style(EtherBtn(BtnKind::Active))
+            .style(EtherBtn(BtnKind::Error))
             .padding([4, 6])
             .width(Length::Units(74))
         };
 
         let net_row = Row::new()
-            .push(Text::new("Target  ").size(11).color(THEME.text_dim))
+            .push(t!("Target  ").size(11).color(THEME.text_dim))
             .push(ip_input)
-            .push(Text::new("  :  ").size(11).color(THEME.text_dim))
+            .push(t!("  :  ").size(11).color(THEME.text_dim))
             .push(port_input)
             .push(Space::with_width(Length::Units(6)))
             .push(scan_btn)
@@ -663,10 +884,9 @@ impl IcedEditor for EtherTapEditor {
 
         // ── Slot selector ─────────────────────────────────────────────────
         //
-        // Each slot is a Column: [button, gap(2), indicator dot].
-        // "All" and "Query" use the same structure so their button text
-        // top-aligns with the slot button text when the row uses Alignment::Start.
-        let dot_placeholder = Length::Units(11); // reserves space for dot row
+        // Each slot column: [button, gap(2), type label].
+        // "All" and "Query" reserve a matching spacer below so button text
+        // baselines align across the row regardless of label presence.
 
         let slot_cols = self.slot_states.iter_mut().zip(1u8..=8u8).fold(
             Row::new().spacing(4).align_items(Alignment::Start),
@@ -689,7 +909,7 @@ impl IcedEditor for EtherTapEditor {
                 };
                 let btn = Button::new(
                     state,
-                    Container::new(Text::new(slot.to_string()).size(11).color(text_color))
+                    Container::new(t!(slot.to_string()).size(11).color(text_color))
                         .center_x(),
                 )
                 .style(EtherBtn(kind))
@@ -700,42 +920,71 @@ impl IcedEditor for EtherTapEditor {
                     btn
                 };
 
-                let dot_color = if !post_audit {
-                    THEME.surface_border
-                } else if compatible.contains(&slot) {
-                    THEME.ok
-                } else if occupied.contains(&slot) {
-                    THEME.warn
+                // Resolve the short type label (e.g. "DLY", "GEQ2", "···").
+                let (label_text, label_color) = if !post_audit {
+                    ("\u{00b7}\u{00b7}\u{00b7}", THEME.surface_border)
                 } else {
-                    THEME.text_dim
+                    let type_id = slot_types[(slot - 1) as usize];
+                    let name = type_id.map_or("···", |t| crate::osc::fx_type_short(t, slot));
+                    let color = if compatible.contains(&slot) {
+                        THEME.ok
+                    } else if occupied.contains(&slot) {
+                        THEME.warn
+                    } else {
+                        THEME.text_dim
+                    };
+                    (name, color)
                 };
 
                 let slot_col = Column::new()
                     .push(btn)
                     .push(Space::with_height(Length::Units(2)))
-                    .push(Text::new("\u{2022}").size(9).color(dot_color))
+                    .push(t!(label_text).size(8).color(label_color))
                     .align_items(Alignment::Center);
 
-                row.push(slot_col)
+                // Tooltip on hover: full effect name at the same size as the UI font.
+                let long_name: &'static str = if post_audit {
+                    slot_types[(slot - 1) as usize]
+                        .map(|t| crate::osc::fx_type_long(t, slot))
+                        .unwrap_or("")
+                } else { "" };
+
+                let slot_elem: Element<'_, Message> = if !long_name.is_empty() {
+                    tooltip::Tooltip::new(
+                        slot_col,
+                        long_name,
+                        tooltip::Position::Bottom,
+                    )
+                    .size(11)
+                    .gap(2)
+                    .padding(4)
+                    .style(TooltipCard)
+                    .into()
+                } else {
+                    slot_col.into()
+                };
+
+                row.push(slot_elem)
             },
         );
 
-        // "All" and "Query" in identical Column structure — dot row is a blank
-        // spacer so button text sits at the same y-offset as slot button text.
-        let all_col = Column::new()
+        // "Auto" button (was "All") + "Query" button.
+        // Matching Column wrapper (with blank spacer below) keeps button baselines
+        // aligned with the numbered slot buttons.
+        let auto_col = Column::new()
             .push(
                 Button::new(
-                    &mut self.btn_all,
-                    Container::new(Text::new("All").size(11).color(
+                    &mut self.btn_auto,
+                    Container::new(t!("Auto").size(11).color(
                         if all_mode { THEME.selected_text } else { THEME.muted },
                     )).center_x(),
                 )
-                .on_press(Message::ToggleAllSlots)
+                .on_press(Message::ToggleAutoSlots)
                 .style(EtherBtn(if all_mode { BtnKind::Active } else { BtnKind::Idle }))
-                .padding([4, 10]),
+                .padding([4, 8]),
             )
             .push(Space::with_height(Length::Units(2)))
-            .push(Space::with_height(dot_placeholder))
+            .push(Space::with_height(Length::Units(11)))
             .align_items(Alignment::Center);
 
         let query_col = Column::new()
@@ -743,24 +992,24 @@ impl IcedEditor for EtherTapEditor {
                 Button::new(
                     &mut self.btn_query,
                     Row::new()
-                        .push(Text::new(icon::SCAN).size(11).font(SOLAR_BOLD).color(THEME.text_dim))
+                        .push(t!(icon::SCAN).size(11).font(SOLAR_BOLD).color(THEME.text_dim))
                         .push(Space::with_width(Length::Units(4)))
-                        .push(Text::new("Query").size(10).color(THEME.text_dim))
+                        .push(t!("Query").size(10).color(THEME.text_dim))
                         .align_items(Alignment::Center),
                 )
                 .on_press(Message::QuerySlots)
                 .style(EtherBtn(BtnKind::Idle))
-                .padding([4, 10]),
+                .padding([4, 8]),
             )
             .push(Space::with_height(Length::Units(2)))
-            .push(Space::with_height(dot_placeholder))
+            .push(Space::with_height(Length::Units(11)))
             .align_items(Alignment::Center);
 
-        // "FX (DLY)" label — padded by 5 px at the top so its text baseline
+        // "FX SLOTS" label — padded by 5 px at the top so its text baseline
         // aligns with the button text (buttons have 5 px top padding).
         let label_col = Column::new()
             .push(Space::with_height(Length::Units(5)))
-            .push(Text::new("FX (DLY)").size(11).color(THEME.text_dim))
+            .push(t!("FX SLOTS").size(11).color(THEME.text_dim))
             .align_items(Alignment::Start);
 
         let fx_row = Row::new()
@@ -768,10 +1017,45 @@ impl IcedEditor for EtherTapEditor {
             .push(Space::with_width(Length::Units(8)))
             .push(slot_cols)
             .push(Space::with_width(Length::Fill))
-            .push(all_col)
+            .push(auto_col)
             .push(Space::with_width(Length::Units(6)))
             .push(query_col)
             .align_items(Alignment::Start);
+
+        // ── FX type filter row (always visible below the slot row) ────────
+        //
+        // Seven toggle buttons; each enables/disables a delay type in Auto mode.
+        let filter = *self.data.params.fx_type_filter.lock();
+        const TYPE_BITS: &[(&str, u8, &str)] = &[
+            ("Delay", 0, "Stereo Delay"),
+            ("3 Tap", 1, "3-Tap Delay — three echoes, delay time at par/01"),
+            ("4 Tap", 2, "4-Tap Delay — four echoes, delay time at par/01"),
+            ("D+Rev", 3, "Delay + Reverb"),
+            ("D+Cho", 4, "Delay + Chorus"),
+            ("D+Fln", 5, "Delay + Flanger"),
+            ("Mod",   6, "Modulated Delay — chorused delay, delay time at par/02"),
+        ];
+        let mut filter_row = Row::new()
+            .push(t!("AUTO").size(9).color(THEME.text_dim))
+            .push(Space::with_width(Length::Units(6)))
+            .spacing(4)
+            .align_items(Alignment::Center);
+        for (state, &(name, bit, tip)) in self.btn_fx_type.iter_mut().zip(TYPE_BITS.iter()) {
+            let on = (filter >> bit) & 1 == 1;
+            let btn = Button::new(
+                state,
+                t!(name).size(10)
+                    .color(if on { THEME.selected_text } else { THEME.muted }),
+            )
+            .on_press(Message::ToggleFxType(bit))
+            .style(EtherBtn(if on { BtnKind::Active } else { BtnKind::Idle }))
+            .padding([4, 8]);
+            filter_row = filter_row.push(
+                tooltip::Tooltip::new(btn, tip, tooltip::Position::Bottom)
+                    .size(11).gap(2).padding(4).style(TooltipCard),
+            );
+        }
+        let fx_filter_row: Element<'_, Message> = filter_row.into();
 
         // ── Telemetry (host + mixer on one line) ──────────────────────────
         let host_bpm_str   = if host_bpm_f > 0.0 { format!("{host_bpm_f:>7.2} BPM") }
@@ -785,87 +1069,239 @@ impl IcedEditor for EtherTapEditor {
 
         let sync_badge: Element<'_, Message> = if !has_hw {
             Row::new()
-                .push(Text::new(icon::RX).size(13).font(SOLAR_BOLD).color(THEME.text_dim))
+                .push(t!(icon::RX).size(13).font(SOLAR_BOLD).color(THEME.text_dim))
                 .push(Space::with_width(Length::Units(4)))
-                .push(Text::new("NO DATA").size(11).color(THEME.text_dim))
+                .push(t!("NO DATA").size(11).color(THEME.text_dim))
                 .align_items(Alignment::Center).into()
         } else if in_sync {
             Row::new()
-                .push(Text::new(icon::CHECK).size(13).font(SOLAR_BOLD).color(THEME.ok))
+                .push(t!(icon::CHECK).size(13).font(SOLAR_BOLD).color(THEME.ok))
                 .push(Space::with_width(Length::Units(4)))
-                .push(Text::new("MATCH").size(11).color(THEME.ok))
+                .push(t!("MATCH").size(11).color(THEME.ok))
                 .align_items(Alignment::Center).into()
         } else {
             Row::new()
-                .push(Text::new(icon::REFRESH).size(13).font(SOLAR_BOLD).color(THEME.err))
+                .push(t!(icon::REFRESH).size(13).font(SOLAR_BOLD).color(THEME.err))
                 .push(Space::with_width(Length::Units(4)))
-                .push(Text::new("DRIFT").size(11).color(THEME.err))
+                .push(t!("DRIFT").size(11).color(THEME.err))
                 .align_items(Alignment::Center).into()
         };
 
         let telem_row = Row::new()
-            .push(Text::new("Host ").size(11).color(THEME.text_dim))
-            .push(Text::new(host_bpm_str).size(11).color(THEME.text))
+            .push(t!("Host ").size(11).color(THEME.text_dim))
+            .push(t!(host_bpm_str).size(11).color(THEME.text))
             .push(Space::with_width(Length::Units(4)))
-            .push(Text::new(icon::ARROW_RIGHT).size(13).font(SOLAR_BOLD).color(THEME.text_dim))
+            .push(t!(icon::ARROW_RIGHT).size(13).font(SOLAR_BOLD).color(THEME.text_dim))
             .push(Space::with_width(Length::Units(4)))
-            .push(Text::new(host_float_str).size(11).color(THEME.text))
+            .push(t!(host_float_str).size(11).color(THEME.text))
             .push(Space::with_width(Length::Fill))
-            .push(Text::new("Mixer ").size(11).color(THEME.text_dim))
-            .push(Text::new(hw_bpm_str).size(11).color(THEME.text))
+            .push(t!("Mixer ").size(11).color(THEME.text_dim))
+            .push(t!(hw_bpm_str).size(11).color(THEME.text))
             .push(Space::with_width(Length::Units(4)))
-            .push(Text::new(icon::ARROW_LEFT).size(13).font(SOLAR_BOLD).color(THEME.text_dim))
+            .push(t!(icon::ARROW_LEFT).size(13).font(SOLAR_BOLD).color(THEME.text_dim))
             .push(Space::with_width(Length::Units(4)))
-            .push(Text::new(hw_float_str).size(11).color(THEME.text))
+            .push(t!(hw_float_str).size(11).color(THEME.text))
             .push(Space::with_width(Length::Units(10)))
             .push(sync_badge)
             .align_items(Alignment::Center);
 
-        // ── Rate Sync ─────────────────────────────────────────────────────
-        let rate_row = Row::new()
-            .push(radio_btn(&mut self.btn_rate_manual, "Manual",
-                rate_mode == SyncMode::Manual, Message::SetRateSyncMode(SyncMode::Manual)))
+        // ── Output clock section (PPQ + MIDI OUT device + toggle — one row) ─
+        let clock_on  = *self.data.params.midi_clock_enabled.lock();
+        let clock_ppq = *self.data.params.midi_clock_ppq.lock();
+        let clk_color = if clock_on { THEME.ok } else { THEME.muted };
+
+        const PPQ_OPTIONS: &[u8] = &[3, 4, 6, 8, 12, 16, 24, 32, 48, 96];
+
+        // ── MIDI bridge device + clock enable — single row ────────────────
+        // Layout: OUTPUT  PPQ [ppq]  OUT [device=Fill]  [status]  [MIDI CLK]
+        let current_out_device = self.data.params.midi_out_device.lock().clone();
+        let bridge_conn = self.data.midi_bridge_connected.load(Ordering::Relaxed);
+        let device_selected = current_out_device.is_some();
+
+        // Status indicator: check icon (green) when connected, refresh icon
+        // (yellow) while reconnecting.  Hidden when no device is selected.
+        let bridge_status: Element<'_, Message> = if device_selected {
+            let (glyph, color) = if bridge_conn {
+                (icon::CHECK,   THEME.ok)
+            } else {
+                (icon::REFRESH, THEME.warn)
+            };
+            t!(glyph).size(11).font(SOLAR_BOLD).color(color).into()
+        } else {
+            Space::with_width(Length::Units(11)).into()
+        };
+
+        let selected_display = current_out_device
+            .unwrap_or_else(|| MIDI_OUT_NONE.to_string());
+
+        let clock_row = Row::new()
+            .push(t!("OUTPUT").size(9).color(THEME.text_dim))
+            .push(Space::with_width(Length::Units(5)))
+            .push(t!("PPQ").size(9).color(THEME.text_dim))
+            .push(Space::with_width(Length::Units(4)))
+            .push(
+                PickList::new(
+                    &mut self.pick_ppq,
+                    PPQ_OPTIONS,
+                    Some(clock_ppq),
+                    Message::SetClockPpq,
+                )
+                .text_size(10)
+                .font(MONO_FONT)
+                .padding([4, 6])
+                .width(Length::Units(52))
+                .style(PpqPickStyle),
+            )
+            .push(Space::with_width(Length::Units(8)))
+            .push(t!("OUT").size(9).color(THEME.text_dim))
+            .push(Space::with_width(Length::Units(4)))
+            .push(
+                PickList::new(
+                    &mut self.pick_midi_out,
+                    self.midi_out_ports.as_slice(),
+                    Some(selected_display),
+                    Message::SetMidiOutDevice,
+                )
+                .text_size(10)
+                .font(MONO_FONT)
+                .padding([4, 6])
+                .width(Length::Fill)
+                .style(PpqPickStyle),
+            )
+            .push(Space::with_width(Length::Units(4)))
+            .push(bridge_status)
             .push(Space::with_width(Length::Units(6)))
-            .push(radio_btn(&mut self.btn_rate_change, "On Change",
-                rate_mode == SyncMode::OnChange, Message::SetRateSyncMode(SyncMode::OnChange)))
-            .push(Space::with_width(Length::Units(6)))
-            .push(radio_btn(&mut self.btn_rate_cont, "Continuous",
-                rate_mode == SyncMode::Continuous, Message::SetRateSyncMode(SyncMode::Continuous)))
-            .push(Space::with_width(Length::Fill))
-            .push(force_btn(&mut self.btn_rate_force, "FORCE SYNC", Message::ForceRateSync))
+            .push(
+                Button::new(
+                    &mut self.btn_clock_toggle,
+                    Row::new()
+                        .push(t!(icon::CLOCK).size(11).font(SOLAR_BOLD).color(clk_color))
+                        .push(Space::with_width(Length::Units(4)))
+                        .push(t!("MIDI CLK").size(10).color(clk_color))
+                        .align_items(Alignment::Center),
+                )
+                .on_press(Message::ToggleMidiClock)
+                .style(EtherBtn(if clock_on { BtnKind::Enabled } else { BtnKind::Idle }))
+                .padding([4, 8]),
+            )
+            .spacing(0)
             .align_items(Alignment::Center);
 
-        // ── Phase Sync ────────────────────────────────────────────────────
-        let phase_row = Row::new()
-            .push(radio_btn(&mut self.btn_phase_manual, "Manual",
-                phase_mode == SyncMode::Manual, Message::SetPhaseSyncMode(SyncMode::Manual)))
-            .push(Space::with_width(Length::Units(6)))
-            .push(radio_btn(&mut self.btn_phase_change, "On Change",
-                phase_mode == SyncMode::OnChange, Message::SetPhaseSyncMode(SyncMode::OnChange)))
-            .push(Space::with_width(Length::Units(6)))
-            .push(radio_btn(&mut self.btn_phase_cont, "Continuous",
-                phase_mode == SyncMode::Continuous, Message::SetPhaseSyncMode(SyncMode::Continuous)))
+        // ── MIDI clock timing stats (jitter percentiles) ──────────────────
+        //
+        // Always rendered — shows placeholder dashes until 48 samples (2 beats)
+        // are collected.  A single monospace string guarantees pixel-perfect
+        // column alignment regardless of how the numbers change width.
+        //
+        // Format (size 8, MONO_FONT, right-aligned):
+        //   "avg  20.8ms  p50±    0µs  p95±  450µs  p99± 1234µs  max± 5678µs"
+        //   "avg   --.-ms  p50±   --µs  p95±   --µs  p99±   --µs  max±   --µs"
+        //
+        // Field widths (fixed, guaranteed by {:5.1} / {:5}):
+        //   avg value  = 5 chars + "ms"
+        //   jitter val = 5 chars + "µs"
+        let clock_stats_row: Element<'_, Message> = {
+            let stats   = *self.data.midi_clock_stats.lock();
+            let has_data = clock_on && stats.sample_n >= 48;
+
+            // Colour for the p99 / max values.
+            let p99_color = if !has_data             { THEME.text_dim }
+                else if stats.p99_us > 5_000         { THEME.err      }
+                else if stats.p99_us > 2_000         { THEME.warn     }
+                else                                 { THEME.ok       };
+            let max_color = if !has_data             { THEME.text_dim }
+                else if stats.max_us > 10_000        { THEME.err      }
+                else if stats.max_us > 5_000         { THEME.warn     }
+                else                                 { THEME.ok       };
+
+            // Pre-format every field to a fixed character count so that the
+            // monospace Row never shifts even as values change magnitude.
+            // avg: {:5.1} → "  8.3" … "125.0"  (5 chars)
+            // jitter: {:5} → "    0" … "99999"  (5 chars)
+            let avg_str = if has_data {
+                format!("{:5.1}", stats.interval_us as f32 / 1_000.0)
+            } else { " --.-".to_string() };
+            let p50_str = if has_data { format!("{:5}", stats.p50_us) }
+                          else        { "   --".to_string()           };
+            let p95_str = if has_data { format!("{:5}", stats.p95_us) }
+                          else        { "   --".to_string()           };
+            let p99_str = if has_data { format!("{:5}", stats.p99_us) }
+                          else        { "   --".to_string()           };
+            let max_str = if has_data { format!("{:5}", stats.max_us) }
+                          else        { "   --".to_string()           };
+
+            // Split into dim labels + variably-coloured values so p99/max
+            // can turn yellow/red while keeping a single monospace typeface.
+            // Every string literal here has a fixed char count; values are
+            // pre-formatted above to the same width, so columns are stable.
+            Row::new()
+                .push(Space::with_width(Length::Fill))
+                .push(t!("avg ").size(8).color(THEME.text_dim))
+                .push(t!(avg_str).size(8).color(THEME.text_dim))
+                .push(t!("ms  p50\u{b1}").size(8).color(THEME.text_dim))
+                .push(t!(p50_str).size(8).font(MONO_FONT)
+                    .color(if has_data { THEME.ok } else { THEME.text_dim }))
+                .push(t!("\u{b5}s  p95\u{b1}").size(8).color(THEME.text_dim))
+                .push(t!(p95_str).size(8).font(MONO_FONT)
+                    .color(if has_data { THEME.ok } else { THEME.text_dim }))
+                .push(t!("\u{b5}s  p99\u{b1}").size(8).color(THEME.text_dim))
+                .push(t!(p99_str).size(8).color(p99_color))
+                .push(t!("\u{b5}s  max\u{b1}").size(8).color(THEME.text_dim))
+                .push(t!(max_str).size(8).color(max_color))
+                .push(t!("\u{b5}s").size(8).color(THEME.text_dim))
+                .align_items(Alignment::Center)
+                .into()
+        };
+
+        // ── Rate Sync row ─────────────────────────────────────────────────
+        let rate_row = Row::new()
+            .push(t!("RATE").size(9).color(THEME.text_dim))
+            .push(Space::with_width(Length::Units(5)))
+            .push(sync_btn(&mut self.btn_rate_manual,  "Man",  rate_mode == SyncMode::Manual,
+                Message::SetRateSyncMode(SyncMode::Manual)))
+            .push(Space::with_width(Length::Units(3)))
+            .push(sync_btn(&mut self.btn_rate_change,  "BPM",  rate_mode == SyncMode::OnChange,
+                Message::SetRateSyncMode(SyncMode::OnChange)))
+            .push(Space::with_width(Length::Units(3)))
+            .push(sync_btn(&mut self.btn_rate_cont,    "Cont", rate_mode == SyncMode::Continuous,
+                Message::SetRateSyncMode(SyncMode::Continuous)))
+            .push(Space::with_width(Length::Units(5)))
+            .push(force_icon_btn(&mut self.btn_rate_force, Message::ForceRateSync))
             .push(Space::with_width(Length::Fill))
-            .push(force_btn(&mut self.btn_phase_force, "FORCE SYNC", Message::ForcePhaseSync))
+            .push(t!("PHASE").size(9).color(THEME.text_dim))
+            .push(Space::with_width(Length::Units(5)))
+            .push(sync_btn(&mut self.btn_phase_manual, "Man",  phase_mode == SyncMode::Manual,
+                Message::SetPhaseSyncMode(SyncMode::Manual)))
+            .push(Space::with_width(Length::Units(3)))
+            .push(sync_btn(&mut self.btn_phase_change, "BPM",  phase_mode == SyncMode::OnChange,
+                Message::SetPhaseSyncMode(SyncMode::OnChange)))
+            .push(Space::with_width(Length::Units(3)))
+            .push(sync_btn(&mut self.btn_phase_cont,   "Cont", phase_mode == SyncMode::Continuous,
+                Message::SetPhaseSyncMode(SyncMode::Continuous)))
+            .push(Space::with_width(Length::Units(5)))
+            .push(force_icon_btn(&mut self.btn_phase_force, Message::ForcePhaseSync))
             .align_items(Alignment::Center);
 
         // ── Assembly ──────────────────────────────────────────────────────
+        //
+        // Equal Length::Fill gaps between every section so the layout scales
+        // uniformly with the window height.
         let content = Column::new()
             .push(header)
-            .push(Space::with_height(6.into()))
+            .push(Space::with_height(Length::Fill))
             .push(telem_row)
-            .push(Space::with_height(6.into()))
+            .push(Space::with_height(Length::Fill))
             .push(net_row)
-            .push(Space::with_height(6.into()))
+            .push(Space::with_height(Length::Fill))
             .push(fx_row)
-            .push(Space::with_height(6.into()))
-            .push(Text::new("RATE SYNC MODE").size(9).color(THEME.text_dim))
             .push(Space::with_height(4.into()))
+            .push(fx_filter_row)
+            .push(Space::with_height(Length::Fill))
+            .push(clock_row)
+            .push(Space::with_height(3.into()))
+            .push(clock_stats_row)
+            .push(Space::with_height(Length::Fill))
             .push(rate_row)
-            .push(Space::with_height(6.into()))
-            .push(Text::new("PHASE SYNC MODE").size(9).color(THEME.text_dim))
-            .push(Space::with_height(4.into()))
-            .push(phase_row)
             .padding(10u16)
             .spacing(0);
 
@@ -880,40 +1316,34 @@ impl IcedEditor for EtherTapEditor {
 
 // ─── View helpers ─────────────────────────────────────────────────────────────
 
-fn radio_btn<'a>(
+/// Compact radio-style sync mode button (Man / BPM / Cont).
+fn sync_btn<'a>(
     state: &'a mut button::State,
-    label: &str,
+    label: &'static str,
     selected: bool,
     msg: Message,
 ) -> Button<'a, Message> {
     Button::new(
         state,
         Container::new(
-            Text::new(label).size(11)
+            t!(label).size(10)
                 .color(if selected { THEME.selected_text } else { THEME.muted }),
         ).center_x(),
     )
     .on_press(msg)
     .style(EtherBtn(if selected { BtnKind::Active } else { BtnKind::Idle }))
-    .padding([4, 10])
+    .padding([4, 8])
 }
 
-fn force_btn<'a>(
-    state: &'a mut button::State,
-    label: &'static str,
-    msg: Message,
-) -> Button<'a, Message> {
+/// Bolt-only force-sync button (no text label).
+fn force_icon_btn(state: &mut button::State, msg: Message) -> Button<'_, Message> {
     Button::new(
         state,
-        Row::new()
-            .push(Text::new(icon::BOLT).size(13).font(SOLAR_BOLD).color(THEME.danger_text))
-            .push(Space::with_width(Length::Units(5)))
-            .push(Text::new(label).size(11).color(THEME.danger_text))
-            .align_items(Alignment::Center),
+        t!(icon::BOLT).size(11).font(SOLAR_BOLD).color(THEME.danger_text),
     )
     .on_press(msg)
     .style(EtherBtn(BtnKind::Force))
-    .padding([4, 12])
+    .padding([4, 8])
 }
 
 // ─── Style utility ────────────────────────────────────────────────────────────

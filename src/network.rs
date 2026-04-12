@@ -42,12 +42,20 @@ const LOOP_SLEEP: Duration = Duration::from_millis(10);
 /// A device that responded to a scan probe, with identifying metadata.
 #[derive(Debug, Clone)]
 pub struct DeviceInfo {
+    /// Primary (best-path) IP — same-subnet preferred, then lowest latency.
     pub ip:    String,
     pub port:  u16,
     /// User-set name configured on the console (e.g. "Studio A Desk").
     pub name:  String,
     /// Hardware model string returned by the console (e.g. "X32", "M32").
     pub model: String,
+    /// Probe round-trip time in milliseconds for the primary IP.
+    pub latency_ms: Option<f32>,
+    /// All IPs this device was seen from.
+    /// Each entry is `(ip, latency_ms, direct)` where `direct` means the
+    /// device is on the same subnet as the scanning interface (0 router hops).
+    /// The primary `ip` is always duplicated here as the first entry.
+    pub all_addrs: Vec<(String, Option<f32>, bool)>,
 }
 
 impl DeviceInfo {
@@ -94,9 +102,10 @@ pub enum NetworkStatus {
     RxPulse,
     /// Polled delay-time value returned by the mixer.
     DelayReadback(f32),
-    /// Scan results: which slots hold a compatible Stereo Delay (DLY) and
-    /// which hold any other effect (occupied but incompatible).
-    SlotScan { compatible: Vec<u8>, occupied: Vec<u8> },
+    /// Scan results: compatible = BPM-capable slots, occupied = any non-empty slot.
+    /// `slot_types` carries the raw type ID for every slot 1–8 (index = slot-1);
+    /// `None` means the slot did not respond or could not be parsed.
+    SlotScan { compatible: Vec<u8>, occupied: Vec<u8>, slot_types: [Option<i32>; 8] },
     /// Devices that responded to the broadcast /info probe.
     TargetsFound(Vec<DeviceInfo>),
     /// Name/model parsed from an /info heartbeat response.
@@ -114,6 +123,9 @@ pub struct NetworkWorker {
     telemetry_timer: Instant,
     /// Shared reference to the active FX slot, updated when the user changes it.
     fx_slot: Arc<Mutex<u8>>,
+    /// Raw effect type ID for each slot (index = slot-1).  Used to choose the
+    /// correct par/NN address when dispatching or polling delay time.
+    slot_types: Arc<Mutex<[Option<i32>; 8]>>,
     /// Shared output for the last polled hardware delay float (f32 bits).
     hardware_float_out: Arc<AtomicU32>,
     /// Set by an explicit `Disconnect` command; prevents automatic reconnect.
@@ -128,6 +140,7 @@ impl NetworkWorker {
         cmd_rx: Receiver<NetworkCommand>,
         status_tx: Sender<NetworkStatus>,
         fx_slot: Arc<Mutex<u8>>,
+        slot_types: Arc<Mutex<[Option<i32>; 8]>>,
         hardware_float_out: Arc<AtomicU32>,
     ) -> Self {
         let now = Instant::now();
@@ -139,6 +152,7 @@ impl NetworkWorker {
             last_heartbeat: now,
             telemetry_timer: now,
             fx_slot,
+            slot_types,
             hardware_float_out,
             user_disconnected: false,
             connected: false,
@@ -211,8 +225,9 @@ impl NetworkWorker {
             }
 
             NetworkCommand::SyncNow { slot, bpm } => {
-                let value = osc::bpm_to_float(bpm);
-                self.send(&osc::set_fx_delay(slot, value));
+                let value   = osc::bpm_to_float(bpm);
+                let type_id = self.slot_type_for(slot);
+                self.send(&osc::set_fx_delay(slot, type_id, value));
                 self.pulse_tx();
             }
 
@@ -225,9 +240,10 @@ impl NetworkWorker {
                 self.pulse_tx();
                 std::thread::sleep(HARD_RESET_DWELL);
 
-                // 2. Update delay time on all slots.
+                // 2. Update delay time on all slots using the correct par address.
                 for slot in slots.iter().filter_map(|s| *s) {
-                    self.send(&osc::set_fx_delay(slot, value));
+                    let type_id = self.slot_type_for(slot);
+                    self.send(&osc::set_fx_delay(slot, type_id, value));
                 }
                 std::thread::sleep(HARD_RESET_DWELL);
 
@@ -245,28 +261,37 @@ impl NetworkWorker {
 
     // ── Telemetry ─────────────────────────────────────────────────────────
 
-    /// Send a `/fx/{slot}/par/02` query and report the returned float.
-    fn poll_delay(&self) {
-        let Some(sock) = &self.socket else { return };
-        let Some(target) = &self.target else { return };
+    /// Query the current delay time for the active slot and update `hardware_float_out`.
+    ///
+    /// Uses the effect-specific par address (par/01 or par/02) so the readback
+    /// is always the actual delay time, not some other effect parameter.
+    fn poll_delay(&mut self) {
+        let Some(target) = self.target else { return };
 
-        let slot = *self.fx_slot.lock();
-        let query = osc::query_fx_delay(slot);
+        let slot    = *self.fx_slot.lock();
+        let type_id = self.slot_type_for(slot);
+        let query   = osc::query_fx_delay(slot, type_id);
 
-        if sock.send_to(&query, target).is_err() {
+        let send_ok = self.socket.as_ref()
+            .map(|s| s.send_to(&query, target).is_ok())
+            .unwrap_or(false);
+
+        if !send_ok {
+            self.socket = None;
+            self.connected = false;
             let _ = self.status_tx.try_send(NetworkStatus::Disconnected);
             return;
         }
         self.pulse_tx();
 
         let mut buf = [0u8; 256];
-        if let Ok((len, _)) = sock.recv_from(&mut buf) {
-            if let Some(value) = parse_fx_delay_response(&buf[..len]) {
-                self.hardware_float_out
-                    .store(value.to_bits(), Ordering::Relaxed);
-                let _ = self.status_tx.try_send(NetworkStatus::DelayReadback(value));
-                self.pulse_rx();
-            }
+        if let Some(value) = self.socket.as_ref().and_then(|s| {
+            s.recv_from(&mut buf).ok()
+                .and_then(|(len, _)| parse_fx_delay_response(&buf[..len]))
+        }) {
+            self.hardware_float_out.store(value.to_bits(), Ordering::Relaxed);
+            let _ = self.status_tx.try_send(NetworkStatus::DelayReadback(value));
+            self.pulse_rx();
         }
     }
 
@@ -282,6 +307,7 @@ impl NetworkWorker {
             .unwrap_or(false);
 
         if !sent {
+            self.socket = None;
             self.connected = false;
             let _ = self.status_tx.try_send(NetworkStatus::Disconnected);
             return;
@@ -315,14 +341,16 @@ impl NetworkWorker {
 
     // ── Slot audit ───────────────────────────────────────────────────────
 
-    fn audit_slots(&self) {
+    fn audit_slots(&mut self) {
         let (Some(sock), Some(target)) = (&self.socket, &self.target) else {
             return;
         };
         let _ = sock.set_read_timeout(Some(RECV_TIMEOUT));
 
-        let mut compatible = Vec::new();
-        let mut occupied   = Vec::new();
+        let mut compatible  = Vec::new();
+        let mut occupied    = Vec::new();
+        let mut slot_types  = [None::<i32>; 8];
+
         for slot in 1u8..=8 {
             if sock.send_to(&osc::query_fx_type(slot), target).is_err() {
                 continue;
@@ -330,61 +358,188 @@ impl NetworkWorker {
             let mut buf = [0u8; 256];
             if let Ok((len, _)) = sock.recv_from(&mut buf) {
                 if let Some(type_id) = parse_fx_type(&buf[..len]) {
-                    if type_id == osc::DLY_TYPE_ID {
+                    slot_types[(slot - 1) as usize] = Some(type_id);
+                    // Any response means the slot is occupied.
+                    // Empty slots do not respond to /fx/{slot}/type at all.
+                    if osc::is_bpm_compatible(type_id, slot) {
                         compatible.push(slot);
-                        occupied.push(slot);
-                    } else if type_id != 0 {
-                        occupied.push(slot); // occupied but not a DLY
                     }
-                    // type_id == 0  →  slot is empty, nothing pushed
+                    occupied.push(slot);
                 }
+                // No response → slot is empty; slot_types entry stays None.
             }
         }
-        let _ = self
-            .status_tx
-            .try_send(NetworkStatus::SlotScan { compatible, occupied });
+        // ── Debug: log every slot's effect type ──────────────────────────
+        eprintln!("[EtherTap] FX slot audit:");
+        for slot in 1u8..=8 {
+            match slot_types[(slot - 1) as usize] {
+                Some(type_id) => {
+                    let short = crate::osc::fx_type_short(type_id, slot);
+                    let long  = crate::osc::fx_type_long(type_id, slot);
+                    let tag   = if crate::osc::is_bpm_compatible(type_id, slot) {
+                        "  [BPM-compatible]"
+                    } else {
+                        ""
+                    };
+                    eprintln!("  Slot {slot}: {short}  ({long}){tag}");
+                }
+                None => eprintln!("  Slot {slot}: no response"),
+            }
+        }
+        eprintln!("  Compatible: {:?}  Occupied: {:?}", compatible, occupied);
+
+        let _ = self.status_tx.try_send(NetworkStatus::SlotScan {
+            compatible,
+            occupied,
+            slot_types,
+        });
     }
 
     // ── Network scan ─────────────────────────────────────────────────────
 
-    /// Broadcast `/info` and collect all responding device addresses.
+    /// Probe every local interface in parallel and collect responding devices.
+    ///
+    /// Each IPv4 interface gets its own socket so the directed subnet broadcast
+    /// exits on the correct NIC.  Responses are collected with non-blocking I/O.
+    ///
+    /// Results carry:
+    /// * `latency_ms` — probe round-trip time (useful for comparing paths)
+    /// * `all_addrs`  — every `(ip, latency_ms, direct)` triple the device was
+    ///   seen from; `direct` means same subnet as the scanning interface.
+    ///
+    /// Devices are identified by `(name, model)`.  The entry with the best path
+    /// (same-subnet first, then lowest latency) becomes the primary; all other
+    /// IPs are appended to `all_addrs` so the UI can show them.
     fn scan_targets(&self) {
-        let Ok(sock) = UdpSocket::bind("0.0.0.0:0") else { return };
-        let _ = sock.set_broadcast(true);
+        use std::{collections::HashMap, net::Ipv4Addr};
 
-        let probe = osc::heartbeat();
-        // Broadcast to the network — may not loop back to localhost on macOS.
-        if let Ok(bcast) = "255.255.255.255:10023".parse::<SocketAddr>() {
-            let _ = sock.send_to(&probe, bcast);
-        }
-        // Also unicast to loopback so a local mock mixer is always reachable.
-        if let Ok(loopback) = "127.0.0.1:10023".parse::<SocketAddr>() {
-            let _ = sock.send_to(&probe, loopback);
-        }
-
-        let mut found: Vec<DeviceInfo> = Vec::new();
-        let mut buf = [0u8; 512];
-        let start = Instant::now();
+        let probe  = osc::heartbeat();
         let window = Duration::from_millis(600);
 
-        loop {
-            if start.elapsed() >= window { break; }
-            let remaining = window - start.elapsed();
-            let _ = sock.set_read_timeout(Some(remaining.min(RECV_TIMEOUT)));
-            match sock.recv_from(&mut buf) {
-                Ok((len, src)) => {
-                    if decoder::decode_udp(&buf[..len]).is_ok() {
-                        let ip = src.ip().to_string();
-                        if found.iter().any(|d| d.ip == ip) { continue; }
-                        let (name, model) = parse_info_strings(&buf[..len]);
-                        found.push(DeviceInfo { ip, port: 10023, name, model });
+        // ── One socket per real IPv4 interface ────────────────────────────
+        struct Iface { sock: UdpSocket, local: Ipv4Addr, netmask: Ipv4Addr }
+
+        let mut ifaces: Vec<Iface> = Vec::new();
+
+        let raw = if_addrs::get_if_addrs().unwrap_or_default();
+        for iface in raw {
+            let if_addrs::IfAddr::V4(v4) = iface.addr else { continue };
+            if v4.ip.is_loopback() { continue; }
+
+            let Ok(sock) = UdpSocket::bind(format!("{}:0", v4.ip)) else { continue };
+            let _ = sock.set_broadcast(true);
+            let bcast = v4.broadcast.unwrap_or_else(|| {
+                Ipv4Addr::from(u32::from(v4.ip) | !u32::from(v4.netmask))
+            });
+            let _ = sock.send_to(&probe, SocketAddr::from((bcast, 10023u16)));
+            let _ = sock.set_nonblocking(true);
+            ifaces.push(Iface { sock, local: v4.ip, netmask: v4.netmask });
+        }
+
+        // Loopback socket so a local mock mixer is always discoverable.
+        if let Ok(sock) = UdpSocket::bind("127.0.0.1:0") {
+            let _ = sock.send_to(&probe, "127.0.0.1:10023".parse::<SocketAddr>().unwrap());
+            let _ = sock.set_nonblocking(true);
+            ifaces.push(Iface {
+                sock,
+                local:   Ipv4Addr::LOCALHOST,
+                netmask: Ipv4Addr::new(255, 0, 0, 0),
+            });
+        }
+
+        // ── Collect responses — raw entry per (socket, device) pair ───────
+        // Tuple: (ip, latency_ms, name, model, same_subnet)
+        type RawEntry = (String, f32, String, String, bool);
+
+        // ip_key → best raw entry (same-subnet wins; ties broken by latency)
+        let mut by_ip: HashMap<String, RawEntry> = HashMap::new();
+        let mut buf = [0u8; 512];
+        let probe_sent_at = Instant::now();
+        let start = probe_sent_at;
+
+        while start.elapsed() < window {
+            let mut any_recv = false;
+            for iface in &ifaces {
+                loop {
+                    match iface.sock.recv_from(&mut buf) {
+                        Ok((len, src)) => {
+                            any_recv = true;
+                            if decoder::decode_udp(&buf[..len]).is_err() { continue; }
+                            let src_v4 = match src.ip() {
+                                std::net::IpAddr::V4(v) => v,
+                                _ => continue,
+                            };
+
+                            let mask        = u32::from(iface.netmask);
+                            let same_subnet =
+                                (u32::from(iface.local) & mask) == (u32::from(src_v4) & mask);
+                            let latency_ms  = probe_sent_at.elapsed().as_micros() as f32 / 1000.0;
+                            let ip_key      = src_v4.to_string();
+                            let (name, model) = parse_info_strings(&buf[..len]);
+
+                            let entry: RawEntry = (ip_key.clone(), latency_ms, name, model, same_subnet);
+
+                            match by_ip.get(&ip_key) {
+                                None => { by_ip.insert(ip_key, entry); }
+                                Some((_, _, _, _, prev_same)) => {
+                                    // Prefer same-subnet; within that, prefer lower latency.
+                                    let better = (!*prev_same && same_subnet)
+                                        || (*prev_same == same_subnet && latency_ms < by_ip[&ip_key].1);
+                                    if better { by_ip.insert(ip_key, entry); }
+                                }
+                            }
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(_) => break,
                     }
                 }
-                Err(_) => {}  // timeout — keep looping until window expires
+            }
+            if !any_recv {
+                std::thread::sleep(Duration::from_millis(10));
             }
         }
 
-        let _ = self.status_tx.try_send(NetworkStatus::TargetsFound(found));
+        // ── Merge by (name, model) — best path first ──────────────────────
+        // Sort: same-subnet before routed, then ascending latency.
+        let mut all: Vec<RawEntry> = by_ip.into_values().collect();
+        all.sort_by(|a, b| {
+            match (b.4, a.4) { // same_subnet: true sorts before false
+                (true,  false) => std::cmp::Ordering::Less,
+                (false, true)  => std::cmp::Ordering::Greater,
+                _ => a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal),
+            }
+        });
+
+        let mut result: Vec<DeviceInfo> = Vec::new();
+
+        for (ip, latency_ms, name, model, same_subnet) in all {
+            let has_id = !name.is_empty() || !model.is_empty();
+
+            // Try to find an existing entry with the same identity.
+            if has_id {
+                if let Some(existing) = result.iter_mut()
+                    .find(|d| d.name == name && d.model == model)
+                {
+                    // Same physical device reachable via another IP — append.
+                    if !existing.all_addrs.iter().any(|(a, _, _)| *a == ip) {
+                        existing.all_addrs.push((ip, Some(latency_ms), same_subnet));
+                    }
+                    continue;
+                }
+            }
+
+            // New device.
+            result.push(DeviceInfo {
+                ip:         ip.clone(),
+                port:       10023,
+                name,
+                model,
+                latency_ms: Some(latency_ms),
+                all_addrs:  vec![(ip, Some(latency_ms), same_subnet)],
+            });
+        }
+
+        let _ = self.status_tx.try_send(NetworkStatus::TargetsFound(result));
     }
 
     // ── UDP helpers ───────────────────────────────────────────────────────
@@ -399,11 +554,16 @@ impl NetworkWorker {
         }
     }
 
-    fn send(&self, bytes: &[u8]) {
-        let (Some(sock), Some(target)) = (&self.socket, &self.target) else {
-            return;
-        };
-        if sock.send_to(bytes, target).is_err() {
+    /// Send `bytes` to the target.  On failure, nulls the socket so that
+    /// the next heartbeat cycle triggers a fresh `rebind()` attempt.
+    fn send(&mut self, bytes: &[u8]) {
+        let Some(target) = self.target else { return };
+        let ok = self.socket.as_ref()
+            .map(|s| s.send_to(bytes, target).is_ok())
+            .unwrap_or(false);
+        if !ok {
+            self.socket = None;
+            self.connected = false;
             let _ = self.status_tx.try_send(NetworkStatus::Disconnected);
         }
     }
@@ -414,6 +574,16 @@ impl NetworkWorker {
 
     fn pulse_rx(&self) {
         let _ = self.status_tx.try_send(NetworkStatus::RxPulse);
+    }
+
+    /// Look up the raw effect type ID for `slot` (1-indexed).
+    /// Returns 10 (DLY) as a safe default when the type is not yet known.
+    fn slot_type_for(&self, slot: u8) -> i32 {
+        let idx = slot.saturating_sub(1) as usize;
+        self.slot_types.lock()
+            .get(idx)
+            .and_then(|t| *t)
+            .unwrap_or(10)
     }
 }
 

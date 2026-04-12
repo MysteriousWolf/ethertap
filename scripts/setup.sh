@@ -11,8 +11,10 @@ set -euo pipefail
 
 BASEVIEW_URL="https://github.com/RustAudio/baseview.git"
 BASEVIEW_REV="579130e"   # update this when upgrading baseview (see PATCHES.md)
-VENDOR_DIR="vendor/baseview"
-PATCHES_DIR="patches/baseview"
+
+NIH_PLUG_URL="https://github.com/robbert-vdh/nih-plug.git"
+NIH_PLUG_REV="28b149ec4d62757d0b448809148a0c3ca6e09a95"   # update this when upgrading nih-plug (see PATCHES.md)
+
 DRY_RUN=false
 
 for arg in "$@"; do
@@ -25,37 +27,48 @@ done
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-echo "==> baseview @ $BASEVIEW_REV"
+vendor_one() {
+  local label="$1"
+  local url="$2"
+  local rev="$3"
+  local vendor_dir="$4"
+  local patches_dir="$5"
 
-if $DRY_RUN; then
-  echo "==> Dry-run: cloning to temp dir and testing patches..."
-  TMP=$(mktemp -d)
-  trap 'rm -rf "$TMP"' EXIT
-  git clone --quiet "$BASEVIEW_URL" "$TMP/baseview"
-  cd "$TMP/baseview" && git checkout --quiet "$BASEVIEW_REV"
-  for patch in "$REPO_ROOT/$PATCHES_DIR"/*.patch; do
-    echo "    patch --dry-run: $(basename "$patch")"
-    patch --dry-run -p1 < "$patch"
+  echo "==> $label @ $rev"
+
+  if $DRY_RUN; then
+    echo "    Dry-run: cloning to temp dir and testing patches..."
+    TMP=$(mktemp -d)
+    trap 'rm -rf "$TMP"' EXIT
+    git clone --quiet "$url" "$TMP/$label"
+    cd "$TMP/$label" && git checkout --quiet "$rev" && cd "$REPO_ROOT"
+    for patch in "$patches_dir"/*.patch; do
+      echo "    patch --dry-run: $(basename "$patch")"
+      patch --dry-run -p1 -d "$TMP/$label" < "$patch"
+    done
+    echo "    All patches apply cleanly."
+    return
+  fi
+
+  echo "    Removing old $vendor_dir..."
+  rm -rf "$vendor_dir"
+
+  echo "    Cloning upstream..."
+  git clone --quiet "$url" "$vendor_dir"
+  cd "$vendor_dir"
+  git checkout --quiet "$rev"
+  rm -rf .git .cargo-ok
+  cd "$REPO_ROOT"
+
+  echo "    Applying patches..."
+  for patch in "$patches_dir"/*.patch; do
+    echo "    $(basename "$patch")"
+    patch -p1 -d "$vendor_dir" < "$patch"
   done
-  echo "==> All patches apply cleanly."
-  exit 0
-fi
+}
 
-echo "==> Removing old vendor/baseview..."
-rm -rf "$VENDOR_DIR"
-
-echo "==> Cloning upstream baseview..."
-git clone --quiet "$BASEVIEW_URL" "$VENDOR_DIR"
-cd "$VENDOR_DIR"
-git checkout --quiet "$BASEVIEW_REV"
-rm -rf .git .cargo-ok
-cd "$REPO_ROOT"
-
-echo "==> Applying patches..."
-for patch in "$PATCHES_DIR"/*.patch; do
-  echo "    $(basename "$patch")"
-  patch -p1 -d "$VENDOR_DIR" < "$patch"
-done
+vendor_one "baseview"  "$BASEVIEW_URL"  "$BASEVIEW_REV"  "vendor/baseview"  "patches/baseview"
+vendor_one "nih-plug"  "$NIH_PLUG_URL"  "$NIH_PLUG_REV"  "vendor/nih-plug"  "patches/nih-plug"
 
 echo ""
 echo "Done. Run 'cargo check' to verify."

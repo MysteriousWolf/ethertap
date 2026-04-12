@@ -67,8 +67,8 @@ fn respond(socket: &UdpSocket, data: &[u8], from: std::net::SocketAddr) {
         // Telemetry query: return float for MOCK_BPM
         vec![OscType::Float(MOCK_FLOAT)]
     } else if msg.addr.ends_with("/type") {
-        // Audit query: report Stereo Delay (DLY = 10) for every slot
-        vec![OscType::Int(crate::osc::DLY_TYPE_ID)]
+        // Audit query: report Stereo Delay (DLY = type 10) for every slot
+        vec![OscType::Int(10)]
     } else {
         return; // SET commands and anything else are ignored
     };

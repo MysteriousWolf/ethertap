@@ -42,3 +42,42 @@ following forward-ports and fixes.
       ```
    e. Verify regenerated patches with `./scripts/setup.sh --check`.
    f. Update the pinned rev in this file.
+
+---
+
+## nih-plug
+
+**Upstream:** https://github.com/robbert-vdh/nih-plug  
+**Pinned rev:** `28b149ec4d62757d0b448809148a0c3ca6e09a95`  
+**Patches:** `patches/nih-plug/`
+
+### Why we patch
+
+nih-plug's `ProcessContext` trait has no `set_parameter` method (it is
+commented-out as a TODO in `src/context/process.rs`). Without it,
+`is_connected` and `is_matched` can only be updated by the GUI thread — so
+when the DAW GUI is closed the params freeze and host automation readback
+stops working.
+
+### Patches
+
+| File | What it does |
+|------|-------------|
+| `context_process_rs.patch` | Adds `ProcessContext::set_parameter<Pa: Param>` with a default impl that updates the param's internal atomic via `param.as_ptr().set_normalized_value()` |
+| `vst3_context_rs.patch` | Overrides `set_parameter` in `WrapperProcessContext` to additionally call `inner.set_normalized_value_by_hash()`, which schedules a `ParameterValueChanged` event on the GUI event loop so hosts pick up the new value via `getParamNormalized` |
+| `vst3_inner_rs.patch` | Extends `Task::ParameterValueChanged` handler to call `IComponentHandler::begin_edit` / `perform_edit` / `end_edit` on the DAW host before notifying the editor widget; without this the DAW never sees plugin-driven param changes |
+
+### Updating nih-plug
+
+1. Update `NIH_PLUG_REV` in `scripts/setup.sh`.
+2. Run `./scripts/setup.sh` to repopulate `vendor/nih-plug`.
+3. If patches no longer apply, resolve conflicts and regenerate:
+   ```bash
+   # from repo root, after manually fixing vendor/nih-plug:
+   cp vendor/nih-plug/src/context/process.rs /tmp/orig.rs
+   # apply your manual edit, then:
+   diff -u --label a/src/context/process.rs --label b/src/context/process.rs \
+     /tmp/orig.rs vendor/nih-plug/src/context/process.rs \
+     > patches/nih-plug/context_process_rs.patch
+   ```
+4. Verify with `./scripts/setup.sh --check` and `cargo check --lib`.
