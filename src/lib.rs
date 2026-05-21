@@ -31,8 +31,8 @@ use parking_lot::Mutex;
 
 mod editor;
 mod midi_clock;
-mod network;
-mod osc;
+pub mod network;
+pub mod osc;
 mod params;
 #[cfg(feature = "standalone")]
 mod mock;
@@ -150,9 +150,6 @@ pub struct EtherTap {
 
 impl Default for EtherTap {
     fn default() -> Self {
-        #[cfg(feature = "standalone")]
-        mock::start_once();
-
         let params = Arc::new(EtherTapParams::default());
 
         let hardware_float = Arc::new(AtomicU32::new(0u32));
@@ -536,7 +533,7 @@ impl Plugin for EtherTap {
                             // LED: pulse once per beat (every 24 ticks at standard PPQ).
                             self.midi_clock_pulse_count =
                                 self.midi_clock_pulse_count.wrapping_add(1);
-                            if self.midi_clock_pulse_count % 24 == 0 {
+                            if self.midi_clock_pulse_count.is_multiple_of(24) {
                                 self.midi_clock_activity_ts
                                     .store(now_ms(), Ordering::Relaxed);
                             }

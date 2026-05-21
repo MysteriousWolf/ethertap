@@ -183,7 +183,7 @@ impl NetworkWorker {
                     self.send_heartbeat();
                     // Advance by exactly one interval so the cadence stays
                     // constant regardless of how long the heartbeat took.
-                    self.last_heartbeat = self.last_heartbeat + interval;
+                    self.last_heartbeat += interval;
                 }
             }
 

@@ -52,11 +52,8 @@ macro_rules! t {
 mod icon {
     pub const LINK: &str        = "\u{ecf2}"; // si-Link — connected
     pub const LINK_BROKEN: &str = "\u{ecf3}"; // si-Link-Broken — disconnected
-    pub const RX: &str          = "\u{e94c}"; // si-Download-Minimalistic
     pub const ARROW_RIGHT: &str = "\u{e908}"; // si-Arrow-Right
     pub const ARROW_LEFT: &str  = "\u{e905}"; // si-Arrow-Left
-    pub const CHECK: &str       = "\u{ea56}"; // si-Check-Circle
-    pub const REFRESH: &str     = "\u{e910}"; // si-Refresh
     pub const BOLT: &str        = "\u{ea50}"; // si-Bolt — force / destructive
     pub const SCAN: &str        = "\u{ec8a}"; // si-Scanner
     pub const CLOCK: &str       = "\u{ed1c}"; // si-Clock-Circle — MIDI clock
@@ -73,6 +70,7 @@ const MIDI_OUT_NONE: &str = "\u{2014} None \u{2014}";
 // Field names are intentionally semantic (not widget-specific) so this block
 // reads as a design-token palette.
 
+#[allow(dead_code)]
 struct Theme {
     // ── Window ────────────────────────────────────────────────────────────
     bg:              Color, // window background
@@ -151,43 +149,43 @@ impl button::StyleSheet for EtherBtn {
     fn active(&self) -> button::Style {
         match self.0 {
             BtnKind::Idle => button::Style {
-                background: Some(Background::Color(THEME.surface)),
-                border_radius: 3.0, border_width: 1.0,
+                background: Some(Background::Color(rgb(22, 22, 30))),
+                border_radius: 5.0, border_width: 1.0,
                 border_color: THEME.surface_border,
                 text_color: THEME.muted,
                 ..Default::default()
             },
             BtnKind::Active => button::Style {
                 background: Some(Background::Color(THEME.selected_bg)),
-                border_radius: 3.0, border_width: 0.0,
+                border_radius: 5.0, border_width: 0.0,
                 border_color: THEME.selected_bg,
                 text_color: THEME.selected_text,
                 ..Default::default()
             },
             BtnKind::Force => button::Style {
                 background: Some(Background::Color(THEME.danger_bg)),
-                border_radius: 3.0, border_width: 0.0,
+                border_radius: 5.0, border_width: 0.0,
                 border_color: THEME.danger_bg,
                 text_color: THEME.danger_text,
                 ..Default::default()
             },
             BtnKind::Disabled => button::Style {
                 background: Some(Background::Color(THEME.bg)),
-                border_radius: 3.0, border_width: 1.0,
-                border_color: THEME.surface,
+                border_radius: 5.0, border_width: 1.0,
+                border_color: rgb(22, 22, 30),
                 text_color: THEME.surface_border,
                 ..Default::default()
             },
             BtnKind::Enabled => button::Style {
                 background: Some(Background::Color(rgb(25, 70, 35))),
-                border_radius: 3.0, border_width: 0.0,
+                border_radius: 5.0, border_width: 0.0,
                 border_color: THEME.ok,
                 text_color: THEME.ok,
                 ..Default::default()
             },
             BtnKind::Error => button::Style {
                 background: Some(Background::Color(rgb(75, 20, 20))),
-                border_radius: 3.0, border_width: 0.0,
+                border_radius: 5.0, border_width: 0.0,
                 border_color: THEME.err,
                 text_color: THEME.err,
                 ..Default::default()
@@ -212,7 +210,7 @@ impl text_input::StyleSheet for EtherInput {
     fn active(&self) -> text_input::Style {
         text_input::Style {
             background: Background::Color(THEME.bg),
-            border_radius: 3.0,
+            border_radius: 5.0,
             border_width: 1.0,
             border_color: THEME.surface_border,
         }
@@ -806,10 +804,16 @@ impl IcedEditor for EtherTapEditor {
                 if connected { THEME.text_dim } else { THEME.muted }
             ))
             .push(Space::with_width(Length::Fill))
+            .push(t!(if tx_on { "●" } else { "○" }).size(8).color(tx_color))
+            .push(Space::with_width(Length::Units(2)))
             .push(t!("TX").size(10).color(tx_color))
             .push(Space::with_width(Length::Units(8)))
+            .push(t!(if rx_on { "●" } else { "○" }).size(8).color(rx_color))
+            .push(Space::with_width(Length::Units(2)))
             .push(t!("RX").size(10).color(rx_color))
             .push(Space::with_width(Length::Units(8)))
+            .push(t!(if ck_on { "●" } else { "○" }).size(8).color(ck_color))
+            .push(Space::with_width(Length::Units(2)))
             .push(t!("CK").size(10).color(ck_color))
             .align_items(Alignment::Center);
 
@@ -1069,19 +1073,19 @@ impl IcedEditor for EtherTapEditor {
 
         let sync_badge: Element<'_, Message> = if !has_hw {
             Row::new()
-                .push(t!(icon::RX).size(13).font(SOLAR_BOLD).color(THEME.text_dim))
+                .push(t!("○").size(10).color(THEME.text_dim))
                 .push(Space::with_width(Length::Units(4)))
                 .push(t!("NO DATA").size(11).color(THEME.text_dim))
                 .align_items(Alignment::Center).into()
         } else if in_sync {
             Row::new()
-                .push(t!(icon::CHECK).size(13).font(SOLAR_BOLD).color(THEME.ok))
+                .push(t!("●").size(10).color(THEME.ok))
                 .push(Space::with_width(Length::Units(4)))
                 .push(t!("MATCH").size(11).color(THEME.ok))
                 .align_items(Alignment::Center).into()
         } else {
             Row::new()
-                .push(t!(icon::REFRESH).size(13).font(SOLAR_BOLD).color(THEME.err))
+                .push(t!("●").size(10).color(THEME.err))
                 .push(Space::with_width(Length::Units(4)))
                 .push(t!("DRIFT").size(11).color(THEME.err))
                 .align_items(Alignment::Center).into()
@@ -1121,12 +1125,12 @@ impl IcedEditor for EtherTapEditor {
         // Status indicator: check icon (green) when connected, refresh icon
         // (yellow) while reconnecting.  Hidden when no device is selected.
         let bridge_status: Element<'_, Message> = if device_selected {
-            let (glyph, color) = if bridge_conn {
-                (icon::CHECK,   THEME.ok)
+            let (dot, color) = if bridge_conn {
+                ("●", THEME.ok)
             } else {
-                (icon::REFRESH, THEME.warn)
+                ("●", THEME.warn)
             };
-            t!(glyph).size(11).font(SOLAR_BOLD).color(color).into()
+            t!(dot).size(10).color(color).into()
         } else {
             Space::with_width(Length::Units(11)).into()
         };

@@ -232,7 +232,7 @@ fn compute_stats(win: &[u32; STAT_WINDOW], n: usize) -> ClockStats {
 
     let pct = |p: usize| -> u32 {
         // Index of the p-th percentile (0-based, round up).
-        let idx = ((n * p + 99) / 100).saturating_sub(1).min(n - 1);
+        let idx = (n * p).div_ceil(100).saturating_sub(1).min(n - 1);
         dev_slice[idx]
     };
 
@@ -249,6 +249,7 @@ fn compute_stats(win: &[u32; STAT_WINDOW], n: usize) -> ClockStats {
 // ─── Non-Windows implementation ───────────────────────────────────────────────
 
 #[cfg(not(target_os = "windows"))]
+#[allow(unused_assignments)]
 fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
     use midir::os::unix::VirtualOutput;
     use midir::{MidiInputConnection, MidiOutputConnection};
@@ -265,7 +266,7 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
     let mut current_device: Option<String> = worker.initial_device;
     let mut phys_out: Option<MidiOutputConnection> = None;
     // phys_in kept alive for its Drop impl (stops the CoreMIDI input callback).
-    #[allow(unused_assignments)]
+    #[allow(unused_variables, unused_assignments)]
     let mut phys_in: Option<MidiInputConnection<()>> = None;
 
     // ── Resync gap — silence inserted after BPM change ───────────────────────
@@ -282,14 +283,17 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
     }
     worker.bridge_connected.store(phys_out.is_some(), Ordering::Relaxed);
 
-    let mut last_reconnect = Instant::now();
+    let mut known_ports: Vec<String> = Vec::new();
 
-    // ── Inter-pulse timing stats — rolling STAT_WINDOW (256) sample ring ──────
+    // ── Inter-pulse timing stats ─ rolling STAT_WINDOW (256) sample ring ──────
     let mut last_send:  Option<Instant>         = None;
     let mut win_us:     [u32; STAT_WINDOW]      = [0u32; STAT_WINDOW];
     let mut win_idx:    usize                   = 0;
     // Total pulses received — used to detect wrap and to gate stat updates.
     let mut win_total:  usize                   = 0;
+
+    // Periodic port scan timer — fires every 1 s regardless of clock activity.
+    let port_scan_timer = crossbeam_channel::tick(Duration::from_secs(1));
 
     loop {
         crossbeam_channel::select! {
@@ -353,7 +357,7 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
                             // Update stats every 24 pulses (one beat) once we have
                             // at least 48 samples (2 beats — enough for p50/p95).
                             // After 256 samples the full window is valid.
-                            if win_total % 24 == 0 && win_total >= 48 {
+                            if win_total.is_multiple_of(24) && win_total >= 48 {
                                 let n = win_total.min(STAT_WINDOW);
                                 let stats = compute_stats(&win_us, n);
                                 *worker.clock_stats.lock() = stats;
@@ -386,7 +390,6 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
                     }
                 }
                 worker.bridge_connected.store(phys_out.is_some(), Ordering::Relaxed);
-                last_reconnect = Instant::now();
             }
 
             // ── MIDI passthrough from physical input ──────────────────────────
@@ -396,18 +399,33 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
                 }
             }
 
-            // ── Reconnect heartbeat ───────────────────────────────────────────
-            default(Duration::from_millis(500)) => {
-                if phys_out.is_none() {
-                    if let Some(ref name) = current_device.clone() {
-                        if last_reconnect.elapsed() >= Duration::from_secs(1) {
-                            last_reconnect = Instant::now();
-                            phys_out = try_connect_out(name);
-                            if phys_out.is_some() {
-                                phys_in = try_connect_in(name, pass_tx.clone());
-                            }
-                            worker.bridge_connected.store(phys_out.is_some(), Ordering::Relaxed);
+            // ── Periodic port scan ────────────────────────────────────────────
+            recv(port_scan_timer) -> _ => {
+                let ports_now: Vec<String> =
+                    if let Ok(out) = midir::MidiOutput::new("EtherTap-Scan") {
+                        out.ports()
+                            .iter()
+                            .filter_map(|p| out.port_name(p).ok())
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                known_ports.clear();
+                known_ports.extend(ports_now);
+
+                if let Some(ref name) = current_device.clone() {
+                    let present = known_ports.iter().any(|p| p == name);
+
+                    if present && phys_out.is_none() {
+                        phys_out = try_connect_out(name);
+                        if phys_out.is_some() {
+                            phys_in = try_connect_in(name, pass_tx.clone());
                         }
+                        worker.bridge_connected.store(phys_out.is_some(), Ordering::Relaxed);
+                    } else if !present && phys_out.is_some() {
+                        phys_out = None;
+                        phys_in = None;
+                        worker.bridge_connected.store(false, Ordering::Relaxed);
                     }
                 }
             }

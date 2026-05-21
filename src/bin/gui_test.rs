@@ -1,9 +1,7 @@
-/// Standalone GUI runner — opens the EtherTap window without a DAW or a real
-/// mixer.
+/// Standalone GUI runner — opens the EtherTap window without a DAW.
 ///
-/// A mock X32/M32 starts automatically on `127.0.0.1:10023`, reporting
-/// 120 BPM and marking every slot as a Stereo Delay (DLY).  The IP field in
-/// the GUI will already read `127.0.0.1`.
+/// The default target is `127.0.0.1:10023`.  To test with a mock mixer, run
+/// `scripts/mock_mixer.py` in a separate terminal before connecting.
 ///
 /// Build and run:
 ///   cargo run --bin ethertap-gui --features standalone
