@@ -118,6 +118,7 @@ pub struct EtherTap {
     /// Last BPM at which a stable clock was running; used to detect changes
     /// large enough to warrant a resync gap (> 0.5 BPM).
     last_clock_bpm: f64,
+    last_bpm_changed_at: f64,
     /// Whether transport was playing in the previous process() call.
     /// Used to detect the not-playing → playing edge for TransportStart.
     prev_playing: bool,
@@ -254,6 +255,7 @@ impl Default for EtherTap {
             last_pos_beats: 0.0,
             midi_clock_pulse_count: 0,
             last_clock_bpm: 0.0,
+            last_bpm_changed_at: 0.0,
             prev_playing:   false,
             prev_force_sync:       false,
             prev_connect_to_last:  false,
@@ -510,11 +512,12 @@ impl Plugin for EtherTap {
                     let buf_len = buffer.samples();
                     if buf_len > 0 {
                         let ppq = *self.params.midi_clock_ppq.lock() as f64;
-                        if self.last_clock_bpm > 0.0
-                            && (bpm - self.last_clock_bpm).abs() > 0.5
-                        {
+                        if self.last_bpm_changed_at == 0.0 {
+                            self.last_bpm_changed_at = bpm;
+                        } else if (bpm - self.last_bpm_changed_at).abs() > 0.5 {
                             let _ = self.midi_clock_tx
                                 .try_send(midi_clock::ClockMsg::BpmChanged);
+                            self.last_bpm_changed_at = bpm;
                         }
                         self.last_clock_bpm = bpm;
 
