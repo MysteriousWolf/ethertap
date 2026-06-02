@@ -419,6 +419,8 @@ impl Plugin for EtherTap {
             self.bpm_change_ts = now_ms();
             self.bpm_is_settling = true;
             self.on_change_retry_pending = false;
+            self.hr_pending = false;
+            self.hr_target_beat = 0.0;
         } else if self.bpm_is_settling {
             let elapsed = now_ms().saturating_sub(self.bpm_change_ts);
             if elapsed >= SETTLE_MS {
