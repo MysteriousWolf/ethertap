@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build.sh — Build and package EtherTap VST3 bundles for release.
+# build.sh — Build and export EtherTap VST3 bundles for release.
 #
 # Usage:
 #   ./scripts/build.sh [--universal]
@@ -8,7 +8,7 @@
 #                 Requires both targets:
 #                   rustup target add aarch64-apple-darwin x86_64-apple-darwin
 #
-# Output: dist/ethertap-{version}-{platform}.zip  (Linux: .tar.gz)
+# Output: dist/ethertap-{version}-{platform}.vst3
 #
 # Set VERSION in the environment to override the value from Cargo.toml
 # (CI sets it from the git tag).
@@ -90,19 +90,13 @@ else
   cargo run -p xtask -- bundle ethertap --release
 fi
 
-# ── Package ────────────────────────────────────────────────────────────────────
+# ── Export ─────────────────────────────────────────────────────────────────────
 mkdir -p dist
-ARCHIVE="$REPO_ROOT/dist/ethertap-${VERSION}-${PLATFORM}"
+DEST="$REPO_ROOT/dist/ethertap-${VERSION}-${PLATFORM}.vst3"
 
-cd "$BUNDLE_DIR"
-if [ "$OS" = "Linux" ]; then
-  tar czf "${ARCHIVE}.tar.gz" "$BUNDLE_NAME"
-  echo "==> Packaged: dist/ethertap-${VERSION}-${PLATFORM}.tar.gz"
-else
-  zip -r "${ARCHIVE}.zip" "$BUNDLE_NAME"
-  echo "==> Packaged: dist/ethertap-${VERSION}-${PLATFORM}.zip"
-fi
-cd "$REPO_ROOT"
+rm -rf "$DEST"
+cp -R "$BUNDLE_DIR/$BUNDLE_NAME" "$DEST"
+echo "==> Exported: dist/ethertap-${VERSION}-${PLATFORM}.vst3"
 
 echo ""
 echo "Bundle: $BUNDLE_DIR/$BUNDLE_NAME"

@@ -23,12 +23,11 @@ use parking_lot::Mutex;
 use rosc::{decoder, OscPacket, OscType};
 
 use crate::osc;
+use crate::reconnect::Backoff;
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
-/// Retry interval used when the connection is lost (faster than normal heartbeat).
-const RECONNECT_INTERVAL: Duration = Duration::from_secs(2);
 const TELEMETRY_INTERVAL: Duration = Duration::from_secs(3);
 /// Per-recv timeout used for heartbeat / telemetry reads.
 const RECV_TIMEOUT: Duration = Duration::from_millis(250);
@@ -131,8 +130,8 @@ pub struct NetworkWorker {
     /// Set by an explicit `Disconnect` command; prevents automatic reconnect.
     /// Cleared when a new `UpdateTarget` arrives.
     user_disconnected: bool,
-    /// Last known connection state — used to pick the heartbeat vs reconnect interval.
     connected: bool,
+    backoff: Backoff,
 }
 
 impl NetworkWorker {
@@ -156,6 +155,7 @@ impl NetworkWorker {
             hardware_float_out,
             user_disconnected: false,
             connected: false,
+            backoff: Backoff::new(2000, 10000),
         }
     }
 
@@ -174,7 +174,9 @@ impl NetworkWorker {
             // Periodic heartbeat / reconnect.
             // Skipped entirely when the user explicitly disconnected.
             if !self.user_disconnected && self.target.is_some() {
-                let interval = if self.connected { HEARTBEAT_INTERVAL } else { RECONNECT_INTERVAL };
+                let interval = if self.connected { HEARTBEAT_INTERVAL } else {
+                    Duration::from_millis(self.backoff.next_delay_ms())
+                };
                 if self.last_heartbeat.elapsed() >= interval {
                     // Socket may have been dropped after a send/recv error — rebind before retrying.
                     if self.socket.is_none() {
@@ -205,6 +207,7 @@ impl NetworkWorker {
                 match format!("{ip}:{port}").parse::<SocketAddr>() {
                     Ok(addr) => {
                         self.user_disconnected = false;
+                        self.backoff.record_success();
                         self.target = Some(addr);
                         self.rebind();
                         // Record the reference point *before* the blocking heartbeat
@@ -212,7 +215,7 @@ impl NetworkWorker {
                         self.last_heartbeat = Instant::now();
                         self.send_heartbeat();
                     }
-                    Err(_) => eprintln!("[EtherTap] invalid target: {ip}:{port}"),
+                    Err(_) => log::warn!("[EtherTap] invalid target: {ip}:{port}"),
                 }
             }
 
@@ -289,7 +292,7 @@ impl NetworkWorker {
             s.recv_from(&mut buf).ok()
                 .and_then(|(len, _)| parse_fx_delay_response(&buf[..len]))
         }) {
-            self.hardware_float_out.store(value.to_bits(), Ordering::Relaxed);
+            self.hardware_float_out.store(value.to_bits(), Ordering::Release);
             let _ = self.status_tx.try_send(NetworkStatus::DelayReadback(value));
             self.pulse_rx();
         }
@@ -324,6 +327,7 @@ impl NetworkWorker {
         match recv_len.filter(|&len| decoder::decode_udp(&buf[..len]).is_ok()) {
             Some(len) => {
                 self.connected = true;
+                self.backoff.record_success();
                 let _ = self.status_tx.try_send(NetworkStatus::Connected);
                 self.pulse_rx();
                 let (name, model) = parse_info_strings(&buf[..len]);
@@ -334,6 +338,7 @@ impl NetworkWorker {
             }
             None => {
                 self.connected = false;
+                self.backoff.record_failure();
                 let _ = self.status_tx.try_send(NetworkStatus::Disconnected);
             }
         }
@@ -370,7 +375,7 @@ impl NetworkWorker {
             }
         }
         // ── Debug: log every slot's effect type ──────────────────────────
-        eprintln!("[EtherTap] FX slot audit:");
+        log::info!("[EtherTap] FX slot audit:");
         for slot in 1u8..=8 {
             match slot_types[(slot - 1) as usize] {
                 Some(type_id) => {
@@ -381,12 +386,12 @@ impl NetworkWorker {
                     } else {
                         ""
                     };
-                    eprintln!("  Slot {slot}: {short}  ({long}){tag}");
+                    log::info!("  Slot {slot}: {short}  ({long}){tag}");
                 }
-                None => eprintln!("  Slot {slot}: no response"),
+                None => log::info!("  Slot {slot}: no response"),
             }
         }
-        eprintln!("  Compatible: {:?}  Occupied: {:?}", compatible, occupied);
+        log::info!("  Compatible: {:?}  Occupied: {:?}", compatible, occupied);
 
         let _ = self.status_tx.try_send(NetworkStatus::SlotScan {
             compatible,
@@ -550,7 +555,7 @@ impl NetworkWorker {
                 let _ = sock.set_read_timeout(Some(RECV_TIMEOUT));
                 self.socket = Some(sock);
             }
-            Err(e) => eprintln!("[EtherTap] failed to bind UDP socket: {e}"),
+            Err(e) => log::warn!("[EtherTap] failed to bind UDP socket: {e}"),
         }
     }
 
@@ -640,4 +645,215 @@ pub fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rosc::{encoder, OscMessage};
+
+    #[test]
+    fn display_name_name_and_model() {
+        let d = DeviceInfo {
+            ip: "192.168.1.100".into(), port: 10023,
+            name: "Studio Desk".into(), model: "X32".into(),
+            latency_ms: None, all_addrs: vec![],
+        };
+        assert_eq!(d.display_name(), "Studio Desk (X32)");
+    }
+
+    #[test]
+    fn display_name_name_only() {
+        let d = DeviceInfo {
+            ip: "192.168.1.100".into(), port: 10023,
+            name: "Studio Desk".into(), model: "".into(),
+            latency_ms: None, all_addrs: vec![],
+        };
+        assert_eq!(d.display_name(), "Studio Desk");
+    }
+
+    #[test]
+    fn display_name_model_only() {
+        let d = DeviceInfo {
+            ip: "192.168.1.100".into(), port: 10023,
+            name: "".into(), model: "X32".into(),
+            latency_ms: None, all_addrs: vec![],
+        };
+        assert_eq!(d.display_name(), "X32");
+    }
+
+    #[test]
+    fn display_name_fallback_to_ip() {
+        let d = DeviceInfo {
+            ip: "192.168.1.100".into(), port: 10023,
+            name: "".into(), model: "".into(),
+            latency_ms: None, all_addrs: vec![],
+        };
+        assert_eq!(d.display_name(), "192.168.1.100:10023");
+    }
+
+    #[test]
+    fn display_name_name_equals_model_uses_name() {
+        let d = DeviceInfo {
+            ip: "192.168.1.100".into(), port: 10023,
+            name: "X32".into(), model: "X32".into(),
+            latency_ms: None, all_addrs: vec![],
+        };
+        assert_eq!(d.display_name(), "X32");
+    }
+
+    // ── parse_fx_type ────────────────────────────────────────────────────
+
+    fn make_osc_msg(addr: &str, args: Vec<OscType>) -> Vec<u8> {
+        let packet = OscPacket::Message(OscMessage { addr: addr.into(), args });
+        encoder::encode(&packet).expect("encode")
+    }
+
+    #[test]
+    fn parse_fx_type_dly() {
+        let data = make_osc_msg("/fx/1/type", vec![OscType::Int(10)]);
+        assert_eq!(parse_fx_type(&data), Some(10));
+    }
+
+    #[test]
+    fn parse_fx_type_reverb() {
+        let data = make_osc_msg("/fx/2/type", vec![OscType::Int(1)]);
+        assert_eq!(parse_fx_type(&data), Some(1));
+    }
+
+    #[test]
+    fn parse_fx_type_empty_slot() {
+        // Empty slots do not respond → parse None from non-OSC data
+        assert_eq!(parse_fx_type(b""), None);
+        assert_eq!(parse_fx_type(b"garbage"), None);
+    }
+
+    #[test]
+    fn parse_fx_type_float_arg_returns_none() {
+        // Wrong argument type
+        let data = make_osc_msg("/fx/1/type", vec![OscType::Float(0.5)]);
+        assert_eq!(parse_fx_type(&data), None);
+    }
+
+    // ── parse_info_strings ───────────────────────────────────────────────
+
+    #[test]
+    fn parse_info_strings_full_response() {
+        let data = make_osc_msg("/info", vec![
+            OscType::String("V2.12".into()),
+            OscType::String("Studio Desk".into()),
+            OscType::String("X32".into()),
+            OscType::String("4.06".into()),
+        ]);
+        let (name, model) = parse_info_strings(&data);
+        assert_eq!(name, "Studio Desk");
+        assert_eq!(model, "X32");
+    }
+
+    #[test]
+    fn parse_info_strings_no_args() {
+        let data = make_osc_msg("/info", vec![]);
+        let (name, model) = parse_info_strings(&data);
+        assert_eq!(name, "");
+        assert_eq!(model, "");
+    }
+
+    #[test]
+    fn parse_info_strings_single_arg() {
+        let data = make_osc_msg("/info", vec![
+            OscType::String("V2.12".into()),
+        ]);
+        let (name, model) = parse_info_strings(&data);
+        assert_eq!(name, "V2.12");
+        assert_eq!(model, "");
+    }
+
+    #[test]
+    fn parse_info_strings_two_args() {
+        let data = make_osc_msg("/info", vec![
+            OscType::String("V2.12".into()),
+            OscType::String("Studio Desk".into()),
+        ]);
+        let (name, model) = parse_info_strings(&data);
+        assert_eq!(name, "V2.12");
+        assert_eq!(model, "Studio Desk");
+    }
+
+    #[test]
+    fn parse_info_strings_garbage_data() {
+        let (name, model) = parse_info_strings(b"\xff\xfe\x00\x01");
+        assert_eq!(name, "");
+        assert_eq!(model, "");
+    }
+
+    // ── parse_fx_delay_response ──────────────────────────────────────────
+
+    #[test]
+    fn parse_fx_delay_response_float() {
+        let data = make_osc_msg("/fx/1/par/02", vec![OscType::Float(0.1667)]);
+        let f = parse_fx_delay_response(&data);
+        assert!((f.unwrap() - 0.1667).abs() < 0.001);
+    }
+
+    #[test]
+    fn parse_fx_delay_response_int_returns_none() {
+        let data = make_osc_msg("/fx/1/par/02", vec![OscType::Int(42)]);
+        assert_eq!(parse_fx_delay_response(&data), None);
+    }
+
+    #[test]
+    fn parse_fx_delay_response_empty_returns_none() {
+        assert_eq!(parse_fx_delay_response(b""), None);
+        assert_eq!(parse_fx_delay_response(b"garbage"), None);
+    }
+
+    // ── Backoff fuzz: full cycle ──────────────────────────────────────────
+
+    #[test]
+    fn backoff_full_cycle() {
+        let mut b = crate::reconnect::Backoff::new(2000, 10000);
+        assert_eq!(b.next_delay_ms(), 2000);
+        assert!(!b.is_cooling_down());
+
+        b.record_failure();
+        assert_eq!(b.next_delay_ms(), 4000);
+        assert!(b.is_cooling_down());
+
+        b.record_failure();
+        assert_eq!(b.next_delay_ms(), 8000);
+
+        b.record_failure();
+        assert_eq!(b.next_delay_ms(), 10000, "should cap at cap_ms");
+
+        b.record_failure();
+        assert_eq!(b.next_delay_ms(), 10000, "should stay capped");
+
+        b.record_success();
+        assert_eq!(b.next_delay_ms(), 2000, "should reset to base");
+        assert!(!b.is_cooling_down());
+    }
+
+    #[test]
+    fn backoff_reset_clears_everything() {
+        let mut b = crate::reconnect::Backoff::new(1000, 5000);
+        b.record_failure();
+        b.record_failure();
+        b.record_failure();
+        assert_eq!(b.next_delay_ms(), 5000);
+        b.reset();
+        assert_eq!(b.next_delay_ms(), 1000);
+        assert!(!b.is_cooling_down());
+    }
+
+    #[test]
+    fn backoff_immutable_queries() {
+        let b = crate::reconnect::Backoff::new(1000, 10000);
+        assert!(!b.is_cooling_down());
+        assert_eq!(b.next_delay_ms(), 1000);
+        // These don't mutate
+        let b2 = crate::reconnect::Backoff::new(500, 1000);
+        assert_eq!(b2.next_delay_ms(), 500);
+    }
 }

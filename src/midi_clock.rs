@@ -52,6 +52,8 @@ use parking_lot::Mutex;
 /// units need >800 ms) a clean window to detect the gap and reset phase.
 const RESYNC_GAP_MS: u64 = 1_500;
 
+
+
 const CLOCK_BYTE: &[u8] = &[0xF8];
 
 /// Rolling window size for timing statistics.  256 pulses ≈ 10.7 beats @ 120 BPM.
@@ -104,30 +106,35 @@ pub struct MidiClockWorker {
     enabled:          Arc<Mutex<bool>>,
     clock_rx:         Receiver<ClockMsg>,
     device_change_rx: Receiver<Option<String>>,
+    device_watch_rx:  Receiver<Vec<String>>,
     initial_device:   Option<String>,
-    bridge_connected: Arc<AtomicBool>,
+    bridge_connected:  Arc<AtomicBool>,
+    bridge_connecting: Arc<AtomicBool>,
     /// Shared timing statistics — written by this worker, read by the editor.
-    pub clock_stats:  Arc<Mutex<ClockStats>>,
+    pub clock_stats:   Arc<Mutex<ClockStats>>,
 }
 
 impl MidiClockWorker {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        enabled:          Arc<Mutex<bool>>,
-        clock_rx:         Receiver<ClockMsg>,
-        device_change_rx: Receiver<Option<String>>,
-        initial_device:   Option<String>,
-        bridge_connected: Arc<AtomicBool>,
-        clock_stats:      Arc<Mutex<ClockStats>>,
+        enabled:           Arc<Mutex<bool>>,
+        clock_rx:          Receiver<ClockMsg>,
+        device_change_rx:  Receiver<Option<String>>,
+        device_watch_rx:   Receiver<Vec<String>>,
+        initial_device:    Option<String>,
+        bridge_connected:  Arc<AtomicBool>,
+        bridge_connecting: Arc<AtomicBool>,
+        clock_stats:       Arc<Mutex<ClockStats>>,
     ) -> Self {
-        Self { enabled, clock_rx, device_change_rx, initial_device, bridge_connected,
-               clock_stats }
+        Self { enabled, clock_rx, device_change_rx, device_watch_rx,
+               initial_device, bridge_connected, bridge_connecting, clock_stats }
     }
 
     pub fn run(self) {
         use midir::MidiOutput;
         let output = match MidiOutput::new("EtherTap") {
             Ok(o) => o,
-            Err(e) => { eprintln!("[EtherTap] MIDI clock: init failed: {e}"); return; }
+            Err(e) => { log::error!("[EtherTap] MIDI clock: init failed: {e}"); return; }
         };
 
         #[cfg(not(target_os = "windows"))]
@@ -136,7 +143,7 @@ impl MidiClockWorker {
         #[cfg(target_os = "windows")]
         {
             drop(output);
-            eprintln!("[EtherTap] MIDI clock: virtual ports unsupported on Windows");
+            log::warn!("[EtherTap] MIDI clock: virtual ports unsupported on Windows");
         }
     }
 }
@@ -144,14 +151,11 @@ impl MidiClockWorker {
 // ─── macOS real-time thread priority ─────────────────────────────────────────
 //
 // Calls thread_policy_set(THREAD_TIME_CONSTRAINT_POLICY) so the OS scheduler
-// treats the MIDI clock worker as a soft real-time thread.  This eliminates the
-// "two pulses bunched together" stutters caused by scheduler pre-emption between
-// consecutive sends.
+// treats the MIDI clock worker as a soft real-time thread, preventing the
+// "two pulses bunched together" stutters that happen under normal scheduling
+// when a context switch lands between consecutive 0xF8 sends.
 //
-// Period 8 ms covers tempos up to ~310 BPM at 24 PPQ (shortest inter-tick gap).
-// Computation 0.5 ms: time to send one 0xF8 byte via CoreMIDI.
-// Constraint 4 ms: deadline — the kernel must schedule us within 4 ms of need.
-// Preemptible 1: another RT thread may still pre-empt us between ticks (safe).
+// Period 8 ms / computation 0.5 ms / constraint 4 ms / preemptible true.
 
 #[cfg(target_os = "macos")]
 fn set_realtime_priority() {
@@ -199,7 +203,7 @@ fn set_realtime_priority() {
             THREAD_TIME_CONSTRAINT_POLICY_COUNT,
         );
         if ret != 0 {
-            eprintln!("[EtherTap] MIDI RT thread priority failed (kern={ret})");
+            log::warn!("[EtherTap] MIDI RT thread priority failed (kern={ret})");
         }
     }
 }
@@ -256,14 +260,22 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
 
     set_realtime_priority();
 
-    let mut virt_conn = match output.create_virtual("EtherTap MIDI Clock") {
-        Ok(c) => c,
-        Err(e) => { eprintln!("[EtherTap] MIDI clock: virtual port failed: {e:?}"); return; }
+    log::info!("[EtherTap] MidiClockWorker starting: initial_device={:?}", worker.initial_device);
+
+    let mut virt_conn: Option<_> = match output.create_virtual("EtherTap MIDI Clock") {
+        Ok(c) => Some(c),
+        Err(e) => {
+            log::error!("[EtherTap] MIDI clock: virtual port failed: {e:?}");
+            log::error!("[EtherTap] The port may already exist from a previous run.");
+            log::error!("[EtherTap] Try: killall CoreMIDI 2>/dev/null; or reboot.");
+            log::error!("[EtherTap] MIDI clock will NOT be emitted until EtherTap is restarted.");
+            None
+        }
     };
 
-    let (pass_tx, pass_rx) = crossbeam_channel::bounded::<Vec<u8>>(256);
+    let (pass_tx, _pass_rx) = crossbeam_channel::bounded::<Vec<u8>>(256);
 
-    let mut current_device: Option<String> = worker.initial_device;
+    let mut current_device: Option<String> = worker.initial_device.clone();
     let mut phys_out: Option<MidiOutputConnection> = None;
     // phys_in kept alive for its Drop impl (stops the CoreMIDI input callback).
     #[allow(unused_variables, unused_assignments)]
@@ -275,13 +287,20 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
     let mut waiting_for_beat: bool            = false;
 
     // ── Initial physical device connection ────────────────────────────────────
-    if let Some(ref name) = current_device.clone() {
+    if let Some(ref name) = current_device {
+        log::info!("[EtherTap] run_unix: initial_device = {:?}", name);
         phys_out = try_connect_out(name);
         if phys_out.is_some() {
             phys_in = try_connect_in(name, pass_tx.clone());
         }
+    } else {
+        log::info!("[EtherTap] run_unix: no initial_device (user must select)");
     }
-    worker.bridge_connected.store(phys_out.is_some(), Ordering::Relaxed);
+    worker.bridge_connected.store(phys_out.is_some(), Ordering::Release);
+    // If a device is selected but not connected at startup, show connecting state.
+    if current_device.is_some() && phys_out.is_none() {
+        worker.bridge_connecting.store(true, Ordering::Release);
+    }
 
     let mut known_ports: Vec<String> = Vec::new();
 
@@ -294,6 +313,9 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
 
     // Periodic port scan timer — fires every 1 s regardless of clock activity.
     let port_scan_timer = crossbeam_channel::tick(Duration::from_secs(1));
+
+    // ── Reconnect backoff state ───────────────────────────────────────────────
+    let mut backoff = crate::reconnect::Backoff::new(1000, 10000);
 
     loop {
         crossbeam_channel::select! {
@@ -364,43 +386,72 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
                             }
                         }
                         last_send = Some(Instant::now());
-
-                        let _ = virt_conn.send(CLOCK_BYTE);
+                        static TICK_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                        let n = TICK_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if n.is_multiple_of(96) {
+                            log::info!("[EtherTap] tick #{} to virtual port, enabled={}", n, *worker.enabled.lock());
+                        }
+                        if let Some(ref mut vc) = virt_conn {
+                            if vc.send(CLOCK_BYTE).is_err() {
+                                log::warn!("[EtherTap] virtual port send failed — port may be disconnected");
+                            }
+                        }
                         if let Some(ref mut out) = phys_out {
                             if out.send(CLOCK_BYTE).is_err() {
                                 phys_out  = None;
                                 phys_in   = None;
-                                worker.bridge_connected.store(false, Ordering::Relaxed);
+                                worker.bridge_connected.store(false, Ordering::Release);
                             }
                         }
                     }
                 }
             }
 
-            // ── Device selection changed by editor ────────────────────────────
+// ── Device selection changed by editor ────────────────────────────
             recv(worker.device_change_rx) -> dev => {
                 let Ok(new_device) = dev else { break };
+                log::info!("[EtherTap] device_change_rx: {:?}", new_device.as_deref());
                 phys_in  = None;
                 phys_out = None;
                 current_device = new_device;
-                if let Some(ref name) = current_device.clone() {
+                backoff.reset();
+                if let Some(ref name) = current_device {
+                    worker.bridge_connecting.store(true, Ordering::Release);
                     phys_out = try_connect_out(name);
                     if phys_out.is_some() {
                         phys_in = try_connect_in(name, pass_tx.clone());
+                        if phys_in.is_none() { phys_out = None; }
                     }
-                }
-                worker.bridge_connected.store(phys_out.is_some(), Ordering::Relaxed);
-            }
-
-            // ── MIDI passthrough from physical input ──────────────────────────
-            recv(pass_rx) -> msg => {
-                if let Ok(bytes) = msg {
-                    let _ = virt_conn.send(&bytes);
+                    worker.bridge_connecting.store(false, Ordering::Release);
+                    worker.bridge_connected.store(phys_out.is_some(), Ordering::Release);
+                } else {
+                    worker.bridge_connected.store(false, Ordering::Release);
                 }
             }
 
-            // ── Periodic port scan ────────────────────────────────────────────
+            // ── Device watcher notification (macOS: native CoreMIDI callback;
+            //     non-macOS: polling fallback).  When device topology changes,
+            //     immediately try to reconnect or mark as disconnected.
+            recv(worker.device_watch_rx) -> msg => {
+                if let Ok(ports_now) = msg {
+                    handle_port_scan(
+                        &ports_now,
+                        &mut known_ports,
+                        &current_device,
+                        &mut phys_out,
+                        &mut phys_in,
+                        &mut backoff,
+                        &pass_tx,
+                        &worker,
+                    );
+                }
+            }
+
+            // ── Periodic port scan (safety net when notifications are delayed;
+            //     primary mechanism on non-macOS where polling is the only option).
             recv(port_scan_timer) -> _ => {
+                // On macOS the notification callback is the primary trigger; the
+                // timer is a 30 s recovery fallback.  On non-macOS it runs every 1 s.
                 let ports_now: Vec<String> =
                     if let Ok(out) = midir::MidiOutput::new("EtherTap-Scan") {
                         out.ports()
@@ -410,24 +461,16 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
                     } else {
                         Vec::new()
                     };
-                known_ports.clear();
-                known_ports.extend(ports_now);
-
-                if let Some(ref name) = current_device.clone() {
-                    let present = known_ports.iter().any(|p| p == name);
-
-                    if present && phys_out.is_none() {
-                        phys_out = try_connect_out(name);
-                        if phys_out.is_some() {
-                            phys_in = try_connect_in(name, pass_tx.clone());
-                        }
-                        worker.bridge_connected.store(phys_out.is_some(), Ordering::Relaxed);
-                    } else if !present && phys_out.is_some() {
-                        phys_out = None;
-                        phys_in = None;
-                        worker.bridge_connected.store(false, Ordering::Relaxed);
-                    }
-                }
+                handle_port_scan(
+                    &ports_now,
+                    &mut known_ports,
+                    &current_device,
+                    &mut phys_out,
+                    &mut phys_in,
+                    &mut backoff,
+                    &pass_tx,
+                    &worker,
+                );
             }
         }
     }
@@ -435,13 +478,85 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+/// Shared port-scan logic used by both the notification callback (macOS) and
+/// the periodic timer (all platforms).
+#[cfg(not(target_os = "windows"))]
+#[allow(clippy::too_many_arguments)]
+fn handle_port_scan(
+    ports_now: &[String],
+    known_ports: &mut Vec<String>,
+    current_device: &Option<String>,
+    phys_out: &mut Option<midir::MidiOutputConnection>,
+    phys_in: &mut Option<midir::MidiInputConnection<()>>,
+    backoff: &mut crate::reconnect::Backoff,
+    pass_tx: &crossbeam_channel::Sender<Vec<u8>>,
+    worker: &MidiClockWorker,
+) {
+    if backoff.is_cooling_down() {
+        log::debug!("[EtherTap] handle_port_scan: backoff cooling down, skipping");
+        return;
+    }
+
+    known_ports.clear();
+    known_ports.extend_from_slice(ports_now);
+
+    if let Some(ref name) = current_device {
+        let present = known_ports.iter().any(|p| p == name);
+        log::info!("[EtherTap] handle_port_scan: device={:?}, present={}, phys_out.is_some()={}",
+            name, present, phys_out.is_some());
+
+        if present && phys_out.is_none() {
+            log::info!("[EtherTap] handle_port_scan: attempting to connect to {:?}", name);
+            backoff.record_failure();
+            worker.bridge_connecting.store(true, Ordering::Release);
+            *phys_out = try_connect_out(name);
+            if phys_out.is_some() {
+                *phys_in = try_connect_in(name, pass_tx.clone());
+                backoff.record_success();
+            }
+            worker.bridge_connecting.store(false, Ordering::Release);
+            worker.bridge_connected.store(phys_out.is_some(), Ordering::Release);
+        } else if !present && phys_out.is_some() {
+            *phys_out = None;
+            *phys_in = None;
+            worker.bridge_connecting.store(true, Ordering::Release);
+            worker.bridge_connected.store(false, Ordering::Release);
+        } else if present && phys_out.is_some() {
+            worker.bridge_connecting.store(false, Ordering::Release);
+        }
+    } else {
+        worker.bridge_connecting.store(false, Ordering::Release);
+    }
+}
+
 #[cfg(not(target_os = "windows"))]
 fn try_connect_out(device_name: &str) -> Option<midir::MidiOutputConnection> {
-    let out  = midir::MidiOutput::new("EtherTap-PhysOut").ok()?;
-    let port = out.ports().into_iter().find(|p| {
+    let out = match midir::MidiOutput::new("EtherTap-PhysOut") {
+        Ok(o) => o,
+        Err(e) => {
+            log::warn!("[EtherTap] try_connect_out: MidiOutput::new failed: {e}");
+            return None;
+        }
+    };
+    let port = match out.ports().into_iter().find(|p| {
         out.port_name(p).map(|n| n == device_name).unwrap_or(false)
-    })?;
-    out.connect(&port, "EtherTap-PhysOut").ok()
+    }) {
+        Some(p) => p,
+        None => {
+            log::warn!("[EtherTap] try_connect_out: port '{device_name}' not found");
+            return None;
+        }
+    };
+    match out.connect(&port, "EtherTap-PhysOut") {
+        Ok(c) => {
+            log::info!("[EtherTap] try_connect_out: connected to '{device_name}'");
+            Some(c)
+        }
+        Err(e) => {
+            log::warn!("[EtherTap] try_connect_out: connect to '{device_name}' failed: {e}");
+            None
+        }
+    }
 }
 
 /// Open a MIDI input on `device_name` and forward every non-clock byte to
@@ -452,13 +567,129 @@ fn try_connect_in(
     pass_tx: Sender<Vec<u8>>,
 ) -> Option<midir::MidiInputConnection<()>> {
     use midir::MidiInput;
-    let inp  = MidiInput::new("EtherTap-PhysIn").ok()?;
-    let port = inp.ports().into_iter().find(|p| {
+    let inp = match MidiInput::new("EtherTap-PhysIn") {
+        Ok(i) => i,
+        Err(e) => {
+            log::warn!("[EtherTap] try_connect_in: MidiInput::new failed: {e}");
+            return None;
+        }
+    };
+    let port = match inp.ports().into_iter().find(|p| {
         inp.port_name(p).map(|n| n == device_name).unwrap_or(false)
-    })?;
-    inp.connect(&port, "EtherTap-PhysIn", move |_ts, msg, _| {
+    }) {
+        Some(p) => p,
+        None => {
+            log::warn!("[EtherTap] try_connect_in: port '{device_name}' not found");
+            return None;
+        }
+    };
+    match inp.connect(&port, "EtherTap-PhysIn", move |_ts, msg, _| {
         if msg.first().copied() != Some(0xF8) {
             let _ = pass_tx.try_send(msg.to_vec());
         }
-    }, ()).ok()
+    }, ()) {
+        Ok(c) => {
+            log::info!("[EtherTap] try_connect_in: connected input to '{device_name}'");
+            Some(c)
+        }
+        Err(e) => {
+            log::warn!("[EtherTap] try_connect_in: connect to '{device_name}' failed: {e}");
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compute_stats_empty_window() {
+        let win = [0u32; STAT_WINDOW];
+        let stats = compute_stats(&win, 0);
+        assert_eq!(stats.sample_n, 0);
+        assert_eq!(stats.interval_us, 0);
+    }
+
+#[test]
+    fn compute_stats_single_sample() {
+        let mut win = [0u32; STAT_WINDOW];
+        win[0] = 20833;
+        let stats = compute_stats(&win, 1);
+        assert_eq!(stats.sample_n, 0, "n=1 < 2 → early return, no stats");
+    }
+
+    #[test]
+    fn compute_stats_mixed_jitter() {
+        let mut win = [20833u32; STAT_WINDOW];
+        win[0] = 21333;
+        let stats = compute_stats(&win, 64);
+        assert!(stats.p50_us <= 500);
+        assert!(stats.max_us >= 200);
+    }
+
+    #[test]
+    fn compute_stats_identical_intervals() {
+        let mut win = [0u32; STAT_WINDOW];
+        for slot in win.iter_mut() {
+            *slot = 20833;
+        }
+        let stats = compute_stats(&win, 64);
+        assert_eq!(stats.p50_us, 0);
+        assert_eq!(stats.p95_us, 0);
+        assert_eq!(stats.p99_us, 0);
+        assert_eq!(stats.max_us, 0);
+        assert_eq!(stats.interval_us, 20833);
+    }
+
+#[test]
+    fn backoff_initial_state() {
+        let b = crate::reconnect::Backoff::new(1000, 10000);
+        assert!(!b.is_cooling_down());
+        assert_eq!(b.next_delay_ms(), 1000);
+    }
+
+    #[test]
+    fn backoff_exponential_growth() {
+        let mut b = crate::reconnect::Backoff::new(1000, 10000);
+        assert_eq!(b.next_delay_ms(), 1000);
+        b.record_failure();
+        assert_eq!(b.next_delay_ms(), 2000);
+        b.record_failure();
+        assert_eq!(b.next_delay_ms(), 4000);
+        b.record_failure();
+        assert_eq!(b.next_delay_ms(), 8000);
+        b.record_failure();
+        assert_eq!(b.next_delay_ms(), 10000, "capped at max");
+    }
+
+    #[test]
+    fn backoff_reset_on_success() {
+        let mut b = crate::reconnect::Backoff::new(1000, 10000);
+        b.record_failure();
+        b.record_failure();
+        assert!(b.is_cooling_down());
+        b.record_success();
+        assert!(!b.is_cooling_down());
+        assert_eq!(b.next_delay_ms(), 1000, "back to base after success");
+    }
+
+    #[test]
+    fn backoff_cooling_down() {
+        let mut b = crate::reconnect::Backoff::new(1000, 10000);
+        b.record_failure();
+        assert!(b.is_cooling_down());
+        std::hint::black_box(&b);
+    }
+
+    #[test]
+    fn clock_stats_default() {
+        let stats = ClockStats::default();
+        assert_eq!(stats.interval_us, 0);
+        assert_eq!(stats.p50_us, 0);
+        assert_eq!(stats.p95_us, 0);
+        assert_eq!(stats.p99_us, 0);
+        assert_eq!(stats.max_us, 0);
+        assert_eq!(stats.sample_n, 0);
+    }
 }

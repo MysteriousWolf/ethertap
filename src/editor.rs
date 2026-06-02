@@ -11,8 +11,6 @@ use std::sync::{
     Arc,
 };
 
-use midir::MidiOutput;
-
 use nih_plug::prelude::{GuiContext, ParamSetter};
 use nih_plug_iced::{
     button, container, create_iced_editor, executor, pick_list, text_input,
@@ -35,6 +33,11 @@ const SOLAR_BOLD: Font = Font::External {
     bytes: include_bytes!("../assets/Solar-Icon-Set_Bold.ttf"),
 };
 
+const LOGO_FONT: Font = Font::External {
+    name: "JetBrainsMono Bold",
+    bytes: include_bytes!("../assets/JetBrainsMono-Bold.ttf"),
+};
+
 // ─── Text helper ─────────────────────────────────────────────────────────────
 // Every text element in the UI uses MONO_FONT.  `t!(expr)` expands to
 // `t!(expr).font(MONO_FONT)` so callers can still chain `.size()`,
@@ -43,9 +46,6 @@ const SOLAR_BOLD: Font = Font::External {
 macro_rules! t {
     ($s:expr) => { Text::new($s).font(MONO_FONT) };
 }
-
-// TODO: add assets/Solaar.ttf and replace Font::Default with:
-// const LOGO_FONT: Font = Font::External { name: "Solaar", bytes: include_bytes!("../assets/Solaar.ttf") };
 
 // ─── Icon codepoints (Solar Icon Set Bold, PUA) ──────────────────────────────
 
@@ -70,7 +70,6 @@ const MIDI_OUT_NONE: &str = "\u{2014} None \u{2014}";
 // Field names are intentionally semantic (not widget-specific) so this block
 // reads as a design-token palette.
 
-#[allow(dead_code)]
 struct Theme {
     // ── Window ────────────────────────────────────────────────────────────
     bg:              Color, // window background
@@ -85,24 +84,42 @@ struct Theme {
     selected_border: Color,
     selected_text:   Color,
 
-    // ── Destructive / force action ────────────────────────────────────────
-    danger_bg:       Color,
+    // ── Force action (momentary bolt button) ─────────────────────────────
+    danger_bg:       Color, // amber fill
     danger_border:   Color,
-    danger_text:     Color,
 
     // ── Body text ─────────────────────────────────────────────────────────
-    text:            Color,
-    text_dim:        Color, // labels, secondary info
+    text:            Color, // main body
+    text_dim:        Color, // labels, secondary
 
     // ── Status ────────────────────────────────────────────────────────────
-    ok:              Color, // sync match, connected
-    err:             Color, // sync drift, disconnected
-    warn:            Color, // TX activity
+    ok:              Color, // green — connected, synced
+    err:             Color, // red   — disconnected, drift
+    warn:            Color, // amber — TX activity, connecting
 
-    // ── Accent ────────────────────────────────────────────────────────────
-    // Used for: logo "ETHER" glyph, RX activity LED, focused-input border.
-    // Change this one value to shift the whole brand colour.
+    // ── Brand accent ─────────────────────────────────────────────────────
+    // Used for: logo "ETHER" glyph, RX active dot, bolt icon, focused input.
     accent:          Color,
+
+    // ── Border bevels (simulate 3D on glow renderer) ─────────────────────
+    // nih-plug-iced glow backend has no shadow support, so bevels use
+    // light-edge / dark-edge pairs on raised surfaces.
+    bevel_hi:        Color, // light bevel (top/left edge of raised surface)
+    bevel_lo:        Color, // dark bevel  (bottom/right edge of raised surface)
+
+    // ── Section grouping ──────────────────────────────────────────────────
+    section_border:  Color, // subtle border around grouped controls
+    section_bg:      Color, // background tint for grouped controls
+    banner_bg:       Color, // dark banner background
+    banner_text:     Color, // primary text on dark banner (ETHER/TAP logo)
+
+    // ── Button state fills ────────────────────────────────────────────────
+    enabled_bg:      Color, // green fill for Enabled buttons
+    error_bg:        Color, // red fill for Error/Disconnect buttons
+
+    // ── Inset surfaces (recessed text inputs, sunken panels) ─────────────
+    inset_border:    Color, // border for recessed elements
+    inset_bg:        Color, // background for recessed elements
 }
 
 const fn rgb(r: u8, g: u8, b: u8) -> Color {
@@ -110,24 +127,56 @@ const fn rgb(r: u8, g: u8, b: u8) -> Color {
 }
 
 impl Theme {
+    /// Professional audio engineering palette — warm charcoal surfaces with
+    /// amber accent and clean status LEDs, inspired by analog mixing consoles.
     const fn dark() -> Self {
         Self {
-            bg:              rgb( 15,  15,  21),
-            surface:         rgb( 32,  32,  42),
-            surface_border:  rgb( 55,  55,  70),
-            muted:           rgb(115, 115, 130),
-            selected_bg:     rgb( 45,  90, 170),
-            selected_border: rgb( 45,  90, 170),
-            selected_text:   rgb(200, 225, 255),
-            danger_bg:       rgb(130,  50,  15),
-            danger_border:   rgb(130,  50,  15),
-            danger_text:     rgb(255, 210,  90),
-            text:            rgb(210, 210, 222),
-            text_dim:        rgb( 95,  95, 110),
-            ok:              rgb( 70, 190,  80),
-            err:             rgb(215,  65,  65),
-            warn:            rgb(225, 175,  50),
-            accent:          rgb( 50, 180, 170), // teal — brand colour
+            // ── Window ──────────────────────────────────────────────────────
+            bg:              rgb( 12,  12,  16),  // near-black charcoal
+
+            // ── Surfaces ────────────────────────────────────────────────────
+            surface:         rgb( 28,  28,  36),  // dark panel
+            surface_border:  rgb( 50,  50,  58),  // subtle panel edge
+            muted:           rgb(110, 110, 122),  // placeholder / disabled text
+
+            // ── Selected / active ────────────────────────────────────────────
+            selected_bg:     rgb( 50,  85, 155),  // muted engineering blue
+            selected_border: rgb( 50,  85, 155),
+            selected_text:   rgb(210, 225, 250),  // bright on blue
+
+            // ── Force action ───────────────────────────────────────────────────
+            danger_bg:       rgb(130,  45,  20),  // amber fill
+            danger_border:   rgb(130,  45,  20),
+
+            // ── Body text ────────────────────────────────────────────────────
+            text:            rgb(205, 205, 215),
+            text_dim:        rgb( 95,  95, 108),
+
+            // ── Status ──────────────────────────────────────────────────────
+            ok:              rgb( 65, 185,  75),
+            err:             rgb(210,  55,  55),
+            warn:            rgb(220, 170,  50),
+
+            // ── Brand accent ────────────────────────────────────────────────
+            accent:          rgb(210, 160,  55),
+
+            // ── Border bevels ───────────────────────────────────────────────
+            bevel_hi:        rgb( 48,  48,  56),
+            bevel_lo:        rgb(  8,   8,  12),
+
+            // ── Section grouping ────────────────────────────────────────────
+            section_border:  rgb( 38,  38,  46),
+            section_bg:      rgb( 18,  18,  24),
+            banner_bg:       rgb( 28,  28,  34),  // dark charcoal banner
+            banner_text:     rgb(190, 190, 200),  // primary text on dark banner
+
+            // ── Button fills ───────────────────────────────────────────────
+            enabled_bg:      rgb( 22,  65,  32),  // dark green
+            error_bg:        rgb( 70,  18,  18),  // dark red
+
+            // ── Inset surfaces ──────────────────────────────────────────────
+            inset_border:    rgb( 22,  22,  30),
+            inset_bg:        rgb( 10,  10,  14),
         }
     }
 }
@@ -148,44 +197,50 @@ struct EtherBtn(BtnKind);
 impl button::StyleSheet for EtherBtn {
     fn active(&self) -> button::Style {
         match self.0 {
+            // Idle / raised surface — light top-edge bevel, filled with surface bg.
             BtnKind::Idle => button::Style {
-                background: Some(Background::Color(rgb(22, 22, 30))),
-                border_radius: 5.0, border_width: 1.0,
-                border_color: THEME.surface_border,
+                background: Some(Background::Color(THEME.surface)),
+                border_radius: 4.0, border_width: 1.0,
+                border_color: THEME.bevel_hi,
                 text_color: THEME.muted,
                 ..Default::default()
             },
+            // Active / selected — blue fill, no border (flat highlight).
             BtnKind::Active => button::Style {
                 background: Some(Background::Color(THEME.selected_bg)),
-                border_radius: 5.0, border_width: 0.0,
-                border_color: THEME.selected_bg,
+                border_radius: 4.0, border_width: 0.0,
+                border_color: THEME.selected_border,
                 text_color: THEME.selected_text,
                 ..Default::default()
             },
+            // Force / momentary action — amber fill, no border.
             BtnKind::Force => button::Style {
                 background: Some(Background::Color(THEME.danger_bg)),
-                border_radius: 5.0, border_width: 0.0,
-                border_color: THEME.danger_bg,
-                text_color: THEME.danger_text,
+                border_radius: 4.0, border_width: 0.0,
+                border_color: THEME.danger_border,
+                text_color: THEME.accent,
                 ..Default::default()
             },
+            // Disabled / recessed — dark fill, dark bottom-edge bevel.
             BtnKind::Disabled => button::Style {
-                background: Some(Background::Color(THEME.bg)),
-                border_radius: 5.0, border_width: 1.0,
-                border_color: rgb(22, 22, 30),
+                background: Some(Background::Color(THEME.inset_bg)),
+                border_radius: 4.0, border_width: 1.0,
+                border_color: THEME.bevel_lo,
                 text_color: THEME.surface_border,
                 ..Default::default()
             },
+            // Enabled / connected — green fill, no border.
             BtnKind::Enabled => button::Style {
-                background: Some(Background::Color(rgb(25, 70, 35))),
-                border_radius: 5.0, border_width: 0.0,
+                background: Some(Background::Color(THEME.enabled_bg)),
+                border_radius: 4.0, border_width: 0.0,
                 border_color: THEME.ok,
                 text_color: THEME.ok,
                 ..Default::default()
             },
+            // Error / disconnected — red fill, no border.
             BtnKind::Error => button::Style {
-                background: Some(Background::Color(rgb(75, 20, 20))),
-                border_radius: 5.0, border_width: 0.0,
+                background: Some(Background::Color(THEME.error_bg)),
+                border_radius: 4.0, border_width: 0.0,
                 border_color: THEME.err,
                 text_color: THEME.err,
                 ..Default::default()
@@ -209,10 +264,10 @@ struct EtherInput;
 impl text_input::StyleSheet for EtherInput {
     fn active(&self) -> text_input::Style {
         text_input::Style {
-            background: Background::Color(THEME.bg),
-            border_radius: 5.0,
+            background: Background::Color(THEME.inset_bg),
+            border_radius: 4.0,
             border_width: 1.0,
-            border_color: THEME.surface_border,
+            border_color: THEME.inset_border,
         }
     }
 
@@ -241,10 +296,10 @@ struct EtherInputLocked;
 impl text_input::StyleSheet for EtherInputLocked {
     fn active(&self) -> text_input::Style {
         text_input::Style {
-            background: Background::Color(THEME.bg),
-            border_radius: 3.0,
+            background: Background::Color(THEME.inset_bg),
+            border_radius: 4.0,
             border_width: 1.0,
-            border_color: THEME.surface,
+            border_color: THEME.section_border,
         }
     }
     fn focused(&self)      -> text_input::Style { self.active() }
@@ -275,10 +330,10 @@ impl pick_list::StyleSheet for PpqPickStyle {
             text_color:        THEME.text,
             placeholder_color: THEME.muted,
             background:        Background::Color(THEME.surface),
-            border_radius:     3.0,
+            border_radius:     4.0,
             border_width:      1.0,
-            border_color:      THEME.surface_border,
-            icon_size:         0.55,
+            border_color:      THEME.bevel_hi,
+            icon_size:         0.30,
         }
     }
 
@@ -297,10 +352,10 @@ struct ModalCard;
 impl container::StyleSheet for ModalCard {
     fn style(&self) -> container::Style {
         container::Style {
-            background: Some(Background::Color(THEME.surface)),
-            border_radius: 3.0,
+            background: Some(Background::Color(THEME.section_bg)),
+            border_radius: 4.0,
             border_width: 1.0,
-            border_color: THEME.surface_border,
+            border_color: THEME.section_border,
             text_color: None,
         }
     }
@@ -330,11 +385,26 @@ struct TooltipCard;
 impl container::StyleSheet for TooltipCard {
     fn style(&self) -> container::Style {
         container::Style {
-            background: Some(Background::Color(THEME.surface)),
-            border_radius: 3.0,
+            background: Some(Background::Color(THEME.section_bg)),
+            border_radius: 4.0,
             border_width: 1.0,
-            border_color: THEME.surface_border,
+            border_color: THEME.inset_border,
             text_color: Some(THEME.text_dim),
+        }
+    }
+}
+
+/// Section card — wraps a group of related controls in a subtle border and
+/// slightly darker background to visually cluster them (mixer-style panel).
+struct ModSection;
+impl container::StyleSheet for ModSection {
+    fn style(&self) -> container::Style {
+        container::Style {
+            background: Some(Background::Color(THEME.section_bg)),
+            border_radius: 4.0,
+            border_width: 1.0,
+            border_color: THEME.section_border,
+            text_color: None,
         }
     }
 }
@@ -352,6 +422,23 @@ impl container::StyleSheet for ModalBackdrop {
         }
     }
 }
+
+/// Top banner with warm-tinted background for logo + status row.
+/// Borderless by design — just a coloured band at the top.
+struct BannerBg;
+impl container::StyleSheet for BannerBg {
+    fn style(&self) -> container::Style {
+        container::Style {
+            background: Some(Background::Color(THEME.banner_bg)),
+            border_radius: 0.0,
+            border_width: 0.0,
+            border_color: Color::TRANSPARENT,
+            text_color: None,
+        }
+    }
+}
+
+
 
 // ─── Shared data bundle ───────────────────────────────────────────────────────
 
@@ -378,8 +465,12 @@ pub struct EditorData {
     pub cmd_tx:             crossbeam_channel::Sender<NetworkCommand>,
     /// Notifies the MIDI clock worker when the user changes the output device.
     pub device_change_tx:   crossbeam_channel::Sender<Option<String>>,
+    /// Receives MIDI device hot-plug notifications from midi_watcher.
+    pub midi_device_rx:     Arc<crossbeam_channel::Receiver<Vec<String>>>,
     /// True when the worker has an active connection to the selected MIDI output.
-    pub midi_bridge_connected: Arc<AtomicBool>,
+    pub midi_bridge_connected:  Arc<AtomicBool>,
+    /// True while the worker is attempting to reconnect to the selected MIDI output.
+    pub midi_bridge_connecting: Arc<AtomicBool>,
     /// Rolling timing statistics from the MIDI clock worker.
     pub midi_clock_stats: Arc<Mutex<crate::midi_clock::ClockStats>>,
 }
@@ -418,11 +509,12 @@ struct EtherTapEditor {
     // Output clock section — toggle button + PPQ pick list + MIDI out device
     btn_clock_toggle:    button::State,
     pick_ppq:            pick_list::State<u8>,
-    pick_midi_out:       pick_list::State<String>,
     /// Available MIDI output port names — first entry is always the sentinel.
     midi_out_ports:      Vec<String>,
-    /// ms-since-epoch of last port enumeration.
-    last_port_enum_ms:   u64,
+    // MIDI device picker modal
+    show_midi_picker:    bool,
+    btn_midi_picker:     button::State,
+    midi_picker_states:  Vec<button::State>,
     // Network scan — btn_scan doubles as the modal close button
     btn_scan:              button::State,
     btn_connect:           button::State,
@@ -451,9 +543,10 @@ enum Message {
     ToggleMidiClock,
     /// Set MIDI clock pulses per quarter note.
     SetClockPpq(u8),
-    /// Select a MIDI output device for clock injection + passthrough bridging.
-    /// The sentinel value MIDI_OUT_NONE means "no device selected".
-    SetMidiOutDevice(String),
+    /// Open/close the MIDI device picker modal dialog.
+    ToggleMidiPicker,
+    /// Select a MIDI output device from the picker modal.
+    SelectMidiDevice(String),
     ScanTargets,
     /// Fired every render frame via `WindowSubs::on_frame`; gated to 5 s.
     OnFrame,
@@ -489,11 +582,12 @@ impl IcedEditor for EtherTapEditor {
                 btn_auto:         Default::default(),
                 btn_query:        Default::default(),
                 btn_fx_type:      Default::default(),
-                btn_clock_toggle:  Default::default(),
-                pick_ppq:          Default::default(),
-                pick_midi_out:     Default::default(),
-                midi_out_ports:    vec![MIDI_OUT_NONE.to_string()],
-                last_port_enum_ms: 0,
+                btn_clock_toggle:    Default::default(),
+                pick_ppq:            Default::default(),
+                midi_out_ports:      vec![MIDI_OUT_NONE.to_string()],
+                show_midi_picker:    false,
+                btn_midi_picker:     Default::default(),
+                midi_picker_states:  Vec::new(),
                 slot_states:       Default::default(),
                 btn_scan:              Default::default(),
                 btn_connect:           Default::default(),
@@ -522,13 +616,13 @@ impl IcedEditor for EtherTapEditor {
         match msg {
             Message::IpEdited(s) => {
                 // Only update the buffer when disconnected — editing while connected is ignored.
-                if !self.data.conn_status.load(Ordering::Relaxed) {
+                if !self.data.conn_status.load(Ordering::Acquire) {
                     self.ip_buf = s.clone();
                     *self.data.params.target_ip.lock() = s;
                 }
             }
             Message::PortEdited(s) => {
-                if !self.data.conn_status.load(Ordering::Relaxed) {
+                if !self.data.conn_status.load(Ordering::Acquire) {
                     self.port_buf = s.clone();
                     if let Ok(port) = s.parse::<u16>() {
                         *self.data.params.target_port.lock() = port;
@@ -560,8 +654,8 @@ impl IcedEditor for EtherTapEditor {
                 let _ = self.data.cmd_tx.try_send(NetworkCommand::AuditSlots);
             }
             Message::ToggleAutoSlots => {
-                let prev = self.data.all_slots_mode.load(Ordering::Relaxed);
-                self.data.all_slots_mode.store(!prev, Ordering::Relaxed);
+                let prev = self.data.all_slots_mode.load(Ordering::Acquire);
+                self.data.all_slots_mode.store(!prev, Ordering::Release);
             }
             Message::ToggleFxType(bit) => {
                 let mut filter = self.data.params.fx_type_filter.lock();
@@ -574,10 +668,21 @@ impl IcedEditor for EtherTapEditor {
             Message::SetClockPpq(ppq) => {
                 *self.data.params.midi_clock_ppq.lock() = ppq;
             }
-            Message::SetMidiOutDevice(name) => {
+            Message::ToggleMidiPicker => {
+                self.show_midi_picker = !self.show_midi_picker;
+                // Ensure button-state vector matches port count when opening.
+                if self.show_midi_picker && self.midi_out_ports.len() > self.midi_picker_states.len() {
+                    self.midi_picker_states.resize_with(
+                        self.midi_out_ports.len(),
+                        Default::default,
+                    );
+                }
+            }
+            Message::SelectMidiDevice(name) => {
                 let device = if name == MIDI_OUT_NONE { None } else { Some(name) };
                 *self.data.params.midi_out_device.lock() = device.clone();
                 let _ = self.data.device_change_tx.try_send(device);
+                self.show_midi_picker = false;
             }
             Message::ScanTargets => {
                 self.show_scan_results = !self.show_scan_results;
@@ -599,20 +704,13 @@ impl IcedEditor for EtherTapEditor {
                         self.last_scan_trigger_ms = now_ms();
                     }
                 }
-                // Refresh MIDI output port list every 2 s.
-                if now_ms().saturating_sub(self.last_port_enum_ms) >= 2_000 {
-                    self.last_port_enum_ms = now_ms();
-                    let mut ports = vec![MIDI_OUT_NONE.to_string()];
-                    if let Ok(out) = MidiOutput::new("EtherTap-Enum") {
-                        for p in out.ports() {
-                            if let Ok(name) = out.port_name(&p) {
-                                if name != "EtherTap MIDI Clock" {
-                                    ports.push(name);
-                                }
-                            }
-                        }
-                    }
-                    self.midi_out_ports = ports;
+                // Drain MIDI device notifications from the watcher channel.
+                // On macOS these arrive via CoreMIDI callback (no polling);
+                // on other platforms the watcher polls internally at 2 s.
+                while let Ok(ports) = self.data.midi_device_rx.try_recv() {
+                    let mut list = vec![MIDI_OUT_NONE.to_string()];
+                    list.extend(ports.iter().filter(|n| n.as_str() != "EtherTap MIDI Clock").cloned());
+                    self.midi_out_ports = list;
                 }
             }
             Message::SelectTarget(ip, port) => {
@@ -640,16 +738,16 @@ impl IcedEditor for EtherTapEditor {
 
     fn view(&mut self) -> Element<'_, Message> {
         // ── Read shared state ─────────────────────────────────────────────
-        let connected = self.data.conn_status.load(Ordering::Relaxed);
+        let connected = self.data.conn_status.load(Ordering::Acquire);
         let now         = now_ms();
         let tx_on = { let ts = self.data.tx_activity_ts.load(Ordering::Relaxed);
                       ts > 0 && now.saturating_sub(ts) < PULSE_MS };
         let rx_on = { let ts = self.data.rx_activity_ts.load(Ordering::Relaxed);
                       ts > 0 && now.saturating_sub(ts) < PULSE_MS };
 
-        let host_bpm_f = f32::from_bits(self.data.host_bpm.load(Ordering::Relaxed));
+        let host_bpm_f = f32::from_bits(self.data.host_bpm.load(Ordering::Acquire));
         let host_float = osc::bpm_to_float(host_bpm_f as f64);
-        let hw_float   = f32::from_bits(self.data.hardware_float.load(Ordering::Relaxed));
+        let hw_float   = f32::from_bits(self.data.hardware_float.load(Ordering::Acquire));
         let hw_bpm     = osc::float_to_bpm(hw_float);
         let has_hw     = hw_float > 0.0001;
         let in_sync    = has_hw && (host_float - hw_float).abs() < 0.001;
@@ -660,7 +758,7 @@ impl IcedEditor for EtherTapEditor {
         let compatible = self.data.compatible_slots.lock().clone();
         let occupied   = self.data.occupied_slots.lock().clone();
         let slot_types = *self.data.slot_types.lock();
-        let all_mode   = self.data.all_slots_mode.load(Ordering::Relaxed);
+        let all_mode   = self.data.all_slots_mode.load(Ordering::Acquire);
         let post_audit = !compatible.is_empty() || !occupied.is_empty();
 
         // ── Scan popup modal ──────────────────────────────────────────────
@@ -763,19 +861,80 @@ impl IcedEditor for EtherTapEditor {
                 .into();
         }
 
+        // ── MIDI device picker modal ──────────────────────────────────────
+        //
+        // Overlaid full-window card listing every available output, similar to
+        // the network scan popup.
+        if self.show_midi_picker {
+            // Re-sync button states if port list grew since last open.
+            if self.midi_out_ports.len() > self.midi_picker_states.len() {
+                self.midi_picker_states
+                    .resize_with(self.midi_out_ports.len(), Default::default);
+            }
+
+            let mut picker_col = Column::new()
+                .push(
+                    Row::new()
+                        .push(t!("MIDI OUTPUT").size(11).color(THEME.text))
+                        .push(Space::with_width(Length::Fill))
+                        .push(
+                            Button::new(
+                                &mut self.btn_midi_picker,
+                                t!("\u{00d7}").size(16).color(THEME.text_dim),
+                            )
+                            .on_press(Message::ToggleMidiPicker)
+                            .style(GhostBtn)
+                            .padding([0, 4]),
+                        )
+                        .align_items(Alignment::Center),
+                )
+                .push(Space::with_height(Length::Units(6)))
+                .spacing(4);
+
+            let port_snapshot = self.midi_out_ports.clone();
+            for (state, port_name) in self.midi_picker_states.iter_mut()
+                .zip(port_snapshot.iter())
+            {
+                let btn_name = if *port_name == MIDI_OUT_NONE {
+                    "None".to_string()
+                } else {
+                    port_name.clone()
+                };
+                picker_col = picker_col.push(
+                    Button::new(
+                        state,
+                        t!(&btn_name).size(11).color(THEME.text),
+                    )
+                    .on_press(Message::SelectMidiDevice(port_name.clone()))
+                    .style(EtherBtn(BtnKind::Idle))
+                    .padding([5, 8])
+                    .width(Length::Fill),
+                );
+            }
+
+            let card = Container::new(picker_col)
+                .padding(12)
+                .style(ModalCard)
+                .width(Length::Units(240));
+
+            return Container::new(card)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x()
+                .center_y()
+                .style(ModalBackdrop)
+                .into();
+        }
+
         // ── Logo + device info + status header ────────────────────────────
         //
         // Layout:  ETHERTAP  [fill]  [icon] device-name  [fill]  TX TX  RX RX
-        let (conn_icon, conn_color) = if connected {
-            (icon::LINK,        THEME.ok)
-        } else {
-            (icon::LINK_BROKEN, THEME.err)
-        };
+        let conn_color = if connected { THEME.ok } else { THEME.err };
         let ck_on = { let ts = self.data.midi_clock_activity_ts.load(Ordering::Relaxed);
                       ts > 0 && now.saturating_sub(ts) < PULSE_MS };
-        let tx_color = if tx_on { THEME.warn   } else { THEME.text_dim };
+        let tx_color = if tx_on { THEME.warn } else { THEME.text_dim };
         let rx_color = if rx_on { THEME.accent } else { THEME.text_dim };
-        let ck_color = if ck_on { THEME.ok     } else { THEME.text_dim };
+        let ck_color = if ck_on { THEME.ok } else { THEME.text_dim };
 
         let target_ip   = self.data.params.target_ip.lock().clone();
         let target_port = *self.data.params.target_port.lock();
@@ -794,14 +953,19 @@ impl IcedEditor for EtherTapEditor {
             }
         };
 
-        let header = Row::new()
-            .push(t!("ETHER").size(20).font(Font::Default).color(THEME.accent))
-            .push(t!("TAP")  .size(20).font(Font::Default).color(THEME.text))
+        // LOGO_FONT (JetBrainsMono Bold) gives the logo a chunky console-inspired
+        // weight that contrasts against the regular MONO_FONT body text.
+        // The entire row sits inside a warm-tinted banner container.
+        // Connection indicator uses a colored dot (●/○) matching TX/RX/CK style.
+        let header = Container::new(
+            Row::new()
+            .push(t!("ETHER").size(28).font(LOGO_FONT).color(THEME.accent))
+            .push(t!("TAP")  .size(28).font(LOGO_FONT).color(THEME.banner_text))
             .push(Space::with_width(Length::Fill))
-            .push(t!(conn_icon).size(11).font(SOLAR_BOLD).color(conn_color))
-            .push(Space::with_width(Length::Units(5)))
+            .push(t!(if connected { "●" } else { "○" }).size(10).color(conn_color))
+            .push(Space::with_width(Length::Units(4)))
             .push(t!(&device_label).size(11).color(
-                if connected { THEME.text_dim } else { THEME.muted }
+                if connected { THEME.text } else { THEME.muted }
             ))
             .push(Space::with_width(Length::Fill))
             .push(t!(if tx_on { "●" } else { "○" }).size(8).color(tx_color))
@@ -815,7 +979,10 @@ impl IcedEditor for EtherTapEditor {
             .push(t!(if ck_on { "●" } else { "○" }).size(8).color(ck_color))
             .push(Space::with_width(Length::Units(2)))
             .push(t!("CK").size(10).color(ck_color))
-            .align_items(Alignment::Center);
+            .align_items(Alignment::Center),
+        )
+        .padding([4, 10])  // slim vertical, horizontal inset for centering
+        .style(BannerBg);
 
         // ── Network config + scan + connect ──────────────────────────────
         let (ip_input, port_input): (Element<'_, Message>, Element<'_, Message>) = if connected {
@@ -824,7 +991,7 @@ impl IcedEditor for EtherTapEditor {
                     .size(11).font(MONO_FONT).padding(4).width(Length::FillPortion(3))
                     .style(EtherInputLocked).into(),
                 TextInput::new(&mut self.port_state, "Port", &self.port_buf, Message::PortEdited)
-                    .size(11).font(MONO_FONT).padding(4).width(Length::FillPortion(1))
+                    .size(11).font(MONO_FONT).padding(4).width(Length::FillPortion(2))
                     .style(EtherInputLocked).into(),
             )
         } else {
@@ -833,7 +1000,7 @@ impl IcedEditor for EtherTapEditor {
                     .size(11).font(MONO_FONT).padding(4).width(Length::FillPortion(3))
                     .style(EtherInput).into(),
                 TextInput::new(&mut self.port_state, "Port", &self.port_buf, Message::PortEdited)
-                    .size(11).font(MONO_FONT).padding(4).width(Length::FillPortion(1))
+                    .size(11).font(MONO_FONT).padding(4).width(Length::FillPortion(2))
                     .style(EtherInput).into(),
             )
         };
@@ -851,32 +1018,21 @@ impl IcedEditor for EtherTapEditor {
             if connected { btn } else { btn.on_press(Message::ScanTargets) }
         };
 
-        // Fixed width so the button doesn't resize between "Connect"/"Disconnect".
-        // Container with Fill + center_x centers the text within that fixed width.
+        // Content-sized so it adapts to text length; BtnKind variants handle
+        // the text color automatically via the stylesheet.
         let conn_btn = if connected {
-            Button::new(
-                &mut self.btn_connect,
-                Container::new(t!("Disconnect").size(10).color(THEME.ok))
-                    .width(Length::Fill).center_x(),
-            )
-            .on_press(Message::Disconnect)
-            .style(EtherBtn(BtnKind::Enabled))
-            .padding([4, 6])
-            .width(Length::Units(74))
+            Button::new(&mut self.btn_connect, t!("Disconnect").size(10))
+                .on_press(Message::Disconnect)
+                .style(EtherBtn(BtnKind::Enabled))
+                .padding([4, 6])
         } else {
-            Button::new(
-                &mut self.btn_connect,
-                Container::new(t!("Connect").size(10).color(THEME.err))
-                    .width(Length::Fill).center_x(),
-            )
-            .on_press(Message::Connect)
-            .style(EtherBtn(BtnKind::Error))
-            .padding([4, 6])
-            .width(Length::Units(74))
+            Button::new(&mut self.btn_connect, t!("Connect").size(10))
+                .on_press(Message::Connect)
+                .style(EtherBtn(BtnKind::Error))
+                .padding([4, 6])
         };
 
         let net_row = Row::new()
-            .push(t!("Target  ").size(11).color(THEME.text_dim))
             .push(ip_input)
             .push(t!("  :  ").size(11).color(THEME.text_dim))
             .push(port_input)
@@ -893,7 +1049,7 @@ impl IcedEditor for EtherTapEditor {
         // baselines align across the row regardless of label presence.
 
         let slot_cols = self.slot_states.iter_mut().zip(1u8..=8u8).fold(
-            Row::new().spacing(4).align_items(Alignment::Start),
+            Row::new().spacing(2).width(Length::Fill).align_items(Alignment::Center),
             |row, (state, slot)| {
                 let is_compat  = !post_audit || compatible.contains(&slot);
                 let is_sel     = !all_mode && slot == cur_slot && is_compat;
@@ -908,16 +1064,15 @@ impl IcedEditor for EtherTapEditor {
                 };
                 let text_color = match kind {
                     BtnKind::Active   => THEME.selected_text,
-                    BtnKind::Disabled => rgb(45, 45, 58),
+                    BtnKind::Disabled => THEME.surface_border,
                     _                 => THEME.muted,
                 };
                 let btn = Button::new(
                     state,
-                    Container::new(t!(slot.to_string()).size(11).color(text_color))
-                        .center_x(),
+                    Container::new(t!(slot.to_string()).size(11).color(text_color)),
                 )
                 .style(EtherBtn(kind))
-                .padding([4, 7]);
+                .padding([4, 8]);
                 let btn = if is_compat && !all_mode {
                     btn.on_press(Message::SlotSelected(slot))
                 } else {
@@ -968,29 +1123,21 @@ impl IcedEditor for EtherTapEditor {
                     slot_col.into()
                 };
 
+                let slot_elem: Element<'_, Message> = Container::new(slot_elem)
+                    .width(Length::FillPortion(1))
+                    .center_x()
+                    .into();
+
                 row.push(slot_elem)
             },
         );
 
-        // "Auto" button (was "All") + "Query" button.
-        // Matching Column wrapper (with blank spacer below) keeps button baselines
-        // aligned with the numbered slot buttons.
-        let auto_col = Column::new()
-            .push(
-                Button::new(
-                    &mut self.btn_auto,
-                    Container::new(t!("Auto").size(11).color(
-                        if all_mode { THEME.selected_text } else { THEME.muted },
-                    )).center_x(),
-                )
-                .on_press(Message::ToggleAutoSlots)
-                .style(EtherBtn(if all_mode { BtnKind::Active } else { BtnKind::Idle }))
-                .padding([4, 8]),
-            )
-            .push(Space::with_height(Length::Units(2)))
-            .push(Space::with_height(Length::Units(11)))
-            .align_items(Alignment::Center);
+        // Slot buttons row — the 8 numbered slots now use FillPortion for
+        // equal-width distribution across the available space.
 
+        // Query button prepended to the slot row (line 1).
+        // Wrapped in a Column with a bottom spacer so its button baseline aligns
+        // with the slot columns (which have a sub-label below each button).
         let query_col = Column::new()
             .push(
                 Button::new(
@@ -1005,30 +1152,18 @@ impl IcedEditor for EtherTapEditor {
                 .style(EtherBtn(BtnKind::Idle))
                 .padding([4, 8]),
             )
-            .push(Space::with_height(Length::Units(2)))
-            .push(Space::with_height(Length::Units(11)))
+            .push(Space::with_height(Length::Units(10)))
             .align_items(Alignment::Center);
-
-        // "FX SLOTS" label — padded by 5 px at the top so its text baseline
-        // aligns with the button text (buttons have 5 px top padding).
-        let label_col = Column::new()
-            .push(Space::with_height(Length::Units(5)))
-            .push(t!("FX SLOTS").size(11).color(THEME.text_dim))
-            .align_items(Alignment::Start);
-
-        let fx_row = Row::new()
-            .push(label_col)
-            .push(Space::with_width(Length::Units(8)))
-            .push(slot_cols)
-            .push(Space::with_width(Length::Fill))
-            .push(auto_col)
-            .push(Space::with_width(Length::Units(6)))
+        let fx_line1 = Row::new()
             .push(query_col)
+            .push(Space::with_width(Length::Units(14)))
+            .push(slot_cols)
             .align_items(Alignment::Start);
 
-        // ── FX type filter row (always visible below the slot row) ────────
+        // ── FX type filter toggles (line 2, with Auto button prepended) ────
         //
-        // Seven toggle buttons; each enables/disables a delay type in Auto mode.
+        // The Auto button uses BtnKind::Force (orange) when enabled to match
+        // the lightning icon style in the sync frame.
         let filter = *self.data.params.fx_type_filter.lock();
         const TYPE_BITS: &[(&str, u8, &str)] = &[
             ("Delay", 0, "Stereo Delay"),
@@ -1039,27 +1174,43 @@ impl IcedEditor for EtherTapEditor {
             ("D+Fln", 5, "Delay + Flanger"),
             ("Mod",   6, "Modulated Delay — chorused delay, delay time at par/02"),
         ];
-        let mut filter_row = Row::new()
-            .push(t!("AUTO").size(9).color(THEME.text_dim))
-            .push(Space::with_width(Length::Units(6)))
-            .spacing(4)
+        let mut fx_type_row = Row::new()
+            .width(Length::Fill)
             .align_items(Alignment::Center);
         for (state, &(name, bit, tip)) in self.btn_fx_type.iter_mut().zip(TYPE_BITS.iter()) {
             let on = (filter >> bit) & 1 == 1;
             let btn = Button::new(
                 state,
-                t!(name).size(10)
+                t!(name).size(9)
                     .color(if on { THEME.selected_text } else { THEME.muted }),
             )
             .on_press(Message::ToggleFxType(bit))
             .style(EtherBtn(if on { BtnKind::Active } else { BtnKind::Idle }))
-            .padding([4, 8]);
-            filter_row = filter_row.push(
+            .padding([4, 6]);
+            let elem: Element<'_, Message> = Container::new(
                 tooltip::Tooltip::new(btn, tip, tooltip::Position::Bottom)
                     .size(11).gap(2).padding(4).style(TooltipCard),
-            );
+            )
+            .width(Length::FillPortion(1))
+            .center_x()
+            .into();
+            fx_type_row = fx_type_row.push(elem);
         }
-        let fx_filter_row: Element<'_, Message> = filter_row.into();
+        let fx_line2 = Row::new()
+            .push(
+                Button::new(
+                    &mut self.btn_auto,
+                    t!("Auto").size(11).color(
+                        if all_mode { THEME.ok } else { THEME.muted },
+                    ),
+                )
+                .on_press(Message::ToggleAutoSlots)
+                .style(EtherBtn(if all_mode { BtnKind::Enabled } else { BtnKind::Idle }))
+                .padding([4, 8]),
+            )
+            .push(Space::with_width(Length::Units(14)))
+            .push(fx_type_row)
+            .align_items(Alignment::Center);
 
         // ── Telemetry (host + mixer on one line) ──────────────────────────
         let host_bpm_str   = if host_bpm_f > 0.0 { format!("{host_bpm_f:>7.2} BPM") }
@@ -1075,7 +1226,7 @@ impl IcedEditor for EtherTapEditor {
             Row::new()
                 .push(t!("○").size(10).color(THEME.text_dim))
                 .push(Space::with_width(Length::Units(4)))
-                .push(t!("NO DATA").size(11).color(THEME.text_dim))
+                .push(t!("NONE").size(11).color(THEME.text_dim))
                 .align_items(Alignment::Center).into()
         } else if in_sync {
             Row::new()
@@ -1112,82 +1263,109 @@ impl IcedEditor for EtherTapEditor {
         // ── Output clock section (PPQ + MIDI OUT device + toggle — one row) ─
         let clock_on  = *self.data.params.midi_clock_enabled.lock();
         let clock_ppq = *self.data.params.midi_clock_ppq.lock();
-        let clk_color = if clock_on { THEME.ok } else { THEME.muted };
 
         const PPQ_OPTIONS: &[u8] = &[3, 4, 6, 8, 12, 16, 24, 32, 48, 96];
 
         // ── MIDI bridge device + clock enable — single row ────────────────
         // Layout: OUTPUT  PPQ [ppq]  OUT [device=Fill]  [status]  [MIDI CLK]
         let current_out_device = self.data.params.midi_out_device.lock().clone();
-        let bridge_conn = self.data.midi_bridge_connected.load(Ordering::Relaxed);
+        let bridge_conn = self.data.midi_bridge_connected.load(Ordering::Acquire);
+        let bridge_connecting = self.data.midi_bridge_connecting.load(Ordering::Acquire);
         let device_selected = current_out_device.is_some();
 
-        // Status indicator: check icon (green) when connected, refresh icon
-        // (yellow) while reconnecting.  Hidden when no device is selected.
-        let bridge_status: Element<'_, Message> = if device_selected {
-            let (dot, color) = if bridge_conn {
-                ("●", THEME.ok)
-            } else {
-                ("●", THEME.warn)
-            };
-            t!(dot).size(10).color(color).into()
+        // MIDI picker button style depends on selection + connection state.
+        let midi_picker_kind = if !device_selected {
+            BtnKind::Disabled
+        } else if bridge_connecting && !bridge_conn {
+            BtnKind::Active
+        } else if bridge_conn {
+            BtnKind::Enabled
         } else {
-            Space::with_width(Length::Units(11)).into()
+            BtnKind::Idle
         };
 
-        let selected_display = current_out_device
-            .unwrap_or_else(|| MIDI_OUT_NONE.to_string());
+        // Bridge status dot — always visible, matches TX/RX/CK pattern.
+        let (bridge_dot, bridge_color) = if bridge_conn {
+            ("●", THEME.ok)
+        } else if bridge_connecting {
+            ("●", THEME.warn)
+        } else {
+            ("○", THEME.muted)
+        };
+        let bridge_status: Element<'_, Message> =
+            t!(bridge_dot).size(10).color(bridge_color).into();
+
+        // MIDI clock output toggle — state-aware text and color.
+        let (clk_text, clk_style) = if !clock_on {
+            ("Enable", BtnKind::Idle)
+        } else if bridge_conn {
+            ("Active", BtnKind::Enabled)
+        } else if bridge_connecting {
+            ("Connecting...", BtnKind::Active)
+        } else {
+            ("Enabled", BtnKind::Idle)
+        };
+        let midi_clk_btn: Element<'_, Message> = Button::new(
+            &mut self.btn_clock_toggle,
+            Row::new()
+                .push(t!(icon::CLOCK).size(11).font(SOLAR_BOLD))
+                .push(Space::with_width(Length::Units(4)))
+                .push(t!(clk_text).size(10))
+                .align_items(Alignment::Center),
+        )
+        .on_press(Message::ToggleMidiClock)
+        .style(EtherBtn(clk_style))
+        .padding([4, 8])
+        .into();
+
+        // Device selector on the left, PPQ on the right.
+        // When no device is selected, show a "Select" button with SCAN icon
+        // plus a device count hint.
+        let (midi_icon, midi_icon_color, selected_display) = if device_selected {
+            let icon = if bridge_conn { icon::LINK } else { icon::LINK_BROKEN };
+            let color = if bridge_conn { THEME.ok } else { THEME.muted };
+            (icon, color, current_out_device.expect("device_selected=true ⇒ Some"))
+        } else {
+            let count = self.midi_out_ports.len().saturating_sub(1);
+            let label = if count == 0 {
+                "Select".to_string()
+            } else {
+                format!("Select  ({})", count)
+            };
+            (icon::SCAN, THEME.text_dim, label)
+        };
 
         let clock_row = Row::new()
-            .push(t!("OUTPUT").size(9).color(THEME.text_dim))
-            .push(Space::with_width(Length::Units(5)))
-            .push(t!("PPQ").size(9).color(THEME.text_dim))
-            .push(Space::with_width(Length::Units(4)))
-            .push(
-                PickList::new(
-                    &mut self.pick_ppq,
-                    PPQ_OPTIONS,
-                    Some(clock_ppq),
-                    Message::SetClockPpq,
-                )
-                .text_size(10)
-                .font(MONO_FONT)
-                .padding([4, 6])
-                .width(Length::Units(52))
-                .style(PpqPickStyle),
-            )
-            .push(Space::with_width(Length::Units(8)))
-            .push(t!("OUT").size(9).color(THEME.text_dim))
-            .push(Space::with_width(Length::Units(4)))
-            .push(
-                PickList::new(
-                    &mut self.pick_midi_out,
-                    self.midi_out_ports.as_slice(),
-                    Some(selected_display),
-                    Message::SetMidiOutDevice,
-                )
-                .text_size(10)
-                .font(MONO_FONT)
-                .padding([4, 6])
-                .width(Length::Fill)
-                .style(PpqPickStyle),
-            )
-            .push(Space::with_width(Length::Units(4)))
-            .push(bridge_status)
-            .push(Space::with_width(Length::Units(6)))
             .push(
                 Button::new(
-                    &mut self.btn_clock_toggle,
+                    &mut self.btn_midi_picker,
                     Row::new()
-                        .push(t!(icon::CLOCK).size(11).font(SOLAR_BOLD).color(clk_color))
+                        .push(t!(midi_icon).size(11).font(SOLAR_BOLD).color(midi_icon_color))
                         .push(Space::with_width(Length::Units(4)))
-                        .push(t!("MIDI CLK").size(10).color(clk_color))
+                        .push(t!(&selected_display).size(10).color(midi_icon_color))
                         .align_items(Alignment::Center),
                 )
-                .on_press(Message::ToggleMidiClock)
-                .style(EtherBtn(if clock_on { BtnKind::Enabled } else { BtnKind::Idle }))
-                .padding([4, 8]),
+                .on_press(Message::ToggleMidiPicker)
+                .style(EtherBtn(midi_picker_kind))
+                .padding([4, 8])
+                .width(Length::Fill),
             )
+            .push(Space::with_width(Length::Units(8)))
+            .push(t!("PPQ").size(9).color(THEME.text_dim))
+            .push(Space::with_width(Length::Units(4)))
+            .push(PickList::new(
+                &mut self.pick_ppq,
+                PPQ_OPTIONS,
+                Some(clock_ppq),
+                Message::SetClockPpq,
+            )
+            .text_size(10)
+            .font(MONO_FONT)
+            .padding([4, 6])
+            .width(Length::Units(48))
+            .style(PpqPickStyle))
+            .push(Space::with_width(Length::Units(4)))
+            .push(bridge_status)
             .spacing(0)
             .align_items(Alignment::Center);
 
@@ -1239,20 +1417,22 @@ impl IcedEditor for EtherTapEditor {
             // Every string literal here has a fixed char count; values are
             // pre-formatted above to the same width, so columns are stable.
             Row::new()
+                .push(midi_clk_btn)
+                .push(Space::with_width(Length::Units(6)))
                 .push(Space::with_width(Length::Fill))
-                .push(t!("avg ").size(8).color(THEME.text_dim))
-                .push(t!(avg_str).size(8).color(THEME.text_dim))
-                .push(t!("ms  p50\u{b1}").size(8).color(THEME.text_dim))
-                .push(t!(p50_str).size(8).font(MONO_FONT)
+                .push(t!("avg ").size(9).color(THEME.text_dim))
+                .push(t!(avg_str).size(9).color(THEME.text_dim))
+                .push(t!("ms  p50\u{b1}").size(9).color(THEME.text_dim))
+                .push(t!(p50_str).size(9)
                     .color(if has_data { THEME.ok } else { THEME.text_dim }))
-                .push(t!("\u{b5}s  p95\u{b1}").size(8).color(THEME.text_dim))
-                .push(t!(p95_str).size(8).font(MONO_FONT)
+                .push(t!("\u{b5}s  p95\u{b1}").size(9).color(THEME.text_dim))
+                .push(t!(p95_str).size(9)
                     .color(if has_data { THEME.ok } else { THEME.text_dim }))
-                .push(t!("\u{b5}s  p99\u{b1}").size(8).color(THEME.text_dim))
-                .push(t!(p99_str).size(8).color(p99_color))
-                .push(t!("\u{b5}s  max\u{b1}").size(8).color(THEME.text_dim))
-                .push(t!(max_str).size(8).color(max_color))
-                .push(t!("\u{b5}s").size(8).color(THEME.text_dim))
+                .push(t!("\u{b5}s  p99\u{b1}").size(9).color(THEME.text_dim))
+                .push(t!(p99_str).size(9).color(p99_color))
+                .push(t!("\u{b5}s  max\u{b1}").size(9).color(THEME.text_dim))
+                .push(t!(max_str).size(9).color(max_color))
+                .push(t!("\u{b5}s").size(9).color(THEME.text_dim))
                 .align_items(Alignment::Center)
                 .into()
         };
@@ -1288,30 +1468,73 @@ impl IcedEditor for EtherTapEditor {
 
         // ── Assembly ──────────────────────────────────────────────────────
         //
-        // Equal Length::Fill gaps between every section so the layout scales
-        // uniformly with the window height.
+        // The banner is edge-to-edge (outside the content padding).  Each
+        // section frame uses a titled-border pattern: the title text sits
+        // right on the top border line (zero top padding, no background
+        // patch) with the content below it.
+        let banner = header;  // edge-to-edge, outside content padding
         let content = Column::new()
-            .push(header)
-            .push(Space::with_height(Length::Fill))
-            .push(telem_row)
-            .push(Space::with_height(Length::Fill))
-            .push(net_row)
-            .push(Space::with_height(Length::Fill))
-            .push(fx_row)
-            .push(Space::with_height(4.into()))
-            .push(fx_filter_row)
-            .push(Space::with_height(Length::Fill))
-            .push(clock_row)
-            .push(Space::with_height(3.into()))
-            .push(clock_stats_row)
-            .push(Space::with_height(Length::Fill))
-            .push(rate_row)
-            .padding(10u16)
+            .push(t!("MIXER").size(9).color(THEME.text_dim))
+            .push(
+                Container::new(
+                    Container::new(
+                        Column::new()
+                            .push(net_row)
+                            .push(Space::with_height(4.into()))
+                            .push(telem_row),
+                    )
+                    .padding([2, 6, 4, 6])
+                    .width(Length::Fill),
+                )
+                .style(ModSection),
+            )
+            .push(Space::with_height(Length::Units(5)))
+            .push(t!("EFFECTS").size(9).color(THEME.text_dim))
+            .push(
+                Container::new(
+                    Container::new(
+                        Column::new()
+                            .push(fx_line1)
+                            .push(Space::with_height(3.into()))
+                            .push(fx_line2),
+                    )
+                    .padding([2, 6, 4, 6])
+                    .width(Length::Fill),
+                )
+                .style(ModSection),
+            )
+            .push(Space::with_height(Length::Units(5)))
+            .push(t!("MIDI").size(9).color(THEME.text_dim))
+            .push(
+                Container::new(
+                    Container::new(
+                        Column::new()
+                            .push(clock_row)
+                            .push(Space::with_height(3.into()))
+                            .push(clock_stats_row),
+                    )
+                    .padding([2, 6, 4, 6])
+                    .width(Length::Fill),
+                )
+                .style(ModSection),
+            )
+            .push(Space::with_height(Length::Units(5)))
+            .push(t!("SYNC").size(9).color(THEME.text_dim))
+            .push(
+                Container::new(
+                    Container::new(rate_row)
+                        .padding([2, 6, 4, 6])
+                        .width(Length::Fill),
+                )
+                .style(ModSection),
+            )
+            .padding([0, 4, 5, 4])
             .spacing(0);
 
-        Container::new(content)
-            .width(Length::Fill)
-            .height(Length::Fill)
+        Column::new()
+            .push(banner)
+            .push(Space::with_height(Length::Units(6)))
+            .push(Container::new(content).width(Length::Fill).height(Length::Fill))
             .into()
     }
 
@@ -1332,7 +1555,7 @@ fn sync_btn<'a>(
         Container::new(
             t!(label).size(10)
                 .color(if selected { THEME.selected_text } else { THEME.muted }),
-        ).center_x(),
+        ),
     )
     .on_press(msg)
     .style(EtherBtn(if selected { BtnKind::Active } else { BtnKind::Idle }))
@@ -1343,7 +1566,7 @@ fn sync_btn<'a>(
 fn force_icon_btn(state: &mut button::State, msg: Message) -> Button<'_, Message> {
     Button::new(
         state,
-        t!(icon::BOLT).size(11).font(SOLAR_BOLD).color(THEME.danger_text),
+        t!(icon::BOLT).size(11).font(SOLAR_BOLD).color(THEME.accent),
     )
     .on_press(msg)
     .style(EtherBtn(BtnKind::Force))

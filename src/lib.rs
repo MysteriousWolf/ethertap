@@ -31,11 +31,11 @@ use parking_lot::Mutex;
 
 mod editor;
 mod midi_clock;
+mod midi_watcher;
 pub mod network;
 pub mod osc;
+pub mod reconnect;
 mod params;
-#[cfg(feature = "standalone")]
-mod mock;
 
 use editor::EditorData;
 use network::{NetworkCommand, NetworkStatus, NetworkWorker, now_ms};
@@ -70,12 +70,16 @@ pub struct EtherTap {
     midi_clock_activity_ts: Arc<AtomicU64>,
     /// True when the worker has an open connection to the selected physical output.
     midi_bridge_connected: Arc<AtomicBool>,
+    /// True while the MIDI worker is attempting to reconnect to the selected physical output.
+    midi_bridge_connecting: Arc<AtomicBool>,
     /// Timing statistics from the MIDI clock worker (updated once per beat).
     midi_clock_stats: Arc<Mutex<midi_clock::ClockStats>>,
     /// Polled hardware delay float stored as u32 bits (f32::from_bits).
     hardware_float: Arc<AtomicU32>,
     /// Current host BPM stored as u32 bits (f32::from_bits).
     host_bpm: Arc<AtomicU32>,
+    /// Receiver for MIDI device list changes (from midi_watcher).
+    midi_device_rx: Arc<crossbeam_channel::Receiver<Vec<String>>>,
     /// Set by the UI button; swap()-cleared by the audio thread to trigger an
     /// immediate Hard Reset without relying on the unimplemented param setter.
     force_sync_trigger: Arc<AtomicBool>,
@@ -117,6 +121,8 @@ pub struct EtherTap {
     /// Whether transport was playing in the previous process() call.
     /// Used to detect the not-playing → playing edge for TransportStart.
     prev_playing: bool,
+    /// Monotonic instant of the last standalone clock tick (no transport).
+    last_standalone_tick: std::time::Instant,
 
     // ── Reconnect auto-sync ───────────────────────────────────────────────
     /// Set when connection is established; cleared once SlotScan arrives and
@@ -174,8 +180,14 @@ impl Default for EtherTap {
             crossbeam_channel::bounded::<midi_clock::ClockMsg>(256);
         let (device_change_tx, device_change_rx) =
             crossbeam_channel::bounded::<Option<String>>(16);
-        let midi_bridge_connected = Arc::new(AtomicBool::new(false));
-        let midi_clock_stats      = Arc::new(Mutex::new(midi_clock::ClockStats::default()));
+        let midi_bridge_connected  = Arc::new(AtomicBool::new(false));
+        let midi_bridge_connecting = Arc::new(AtomicBool::new(false));
+        let midi_clock_stats       = Arc::new(Mutex::new(midi_clock::ClockStats::default()));
+
+        // Spawn the MIDI device watcher BEFORE any midir::MidiOutput is created
+        // (macOS: CoreMIDI notification client must be first).
+        let midi_watch = midi_watcher::spawn();
+        let midi_device_rx = Arc::new(midi_watch.editor_rx);
 
         let worker = NetworkWorker::new(
             cmd_rx,
@@ -194,8 +206,10 @@ impl Default for EtherTap {
             params.midi_clock_enabled.clone(),
             midi_clock_rx,
             device_change_rx,
+            midi_watch.worker_rx,
             initial_device,
             midi_bridge_connected.clone(),
+            midi_bridge_connecting.clone(),
             midi_clock_stats.clone(),
         );
         std::thread::Builder::new()
@@ -214,11 +228,13 @@ impl Default for EtherTap {
             rx_activity_ts,
             midi_clock_activity_ts,
             midi_bridge_connected,
+            midi_bridge_connecting,
             midi_clock_stats,
             hardware_float,
             host_bpm,
             force_sync_trigger,
             force_rate_trigger,
+            midi_device_rx,
             compatible_slots,
             occupied_slots,
             slot_types,
@@ -249,6 +265,7 @@ impl Default for EtherTap {
             on_change_retry_bpm:        0.0,
             on_change_retry_hard_reset: false,
             on_change_last_retry_ms:    0,
+            last_standalone_tick:      std::time::Instant::now(),
         }
     }
 }
@@ -311,19 +328,19 @@ impl Plugin for EtherTap {
         // ── 1. Drain network status (lock-free) ───────────────────────────
         while let Ok(status) = self.status_rx.try_recv() {
             match status {
-                NetworkStatus::Connected => self.conn_status.store(true, Ordering::Relaxed),
-                NetworkStatus::Disconnected => self.conn_status.store(false, Ordering::Relaxed),
+                NetworkStatus::Connected => self.conn_status.store(true, Ordering::Release),
+                NetworkStatus::Disconnected => self.conn_status.store(false, Ordering::Release),
                 NetworkStatus::ActivityPulse => {
                     self.tx_activity_ts.store(now_ms(), Ordering::Relaxed);
                 }
                 NetworkStatus::RxPulse => {
                     self.rx_activity_ts.store(now_ms(), Ordering::Relaxed);
                 }
-                NetworkStatus::DelayReadback(f) => {
-                    // hardware_float_out is written directly by the worker via Arc;
-                    // the status message is used here only for the rx LED.
-                    let _ = f; // value already in hardware_float via Arc<AtomicU32>
-                }
+                // hardware_float is written directly by the worker via Arc clone;
+                // the status message is drained here for alignment — the value
+                // is already readable from `self.hardware_float` without routing
+                // through the channel on every process() frame.
+                NetworkStatus::DelayReadback(_) => {}
                 NetworkStatus::SlotScan { compatible, occupied, slot_types } => {
                     *self.compatible_slots.lock() = compatible;
                     *self.occupied_slots.lock()   = occupied;
@@ -367,14 +384,14 @@ impl Plugin for EtherTap {
         let playing = transport.playing;
 
         // ── 3. Publish host BPM for the editor ───────────────────────────
-        self.host_bpm.store((bpm as f32).to_bits(), Ordering::Relaxed);
+        self.host_bpm.store((bpm as f32).to_bits(), Ordering::Release);
 
         // ── 3b. Update read-only host params from audio thread ───────────
         // This keeps is_connected / is_matched current even when the GUI is
         // closed; context.set_parameter() updates the internal atomic and, for
         // VST3, schedules a host notification via the GUI event loop.
-        let connected = self.conn_status.load(Ordering::Relaxed);
-        let hw_float  = f32::from_bits(self.hardware_float.load(Ordering::Relaxed));
+        let connected = self.conn_status.load(Ordering::Acquire);
+        let hw_float  = f32::from_bits(self.hardware_float.load(Ordering::Acquire));
         let in_sync   = connected
             && hw_float > 0.0001
             && (osc::bpm_to_float(bpm) - hw_float).abs() < 0.001;
@@ -383,7 +400,7 @@ impl Plugin for EtherTap {
             if connected {
                 // Just (re)connected: scan slots and arm the auto-sync.
                 // This mirrors the manual "Query → All" flow in the editor.
-                self.all_slots_mode.store(true, Ordering::Relaxed);
+                self.all_slots_mode.store(true, Ordering::Release);
                 self.reconnect_sync_pending = true;
                 let _ = self.cmd_tx.try_send(NetworkCommand::AuditSlots);
             }
@@ -439,8 +456,8 @@ impl Plugin for EtherTap {
 
         // ── 5b. OnChange retry — resend every 2 s until hardware confirms ─
         // Only retries when connected; stops automatically once in_sync.
-        if self.on_change_retry_pending && self.conn_status.load(Ordering::Relaxed) {
-            let hw_float = f32::from_bits(self.hardware_float.load(Ordering::Relaxed));
+        if self.on_change_retry_pending && self.conn_status.load(Ordering::Acquire) {
+            let hw_float = f32::from_bits(self.hardware_float.load(Ordering::Acquire));
             let target_float = osc::bpm_to_float(self.on_change_retry_bpm);
             let matched = hw_float > 0.0001 && (target_float - hw_float).abs() < 0.001;
             if matched {
@@ -477,39 +494,22 @@ impl Plugin for EtherTap {
         self.prev_playing = playing;
 
         // ── 7. MIDI clock output via CoreMIDI virtual source ─────────────────
-        // Design notes:
-        //
-        // • Transport start/stop → worker sends Stop/SPP/Start or Stop/SPP/Continue
-        //   so receivers are always phase-locked to the DAW position.
-        //
-        // • BPM change (>0.5 BPM) → worker sends Stop, waits 150 ms, then
-        //   SPP+Continue.  Receivers reset their averaging filter and snap to the
-        //   new tempo on the very first pulses after the gap.
-        //
-        // Guard on pos_beats_raw — if the host does not report beat position we
-        // skip rather than emitting clocks from an assumed position-0.
         if *self.params.midi_clock_enabled.lock() {
-            // ── Clock pulses while playing ────────────────────────────────────
-            // Reset BPM tracking when stopped so BpmChanged doesn't fire on
-            // the first buffer after transport restarts.
-            if !playing {
-                self.last_clock_bpm = 0.0;
-            }
+            let pos_beats_raw = transport.pos_beats(); // None = no DAW transport
 
-            // On the first playing buffer after a stop, signal the worker to
-            // phase-align the clock to the next beat boundary before resuming.
-            if playing && !self.prev_playing {
-                let _ = self.midi_clock_tx
-                    .try_send(midi_clock::ClockMsg::TransportStart);
-            }
-
-            if playing {
-                if let Some(beat_start) = pos_beats_raw {
+            if let Some(beat_start) = pos_beats_raw {
+                // DAW mode: follow transport position and play state.
+                if !playing {
+                    self.last_clock_bpm = 0.0;
+                }
+                if playing && !self.prev_playing {
+                    let _ = self.midi_clock_tx
+                        .try_send(midi_clock::ClockMsg::TransportStart);
+                }
+                if playing {
                     let buf_len = buffer.samples();
                     if buf_len > 0 {
                         let ppq = *self.params.midi_clock_ppq.lock() as f64;
-
-                        // Detect a meaningful BPM change and signal a resync gap.
                         if self.last_clock_bpm > 0.0
                             && (bpm - self.last_clock_bpm).abs() > 0.5
                         {
@@ -530,7 +530,6 @@ impl Plugin for EtherTap {
                             let on_beat = k % ppq as i64 == 0;
                             let _ = self.midi_clock_tx
                                 .try_send(midi_clock::ClockMsg::Tick { on_beat });
-                            // LED: pulse once per beat (every 24 ticks at standard PPQ).
                             self.midi_clock_pulse_count =
                                 self.midi_clock_pulse_count.wrapping_add(1);
                             if self.midi_clock_pulse_count.is_multiple_of(24) {
@@ -540,8 +539,41 @@ impl Plugin for EtherTap {
                         }
                     }
                 }
+            } else {
+                // Standalone (no DAW): emit ticks at default BPM.
+                let bpm = 120.0;
+                let ppq = *self.params.midi_clock_ppq.lock() as f64;
+                let tick_interval_us =
+                    (60.0 / bpm / ppq * 1_000_000.0) as u64;
+                let now_instant = std::time::Instant::now();
+                static TICK_COUNT: std::sync::atomic::AtomicU64 =
+                    std::sync::atomic::AtomicU64::new(0);
+                let n = TICK_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if n.is_multiple_of(500) {
+                    log::info!(
+                        "[EtherTap] standalone tick #{} interval_us={} ppq={} enabled={}",
+                        n,
+                        tick_interval_us,
+                        ppq,
+                        *self.params.midi_clock_enabled.lock()
+                    );
+                }
+                if self.last_standalone_tick.elapsed().as_micros() as u64
+                    >= tick_interval_us
+                {
+                    let _ = self.midi_clock_tx
+                        .try_send(midi_clock::ClockMsg::Tick { on_beat: true });
+                    self.midi_clock_pulse_count =
+                        self.midi_clock_pulse_count.wrapping_add(1);
+                    if self.midi_clock_pulse_count.is_multiple_of(24) {
+                        self.midi_clock_activity_ts
+                            .store(now_ms(), Ordering::Relaxed);
+                    }
+                    self.last_standalone_tick = now_instant;
+                }
             }
         }
+
         // ── 8. Force triggers — param automation edges + UI atomics ─────────
 
         // Connection control via automation.
@@ -551,7 +583,7 @@ impl Plugin for EtherTap {
             let port = *self.params.target_port.lock();
             let _ = self.cmd_tx.try_send(NetworkCommand::UpdateTarget { ip, port });
             let _ = self.cmd_tx.try_send(NetworkCommand::AuditSlots);
-            self.all_slots_mode.store(true, Ordering::Relaxed);
+            self.all_slots_mode.store(true, Ordering::Release);
         }
         self.prev_connect_to_last = connect_param;
 
@@ -601,6 +633,7 @@ impl Plugin for EtherTap {
             host_bpm: self.host_bpm.clone(),
             force_sync_trigger: self.force_sync_trigger.clone(),
             force_rate_trigger: self.force_rate_trigger.clone(),
+            midi_device_rx:    self.midi_device_rx.clone(),
             compatible_slots:  self.compatible_slots.clone(),
             occupied_slots:    self.occupied_slots.clone(),
             slot_types:        self.slot_types.clone(),
@@ -611,6 +644,7 @@ impl Plugin for EtherTap {
             cmd_tx: self.cmd_tx.clone(),
             device_change_tx: self.device_change_tx.clone(),
             midi_bridge_connected: self.midi_bridge_connected.clone(),
+            midi_bridge_connecting: self.midi_bridge_connecting.clone(),
             midi_clock_stats: self.midi_clock_stats.clone(),
         });
         editor::create(data)
@@ -641,7 +675,8 @@ impl EtherTap {
     /// is enabled in `params.fx_type_filter` receives the command; falls back to
     /// the single selected slot when no compatible slots are known yet.
     fn dispatch(&self, bpm: f64, hard_reset: bool) {
-        let slots: Vec<u8> = if self.all_slots_mode.load(Ordering::Relaxed) {
+        // all_slots_mode written only by process() audio thread
+        let slots: Vec<u8> = if self.all_slots_mode.load(Ordering::Acquire) {
             let cs = self.compatible_slots.lock();
             if cs.is_empty() {
                 vec![*self.params.fx_slot.lock()]
@@ -686,3 +721,173 @@ impl Vst3Plugin for EtherTap {
 }
 
 nih_export_vst3!(EtherTap);
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering;
+
+    use super::*;
+
+    // ── fx_type_to_bit tests ──────────────────────────────────────────────
+
+    #[test]
+    fn fx_type_to_bit_all_known_types() {
+        let cases = [
+            (10, Some(0), "DLY"),
+            (11, Some(1), "3TAP"),
+            (12, Some(2), "4TAP"),
+            (21, Some(3), "D/RV"),
+            (24, Some(4), "D/CR"),
+            (25, Some(5), "D/FL"),
+            (26, Some(6), "MODD"),
+        ];
+        for (type_id, expected_bit, name) in cases {
+            assert_eq!(fx_type_to_bit(type_id), expected_bit, "{name} ({type_id})");
+        }
+    }
+
+    #[test]
+    fn fx_type_to_bit_non_delay_returns_none() {
+        for id in [0, 1, 3, 99, -1] {
+            assert_eq!(fx_type_to_bit(id), None, "type_id={id}");
+        }
+    }
+
+    #[test]
+    fn fx_type_to_bit_covers_all_bpm_compatible() {
+        for type_id in [10, 11, 12, 21, 24, 25, 26] {
+            assert!(fx_type_to_bit(type_id).is_some(),
+                "{type_id} is BPM-compatible but no bit assigned");
+        }
+    }
+
+    // ── DAW mock (MockProcessContext) tests ─────────────────────────────────
+
+    struct MockProcessContext {
+        transport: Transport,
+    }
+
+    impl MockProcessContext {
+        fn new(bpm: f64, playing: bool) -> Self {
+            let mut transport = Transport::new(44100.0);
+            transport.tempo = Some(bpm);
+            transport.playing = playing;
+            Self { transport }
+        }
+    }
+
+    impl ProcessContext<EtherTap> for MockProcessContext {
+        fn plugin_api(&self) -> nih_plug::context::PluginApi {
+            nih_plug::context::PluginApi::Vst3
+        }
+        fn execute_background(&self, _task: ()) {}
+        fn execute_gui(&self, _task: ()) {}
+        fn transport(&self) -> &Transport { &self.transport }
+        fn next_event(&mut self) -> Option<PluginNoteEvent<EtherTap>> { None }
+        fn send_event(&mut self, _event: PluginNoteEvent<EtherTap>) {}
+        fn set_latency_samples(&self, _samples: u32) {}
+        fn set_current_voice_capacity(&self, _capacity: u32) {}
+    }
+
+    fn make_buffer() -> Buffer<'static> { Buffer::default() }
+
+    fn make_aux() -> AuxiliaryBuffers<'static> {
+        AuxiliaryBuffers { inputs: &mut [], outputs: &mut [] }
+    }
+
+    #[test]
+    fn process_empty_buffer_does_not_panic() {
+        let mut plugin = EtherTap::default();
+        let mut ctx = MockProcessContext::new(120.0, false);
+        let mut buffer = make_buffer();
+        let mut aux = make_aux();
+        let status = plugin.process(&mut buffer, &mut aux, &mut ctx);
+        assert_eq!(status, ProcessStatus::Normal);
+    }
+
+    #[test]
+    fn process_publishes_host_bpm() {
+        let mut plugin = EtherTap::default();
+        let mut ctx = MockProcessContext::new(120.0, false);
+        let mut buffer = make_buffer();
+        let mut aux = make_aux();
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+        let published = f32::from_bits(plugin.host_bpm.load(Ordering::Acquire));
+        assert!(
+            (published - 120.0).abs() < 0.01,
+            "expected host_bpm ≈ 120, got {published}",
+        );
+    }
+
+    #[test]
+    fn read_only_params_update_on_process() {
+        let mut plugin = EtherTap::default();
+        let mut ctx = MockProcessContext::new(120.0, false);
+        let mut buffer = make_buffer();
+        let mut aux = make_aux();
+
+        assert!(!plugin.params.is_connected.value());
+        assert!(!plugin.params.is_matched.value());
+
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+        assert!(!plugin.params.is_connected.value());
+        assert!(!plugin.params.is_matched.value());
+
+        plugin.conn_status.store(true, Ordering::Release);
+        let hw_val = (20.0_f64 / 120.0_f64) as f32;
+        plugin.hardware_float.store(hw_val.to_bits(), Ordering::Release);
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+        assert!(plugin.params.is_connected.value());
+        assert!(plugin.params.is_matched.value());
+
+        plugin.conn_status.store(false, Ordering::Release);
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+        assert!(!plugin.params.is_connected.value());
+        assert!(!plugin.params.is_matched.value());
+    }
+
+    // ── Persistence round-trip ─────────────────────────────────────────────
+
+    #[test]
+    fn persist_fields_roundtrip() {
+        let params = EtherTapParams::default();
+
+        *params.target_ip.lock() = "10.0.0.50".to_owned();
+        let json = serde_json::to_string(&*params.target_ip.lock()).unwrap();
+        assert_eq!(serde_json::from_str::<String>(&json).unwrap(), "10.0.0.50");
+
+        *params.target_port.lock() = 10024u16;
+        let json = serde_json::to_string(&*params.target_port.lock()).unwrap();
+        assert_eq!(serde_json::from_str::<u16>(&json).unwrap(), 10024);
+
+        *params.fx_slot.lock() = 4u8;
+        let json = serde_json::to_string(&*params.fx_slot.lock()).unwrap();
+        assert_eq!(serde_json::from_str::<u8>(&json).unwrap(), 4);
+
+        *params.fx_type_filter.lock() = 0b000_0011u32;
+        let json = serde_json::to_string(&*params.fx_type_filter.lock()).unwrap();
+        assert_eq!(serde_json::from_str::<u32>(&json).unwrap(), 0b000_0011u32);
+
+        *params.midi_clock_enabled.lock() = false;
+        let json = serde_json::to_string(&*params.midi_clock_enabled.lock()).unwrap();
+        assert_eq!(serde_json::from_str::<bool>(&json).unwrap(), false);
+
+        *params.midi_clock_ppq.lock() = 48u8;
+        let json = serde_json::to_string(&*params.midi_clock_ppq.lock()).unwrap();
+        assert_eq!(serde_json::from_str::<u8>(&json).unwrap(), 48);
+
+        let device = Some("Midi Through Port-0".to_owned());
+        *params.midi_out_device.lock() = device;
+        let json = serde_json::to_string(&*params.midi_out_device.lock()).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Option<String>>(&json).unwrap(),
+            Some("Midi Through Port-0".to_owned())
+        );
+
+        *params.midi_out_device.lock() = None;
+        let json = serde_json::to_string(&*params.midi_out_device.lock()).unwrap();
+        assert_eq!(serde_json::from_str::<Option<String>>(&json).unwrap(), None);
+    }
+}

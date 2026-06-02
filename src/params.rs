@@ -127,7 +127,7 @@ pub struct EtherTapParams {
 impl Default for EtherTapParams {
     fn default() -> Self {
         Self {
-            editor_state: IcedState::from_size(360, 340),
+            editor_state: IcedState::from_size(360, 280),
             target_ip: Arc::new(Mutex::new(if cfg!(feature = "standalone") {
                 "127.0.0.1".to_owned()
             } else {
