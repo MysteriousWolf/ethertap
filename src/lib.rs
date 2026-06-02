@@ -517,9 +517,25 @@ impl Plugin for EtherTap {
                         if self.last_bpm_changed_at == 0.0 {
                             self.last_bpm_changed_at = bpm;
                         } else if (bpm - self.last_bpm_changed_at).abs() > 0.5 {
-                            let _ = self.midi_clock_tx
-                                .try_send(midi_clock::ClockMsg::BpmChanged);
-                            self.last_bpm_changed_at = bpm;
+                            match self.midi_clock_tx
+                                .try_send(midi_clock::ClockMsg::BpmChanged)
+                            {
+                                Ok(_) => self.last_bpm_changed_at = bpm,
+                                Err(crossbeam_channel::TrySendError::Full(_)) => {
+                                    log::warn!(
+                                        "[EtherTap] BpmChanged dropped: midi_clock_tx full \
+                                         (worker stalled?); bpm={bpm:.2} prev={:.2}",
+                                        self.last_bpm_changed_at
+                                    );
+                                    self.last_bpm_changed_at = bpm;
+                                }
+                                Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                                    log::error!(
+                                        "[EtherTap] BpmChanged dropped: midi clock worker \
+                                         disconnected; bpm={bpm:.2}"
+                                    );
+                                }
+                            }
                         }
                         self.last_clock_bpm = bpm;
 
