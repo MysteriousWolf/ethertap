@@ -22,7 +22,15 @@ impl Backoff {
     }
 
     pub fn next_delay_ms(&self) -> u64 {
-        (self.base_ms << self.attempts).min(self.cap_ms)
+        // Guard shift amount first (prevents panic for attempts ≥ 64), then use
+        // saturating_mul so large base × 2^attempts wraps to u64::MAX and is
+        // immediately capped — no overflow in either debug or release builds.
+        if self.attempts >= 64 {
+            return self.cap_ms;
+        }
+        self.base_ms
+            .saturating_mul(1u64 << self.attempts)
+            .min(self.cap_ms)
     }
 
     pub fn record_failure(&mut self) {
@@ -44,5 +52,19 @@ impl Backoff {
     pub fn reset(&mut self) {
         self.attempts = 0;
         self.skip_until = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_no_overflow_after_many_failures() {
+        let mut b = Backoff::new(1000, 10000);
+        for _ in 0..100 {
+            b.record_failure();
+        }
+        assert_eq!(b.next_delay_ms(), 10000, "must stay capped, not overflow to 0");
     }
 }
