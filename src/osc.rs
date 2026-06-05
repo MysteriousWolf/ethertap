@@ -47,7 +47,7 @@ fn fx_bus(type_id: i32) -> (&'static str, &'static str) {
         23 => ("FL/R", "Flanger + Reverb"),
         24 => ("D/CR", "Delay + Chorus"),          // ← BPM via par/01 (time is first param)
         25 => ("D/FL", "Delay + Flanger"),         // ← BPM via par/01 (time is first param)
-        26 => ("MODD", "Modulated Delay"),        // ← BPM via par/02 (probable)
+        26 => ("MODD", "Modulated Delay"),        // ← BPM via par/01 (confirmed fxparse1.c)
         27 => ("GEQ2", "Dual GEQ 27"),
         28 => ("TEQ2", "Dual True EQ"),
         29 => ("GEQ",  "GEQ 27"),
@@ -189,6 +189,10 @@ const MAX_DELAY_MS: f64 = 3_000.0;
 /// ```
 pub fn bpm_to_float(bpm: f64) -> f32 {
     debug_assert!(bpm > 0.0, "BPM must be positive");
+    if bpm <= 0.0 {
+        log::warn!("[EtherTap] bpm_to_float: bpm={bpm} ≤ 0, returning max delay");
+        return 1.0;
+    }
     let beat_ms = 60_000.0 / bpm;
     (beat_ms / MAX_DELAY_MS).clamp(0.0, 1.0) as f32
 }
@@ -249,7 +253,13 @@ pub fn float_to_bpm(f: f32) -> f64 {
 
 fn msg(addr: String, args: Vec<OscType>) -> Vec<u8> {
     let packet = OscPacket::Message(OscMessage { addr, args });
-    encoder::encode(&packet).expect("OSC encode is infallible for well-formed messages")
+    match encoder::encode(&packet) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            log::error!("[EtherTap] OSC encode failed (this is a bug): {e}");
+            vec![]
+        }
+    }
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
