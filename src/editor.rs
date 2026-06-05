@@ -462,6 +462,9 @@ pub struct EditorData {
     pub scan_completed_ts:  Arc<AtomicU64>,
     /// Name and model parsed from /info heartbeat responses.
     pub connected_device:   Arc<Mutex<(String, String)>>,
+    /// Incremented each time the editor opens a new scan and clears stale
+    /// results.  Background scan threads discard their results if this changed.
+    pub scan_generation:    Arc<AtomicU64>,
     pub cmd_tx:             crossbeam_channel::Sender<NetworkCommand>,
     /// Notifies the MIDI clock worker when the user changes the output device.
     pub device_change_tx:   crossbeam_channel::Sender<Option<String>>,
@@ -518,7 +521,7 @@ struct EtherTapEditor {
     // Network scan — btn_scan doubles as the modal close button
     btn_scan:              button::State,
     btn_connect:           button::State,
-    scan_result_states:    [button::State; 8],
+    scan_result_states:    Vec<button::State>,
     show_scan_results:     bool,
     /// ms-since-epoch when the last ScanTargets command was dispatched.
     last_scan_trigger_ms:  u64,
@@ -591,7 +594,7 @@ impl IcedEditor for EtherTapEditor {
                 slot_states:       Default::default(),
                 btn_scan:              Default::default(),
                 btn_connect:           Default::default(),
-                scan_result_states:    Default::default(),
+                scan_result_states:    Vec::new(),
                 show_scan_results:     false,
                 last_scan_trigger_ms:  0,
             },
@@ -670,12 +673,13 @@ impl IcedEditor for EtherTapEditor {
             }
             Message::ToggleMidiPicker => {
                 self.show_midi_picker = !self.show_midi_picker;
-                // Ensure button-state vector matches port count when opening.
-                if self.show_midi_picker && self.midi_out_ports.len() > self.midi_picker_states.len() {
+                // Keep button-state vector in sync with port count (grow or shrink).
+                if self.show_midi_picker {
                     self.midi_picker_states.resize_with(
                         self.midi_out_ports.len(),
                         Default::default,
                     );
+                    self.midi_picker_states.truncate(self.midi_out_ports.len());
                 }
             }
             Message::SelectMidiDevice(name) => {
@@ -687,6 +691,10 @@ impl IcedEditor for EtherTapEditor {
             Message::ScanTargets => {
                 self.show_scan_results = !self.show_scan_results;
                 if self.show_scan_results {
+                    // Increment the generation BEFORE clearing so any background
+                    // scan thread that finishes after the clear will see the
+                    // changed generation and discard its (now-stale) results.
+                    self.data.scan_generation.fetch_add(1, Ordering::Release);
                     // Clear stale entries from a previous session so the panel
                     // starts fresh; the first scan result arrives within ~600 ms.
                     self.data.scan_targets.lock().clear();
@@ -726,7 +734,7 @@ impl IcedEditor for EtherTapEditor {
                 let port = *self.data.params.target_port.lock();
                 let _ = self.data.cmd_tx.try_send(NetworkCommand::UpdateTarget { ip, port });
                 let _ = self.data.cmd_tx.try_send(NetworkCommand::AuditSlots);
-                self.data.all_slots_mode.store(true, Ordering::Relaxed);
+                self.data.all_slots_mode.store(true, Ordering::Release);
             }
             Message::Disconnect => {
                 let _ = self.data.cmd_tx.try_send(NetworkCommand::Disconnect);
@@ -767,6 +775,10 @@ impl IcedEditor for EtherTapEditor {
         // dark card) so the main layout height never changes.
         if self.show_scan_results {
             let scan_targets_snap = self.data.scan_targets.lock().clone();
+            // Keep button-state vec in sync with the actual number of discovered
+            // devices (may grow as rescans arrive).
+            self.scan_result_states.resize_with(scan_targets_snap.len(), Default::default);
+            self.scan_result_states.truncate(scan_targets_snap.len());
             let completed_ts = self.data.scan_completed_ts.load(Ordering::Relaxed);
             let scanning_now  = now_ms().saturating_sub(self.last_scan_trigger_ms) < 1500;
 

@@ -47,6 +47,12 @@ use params::{EtherTapParams, SyncMode};
 /// Change" fires.  Gives the user time to finish dragging a tempo slider.
 const SETTLE_MS: u64 = 500;
 
+/// Small epsilon added before `ceil()` when computing the Hard Reset target
+/// beat.  Prevents floating-point representation noise (e.g. `3.9999999...`)
+/// from rounding up by an extra beat when the position is already at or very
+/// near a whole-beat boundary.
+const BEAT_CEIL_EPSILON: f64 = 1e-9;
+
 // ─── Plugin struct ───────────────────────────────────────────────────────────
 
 pub struct EtherTap {
@@ -99,10 +105,23 @@ pub struct EtherTap {
     // ── Audio configuration ───────────────────────────────────────────────
     sample_rate: f32,
 
+    // ── MIDI watcher shutdown ─────────────────────────────────────────────
+    /// Set to true in Drop to signal the non-macOS polling thread to exit.
+    midi_watcher_shutdown: Arc<AtomicBool>,
+
+    // ── Scan generation counter ───────────────────────────────────────────
+    /// Incremented by the editor when it clears scan results for a new scan.
+    /// Background scan threads discard their results if this changes.
+    scan_generation: Arc<AtomicU64>,
+
     // ── BPM settle state machine ──────────────────────────────────────────
     last_bpm: f64,
     bpm_change_ts: u64,
     bpm_is_settling: bool,
+    /// BPM captured when the settle timer was (re-)armed.  Compared at settle
+    /// completion to detect slow BPM drift that would slip under the 0.01 BPM
+    /// change threshold and cause a sync at the wrong tempo.
+    bpm_at_settle_start: f64,
 
     // ── Quantised auto Hard Reset ─────────────────────────────────────────
     /// Waiting to fire Hard Reset at `hr_target_beat`.
@@ -118,7 +137,7 @@ pub struct EtherTap {
     /// Last BPM at which a stable clock was running; used to detect changes
     /// large enough to warrant a resync gap (> 0.5 BPM).
     last_clock_bpm: f64,
-    last_bpm_changed_at: f64,
+    last_bpm_changed_at: Option<f64>,
     /// Whether transport was playing in the previous process() call.
     /// Used to detect the not-playing → playing edge for TransportStart.
     prev_playing: bool,
@@ -174,6 +193,7 @@ impl Default for EtherTap {
         let scan_targets      = Arc::new(Mutex::new(Vec::<network::DeviceInfo>::new()));
         let scan_completed_ts = Arc::new(AtomicU64::new(0));
         let connected_device  = Arc::new(Mutex::new((String::new(), String::new())));
+        let scan_generation   = Arc::new(AtomicU64::new(0));
 
         let (cmd_tx, cmd_rx) = crossbeam_channel::bounded::<NetworkCommand>(64);
         let (status_tx, status_rx) = crossbeam_channel::bounded::<NetworkStatus>(64);
@@ -188,6 +208,7 @@ impl Default for EtherTap {
         // Spawn the MIDI device watcher BEFORE any midir::MidiOutput is created
         // (macOS: CoreMIDI notification client must be first).
         let midi_watch = midi_watcher::spawn();
+        let midi_watcher_shutdown = midi_watch.shutdown.clone();
         let midi_device_rx = Arc::new(midi_watch.editor_rx);
 
         let worker = NetworkWorker::new(
@@ -196,6 +217,11 @@ impl Default for EtherTap {
             params.fx_slot.clone(),
             slot_types.clone(),
             hardware_float.clone(),
+            compatible_slots.clone(),
+            occupied_slots.clone(),
+            scan_targets.clone(),
+            connected_device.clone(),
+            scan_generation.clone(),
         );
         std::thread::Builder::new()
             .name("ethertap-net".into())
@@ -236,6 +262,7 @@ impl Default for EtherTap {
             force_sync_trigger,
             force_rate_trigger,
             midi_device_rx,
+            midi_watcher_shutdown,
             compatible_slots,
             occupied_slots,
             slot_types,
@@ -243,6 +270,7 @@ impl Default for EtherTap {
             scan_targets,
             scan_completed_ts,
             connected_device,
+            scan_generation,
             sample_rate: 44100.0,
             reconnect_sync_pending: false,
             last_conn_status: false,
@@ -250,12 +278,13 @@ impl Default for EtherTap {
             last_bpm: 0.0,
             bpm_change_ts: 0,
             bpm_is_settling: false,
+            bpm_at_settle_start: 0.0,
             hr_pending: false,
             hr_target_beat: 0.0,
             last_pos_beats: 0.0,
             midi_clock_pulse_count: 0,
             last_clock_bpm: 0.0,
-            last_bpm_changed_at: 0.0,
+            last_bpm_changed_at: None,
             prev_playing:   false,
             prev_force_sync:       false,
             prev_connect_to_last:  false,
@@ -327,53 +356,38 @@ impl Plugin for EtherTap {
         _aux: &mut AuxiliaryBuffers,
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
-        // ── 1. Drain network status (lock-free) ───────────────────────────
+        // Cache the current timestamp once — avoids repeated syscalls throughout
+        // this function.  A single call is accurate enough for all timing checks.
+        let now = now_ms();
+
+        // ── 1. Drain network status (lock-free, allocation-free) ─────────
+        // All NetworkStatus variants are Copy/allocation-free.  Payload data
+        // (slot lists, scan results, device identity) was written directly to
+        // shared mutexes by the network worker before sending the sentinel.
         while let Ok(status) = self.status_rx.try_recv() {
             match status {
                 NetworkStatus::Connected => self.conn_status.store(true, Ordering::Release),
                 NetworkStatus::Disconnected => self.conn_status.store(false, Ordering::Release),
                 NetworkStatus::ActivityPulse => {
-                    self.tx_activity_ts.store(now_ms(), Ordering::Relaxed);
+                    self.tx_activity_ts.store(now, Ordering::Relaxed);
                 }
                 NetworkStatus::RxPulse => {
-                    self.rx_activity_ts.store(now_ms(), Ordering::Relaxed);
+                    self.rx_activity_ts.store(now, Ordering::Relaxed);
                 }
-                // hardware_float is written directly by the worker via Arc clone;
-                // the status message is drained here for alignment — the value
-                // is already readable from `self.hardware_float` without routing
-                // through the channel on every process() frame.
+                // hardware_float is written directly by the worker; this variant
+                // exists only to keep the RX LED active after telemetry polls.
                 NetworkStatus::DelayReadback(_) => {}
-                NetworkStatus::SlotScan { compatible, occupied, slot_types } => {
-                    *self.compatible_slots.lock() = compatible;
-                    *self.occupied_slots.lock()   = occupied;
-                    *self.slot_types.lock()       = slot_types;
-                    // Auto-sync on reconnect: dispatch current BPM once the
-                    // freshly-scanned compatible slots are in place.
+                NetworkStatus::SlotScanDone => {
+                    // Slot data already written to compatible_slots/occupied_slots/
+                    // slot_types by the worker.  Just fire the reconnect auto-sync.
                     if self.reconnect_sync_pending && self.last_bpm > 0.0 {
                         self.reconnect_sync_pending = false;
                         self.dispatch(self.last_bpm, false);
                     }
                 }
-                NetworkStatus::TargetsFound(new_targets) => {
-                    // Merge into the existing list so the scan panel
-                    // updates in-place without blanking on each rescan.
-                    let mut list = self.scan_targets.lock();
-                    for dev in new_targets {
-                        let has_id = !dev.name.is_empty() || !dev.model.is_empty();
-                        let existing = if has_id {
-                            list.iter_mut().find(|d| d.name == dev.name && d.model == dev.model)
-                        } else {
-                            list.iter_mut().find(|d| d.ip == dev.ip)
-                        };
-                        match existing {
-                            Some(e) => *e = dev, // refresh latency / addrs
-                            None    => list.push(dev),
-                        }
-                    }
-                    self.scan_completed_ts.store(now_ms(), Ordering::Relaxed);
-                }
-                NetworkStatus::DeviceIdentified { name, model } => {
-                    *self.connected_device.lock() = (name, model);
+                NetworkStatus::ScanDone => {
+                    // Scan results already merged into scan_targets by the worker.
+                    self.scan_completed_ts.store(now, Ordering::Relaxed);
                 }
             }
         }
@@ -384,6 +398,10 @@ impl Plugin for EtherTap {
         let pos_beats_raw = transport.pos_beats(); // None when host doesn't report position
         let pos_beats = pos_beats_raw.unwrap_or(0.0);
         let playing = transport.playing;
+        // Capture prev_playing now — before any updates — so step 7 can detect
+        // the stopped→playing edge correctly.  self.prev_playing is written at
+        // the very end of process() so it always reflects the previous call.
+        let was_playing = self.prev_playing;
 
         // ── 3. Publish host BPM for the editor ───────────────────────────
         self.host_bpm.store((bpm as f32).to_bits(), Ordering::Release);
@@ -405,6 +423,15 @@ impl Plugin for EtherTap {
                 self.all_slots_mode.store(true, Ordering::Release);
                 self.reconnect_sync_pending = true;
                 let _ = self.cmd_tx.try_send(NetworkCommand::AuditSlots);
+            } else {
+                // Disconnected: clear any pending sync state so stale retries
+                // don't fire immediately on the next reconnect.
+                self.on_change_retry_pending = false;
+                self.hr_pending = false;
+                self.hr_target_beat = 0.0;
+                self.bpm_is_settling = false;
+                self.bpm_change_ts = 0;
+                self.bpm_at_settle_start = 0.0;
             }
             self.last_conn_status = connected;
         }
@@ -416,34 +443,43 @@ impl Plugin for EtherTap {
         // ── 4. BPM settle detection ("On Change" modes) ──────────────────
         if self.last_bpm > 0.0 && (bpm - self.last_bpm).abs() > 0.01 {
             // BPM just changed — restart settle timer and cancel any retry.
-            self.bpm_change_ts = now_ms();
+            self.bpm_change_ts = now;
             self.bpm_is_settling = true;
+            self.bpm_at_settle_start = bpm;
             self.on_change_retry_pending = false;
             self.hr_pending = false;
             self.hr_target_beat = 0.0;
         } else if self.bpm_is_settling {
-            let elapsed = now_ms().saturating_sub(self.bpm_change_ts);
+            let elapsed = now.saturating_sub(self.bpm_change_ts);
             if elapsed >= SETTLE_MS {
-                self.bpm_is_settling = false;
-                if playing {
-                    let phase_mode = self.params.phase_sync_mode.value();
-                    let rate_mode = self.params.rate_sync_mode.value();
-                    if phase_mode == SyncMode::OnChange {
-                        // Quantise the Hard Reset to the next beat boundary.
-                        let next = pos_beats.ceil();
-                        self.hr_target_beat = if next > pos_beats { next } else { next + 1.0 };
-                        self.hr_pending = true;
-                        // Arm retry (hard reset will be dispatched at hr_target_beat).
-                        self.on_change_retry_pending    = true;
-                        self.on_change_retry_bpm        = bpm;
-                        self.on_change_retry_hard_reset = true;
-                        self.on_change_last_retry_ms    = now_ms();
-                    } else if rate_mode == SyncMode::OnChange {
-                        self.dispatch(bpm, false);
-                        self.on_change_retry_pending    = true;
-                        self.on_change_retry_bpm        = bpm;
-                        self.on_change_retry_hard_reset = false;
-                        self.on_change_last_retry_ms    = now_ms();
+                // Guard: if BPM drifted past 0.01 since settle started (slow
+                // automation), re-arm rather than dispatching at the wrong tempo.
+                if (bpm - self.bpm_at_settle_start).abs() > 0.01 {
+                    self.bpm_change_ts = now;
+                    self.bpm_at_settle_start = bpm;
+                    // keep bpm_is_settling = true, wait another SETTLE_MS
+                } else {
+                    self.bpm_is_settling = false;
+                    if playing {
+                        let phase_mode = self.params.phase_sync_mode.value();
+                        let rate_mode = self.params.rate_sync_mode.value();
+                        if phase_mode == SyncMode::OnChange {
+                            // Quantise the Hard Reset to the next beat boundary.
+                            let next = (pos_beats + BEAT_CEIL_EPSILON).ceil();
+                            self.hr_target_beat = if next > pos_beats { next } else { next + 1.0 };
+                            self.hr_pending = true;
+                            // Arm retry (hard reset will be dispatched at hr_target_beat).
+                            self.on_change_retry_pending    = true;
+                            self.on_change_retry_bpm        = bpm;
+                            self.on_change_retry_hard_reset = true;
+                            self.on_change_last_retry_ms    = now;
+                        } else if rate_mode == SyncMode::OnChange {
+                            self.dispatch(bpm, false);
+                            self.on_change_retry_pending    = true;
+                            self.on_change_retry_bpm        = bpm;
+                            self.on_change_retry_hard_reset = false;
+                            self.on_change_last_retry_ms    = now;
+                        }
                     }
                 }
             }
@@ -455,7 +491,7 @@ impl Plugin for EtherTap {
             self.hr_pending = false;
             // Reset the retry timer so we wait a full 2 s after the hard reset
             // before checking whether the hardware has caught up.
-            self.on_change_last_retry_ms = now_ms();
+            self.on_change_last_retry_ms = now;
         }
 
         // ── 5b. OnChange retry — resend every 2 s until hardware confirms ─
@@ -466,13 +502,13 @@ impl Plugin for EtherTap {
             let matched = hw_float > 0.0001 && (target_float - hw_float).abs() < 0.001;
             if matched {
                 self.on_change_retry_pending = false;
-            } else if now_ms().saturating_sub(self.on_change_last_retry_ms) >= 2_000 {
+            } else if now.saturating_sub(self.on_change_last_retry_ms) >= 2_000 {
                 // Skip a retry if there is already a quantised Hard Reset queued —
                 // it will fire at the next beat boundary and acts as the retry.
                 if !self.hr_pending {
                     self.dispatch(self.on_change_retry_bpm, self.on_change_retry_hard_reset);
                 }
-                self.on_change_last_retry_ms = now_ms();
+                self.on_change_last_retry_ms = now;
             }
         }
 
@@ -486,16 +522,17 @@ impl Plugin for EtherTap {
                 self.dispatch(bpm, false); // continuous rate sync only
             }
         }
+        // Read PPQ once per buffer — drives LED blink cadence and tick generation.
+        let midi_ppq = *self.params.midi_clock_ppq.lock();
+
         if playing {
             self.last_pos_beats = pos_beats;
         } else {
             self.last_pos_beats = -1.0; // reset so the first beat after play fires
-            // Reset the LED counter so the first beat after playback restarts
-            // pulses the LED immediately rather than waiting for the counter to
-            // roll over from wherever it stopped.
-            self.midi_clock_pulse_count = 23; // next increment wraps to 0 → fires
+            // Prime the counter so the first tick after resumption fires the LED
+            // immediately, regardless of the PPQ setting.
+            self.midi_clock_pulse_count = midi_ppq.saturating_sub(1);
         }
-        self.prev_playing = playing;
 
         // ── 7. MIDI clock output via CoreMIDI virtual source ─────────────────
         if *self.params.midi_clock_enabled.lock() {
@@ -505,37 +542,58 @@ impl Plugin for EtherTap {
                 // DAW mode: follow transport position and play state.
                 if !playing {
                     self.last_clock_bpm = 0.0;
+                    if was_playing {
+                        // Gate any ticks that were already queued for this
+                        // buffer before we learned transport stopped.
+                        if let Err(e) = self.midi_clock_tx
+                            .try_send(midi_clock::ClockMsg::Stop)
+                        {
+                            log::warn!("[EtherTap] Stop dropped: {e} (worker stalled?)");
+                        }
+                    }
                 }
-                if playing && !self.prev_playing {
-                    let _ = self.midi_clock_tx
-                        .try_send(midi_clock::ClockMsg::TransportStart);
+                if playing && !was_playing {
+                    if let Err(e) = self.midi_clock_tx
+                        .try_send(midi_clock::ClockMsg::TransportStart)
+                    {
+                        log::warn!("[EtherTap] TransportStart dropped: {e} (worker stalled?)");
+                    }
+                    // Prevent a spurious BpmChanged gap on the transition frame:
+                    // if BPM was changed while stopped the BpmChanged check below
+                    // would fire and immediately override the TransportStart
+                    // (which promises no gap).  Seeding last_bpm_changed_at here
+                    // means the threshold delta is measured from the current BPM.
+                    self.last_bpm_changed_at = Some(bpm);
                 }
                 if playing {
                     let buf_len = buffer.samples();
                     if buf_len > 0 {
-                        let ppq = *self.params.midi_clock_ppq.lock() as f64;
-                        if self.last_bpm_changed_at == 0.0 {
-                            self.last_bpm_changed_at = bpm;
-                        } else if (bpm - self.last_bpm_changed_at).abs() > 0.5 {
-                            match self.midi_clock_tx
-                                .try_send(midi_clock::ClockMsg::BpmChanged)
-                            {
-                                Ok(_) => self.last_bpm_changed_at = bpm,
-                                Err(crossbeam_channel::TrySendError::Full(_)) => {
-                                    log::warn!(
-                                        "[EtherTap] BpmChanged dropped: midi_clock_tx full \
-                                         (worker stalled?); bpm={bpm:.2} prev={:.2}",
-                                        self.last_bpm_changed_at
-                                    );
-                                    self.last_bpm_changed_at = bpm;
-                                }
-                                Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
-                                    log::error!(
-                                        "[EtherTap] BpmChanged dropped: midi clock worker \
-                                         disconnected; bpm={bpm:.2}"
-                                    );
+                        let ppq = midi_ppq as f64;
+                        match self.last_bpm_changed_at {
+                            None => {
+                                self.last_bpm_changed_at = Some(bpm);
+                            }
+                            Some(prev) if (bpm - prev).abs() > 0.5 => {
+                                match self.midi_clock_tx
+                                    .try_send(midi_clock::ClockMsg::BpmChanged { new_bpm: bpm })
+                                {
+                                    Ok(_) => self.last_bpm_changed_at = Some(bpm),
+                                    Err(crossbeam_channel::TrySendError::Full(_)) => {
+                                        log::warn!(
+                                            "[EtherTap] BpmChanged dropped: midi_clock_tx full \
+                                             (worker stalled?); bpm={bpm:.2} prev={prev:.2}",
+                                        );
+                                        self.last_bpm_changed_at = Some(bpm);
+                                    }
+                                    Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                                        log::error!(
+                                            "[EtherTap] BpmChanged dropped: midi clock worker \
+                                             disconnected; bpm={bpm:.2}"
+                                        );
+                                    }
                                 }
                             }
+                            Some(_) => {}
                         }
                         self.last_clock_bpm = bpm;
 
@@ -547,48 +605,47 @@ impl Plugin for EtherTap {
                         let clock_start = (beat_start * ppq).ceil() as i64;
                         let clock_end   = (beat_end   * ppq).ceil() as i64;
 
+                        let mut tick_drops = 0u32;
                         for k in clock_start..clock_end {
                             let on_beat = k % ppq as i64 == 0;
-                            let _ = self.midi_clock_tx
-                                .try_send(midi_clock::ClockMsg::Tick { on_beat });
-                            self.midi_clock_pulse_count =
-                                self.midi_clock_pulse_count.wrapping_add(1);
-                            if self.midi_clock_pulse_count.is_multiple_of(24) {
-                                self.midi_clock_activity_ts
-                                    .store(now_ms(), Ordering::Relaxed);
+                            if self.midi_clock_tx
+                                .try_send(midi_clock::ClockMsg::Tick { on_beat })
+                                .is_err()
+                            {
+                                tick_drops += 1;
                             }
+                            self.midi_clock_pulse_count += 1;
+                            if self.midi_clock_pulse_count >= midi_ppq {
+                                self.midi_clock_pulse_count = 0;
+                                self.midi_clock_activity_ts
+                                    .store(now, Ordering::Relaxed);
+                            }
+                        }
+                        if tick_drops > 0 {
+                            log::warn!(
+                                "[EtherTap] dropped {tick_drops} MIDI clock tick(s): \
+                                 midi_clock_tx full (worker stalled?)",
+                            );
                         }
                     }
                 }
             } else {
                 // Standalone (no DAW): emit ticks at default BPM.
                 let bpm = 120.0;
-                let ppq = *self.params.midi_clock_ppq.lock() as f64;
+                let ppq = midi_ppq as f64;
                 let tick_interval_us =
                     (60.0 / bpm / ppq * 1_000_000.0) as u64;
                 let now_instant = std::time::Instant::now();
-                static TICK_COUNT: std::sync::atomic::AtomicU64 =
-                    std::sync::atomic::AtomicU64::new(0);
-                let n = TICK_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if n.is_multiple_of(500) {
-                    log::info!(
-                        "[EtherTap] standalone tick #{} interval_us={} ppq={} enabled={}",
-                        n,
-                        tick_interval_us,
-                        ppq,
-                        *self.params.midi_clock_enabled.lock()
-                    );
-                }
                 if self.last_standalone_tick.elapsed().as_micros() as u64
                     >= tick_interval_us
                 {
                     let _ = self.midi_clock_tx
                         .try_send(midi_clock::ClockMsg::Tick { on_beat: true });
-                    self.midi_clock_pulse_count =
-                        self.midi_clock_pulse_count.wrapping_add(1);
-                    if self.midi_clock_pulse_count.is_multiple_of(24) {
+                    self.midi_clock_pulse_count += 1;
+                    if self.midi_clock_pulse_count >= midi_ppq {
+                        self.midi_clock_pulse_count = 0;
                         self.midi_clock_activity_ts
-                            .store(now_ms(), Ordering::Relaxed);
+                            .store(now, Ordering::Relaxed);
                     }
                     self.last_standalone_tick = now_instant;
                 }
@@ -639,6 +696,7 @@ impl Plugin for EtherTap {
         self.prev_force_sync       = force_legacy_param;
 
         self.last_bpm = bpm;
+        self.prev_playing = playing;
 
         ProcessStatus::Normal
     }
@@ -662,6 +720,7 @@ impl Plugin for EtherTap {
             scan_targets:      self.scan_targets.clone(),
             scan_completed_ts: self.scan_completed_ts.clone(),
             connected_device:  self.connected_device.clone(),
+            scan_generation:   self.scan_generation.clone(),
             cmd_tx: self.cmd_tx.clone(),
             device_change_tx: self.device_change_tx.clone(),
             midi_bridge_connected: self.midi_bridge_connected.clone(),
@@ -669,6 +728,12 @@ impl Plugin for EtherTap {
             midi_clock_stats: self.midi_clock_stats.clone(),
         });
         editor::create(data)
+    }
+}
+
+impl Drop for EtherTap {
+    fn drop(&mut self) {
+        self.midi_watcher_shutdown.store(true, Ordering::Release);
     }
 }
 
@@ -696,37 +761,45 @@ impl EtherTap {
     /// is enabled in `params.fx_type_filter` receives the command; falls back to
     /// the single selected slot when no compatible slots are known yet.
     fn dispatch(&self, bpm: f64, hard_reset: bool) {
-        // all_slots_mode written only by process() audio thread
-        let slots: Vec<u8> = if self.all_slots_mode.load(Ordering::Acquire) {
+        // Build slot list into a fixed-size stack array — no heap allocation.
+        let mut slots = [None::<u8>; 8];
+        let mut n = 0usize;
+
+        if self.all_slots_mode.load(Ordering::Acquire) {
+            // Read single-slot fallback before locking compatible_slots so we
+            // never hold two mutexes simultaneously.
+            let fallback_slot = *self.params.fx_slot.lock();
             let cs = self.compatible_slots.lock();
             if cs.is_empty() {
-                vec![*self.params.fx_slot.lock()]
+                slots[0] = Some(fallback_slot);
+                n = 1;
             } else {
                 let filter = *self.params.fx_type_filter.lock();
                 let types  = *self.slot_types.lock();
-                cs.iter().filter(|&&slot| {
-                    match types[(slot - 1) as usize] {
+                for &slot in cs.iter() {
+                    if n >= slots.len() { break; }
+                    let include = match types[(slot - 1) as usize] {
                         Some(type_id) => match fx_type_to_bit(type_id) {
                             Some(bit) => (filter >> bit) & 1 == 1,
                             None      => true, // unknown type: include
                         },
                         None => true, // type not yet audited: include
+                    };
+                    if include {
+                        slots[n] = Some(slot);
+                        n += 1;
                     }
-                }).copied().collect()
+                }
             }
         } else {
-            vec![*self.params.fx_slot.lock()]
-        };
+            slots[0] = Some(*self.params.fx_slot.lock());
+            n = 1;
+        }
 
         if hard_reset {
-            // Pack into a fixed-size array — no heap allocation on the audio thread.
-            let mut arr = [None::<u8>; 8];
-            for (dst, &src) in arr.iter_mut().zip(slots.iter()) {
-                *dst = Some(src);
-            }
-            let _ = self.cmd_tx.try_send(NetworkCommand::HardResetBatch { slots: arr, bpm });
+            let _ = self.cmd_tx.try_send(NetworkCommand::HardResetBatch { slots, bpm });
         } else {
-            for slot in slots {
+            for slot in slots[..n].iter().filter_map(|s| *s) {
                 let _ = self.cmd_tx.try_send(NetworkCommand::SyncNow { slot, bpm });
             }
         }

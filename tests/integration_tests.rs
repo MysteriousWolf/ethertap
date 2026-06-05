@@ -10,7 +10,7 @@ use common::*;
 #[test]
 fn network_worker_connects_to_mock() {
     let mixer = MockMixer::start();
-    let (cmd_tx, status_rx, handle) = spawn_worker(mixer.port());
+    let (cmd_tx, status_rx, handle, _shared) = spawn_worker(mixer.port());
 
     let status = wait_for_status(&status_rx, Duration::from_secs(5));
     assert!(
@@ -25,7 +25,7 @@ fn network_worker_connects_to_mock() {
 
 #[test]
 fn network_worker_fails_to_connect() {
-    let (cmd_tx, status_rx, handle) = spawn_worker(9999);
+    let (cmd_tx, status_rx, handle, _shared) = spawn_worker(9999);
 
     let status = wait_for_status(&status_rx, Duration::from_secs(3));
     assert!(
@@ -40,7 +40,7 @@ fn network_worker_fails_to_connect() {
 
 #[test]
 fn exponential_backoff_increases_on_failure() {
-    let (cmd_tx, status_rx, handle) = spawn_worker(9999);
+    let (cmd_tx, status_rx, handle, _shared) = spawn_worker(9999);
 
     let first = wait_for_status(&status_rx, Duration::from_secs(5));
     assert!(matches!(first, Some(NetworkStatus::Disconnected)));
@@ -63,7 +63,7 @@ fn exponential_backoff_increases_on_failure() {
 #[test]
 fn mock_receives_heartbeat() {
     let mixer = MockMixer::start();
-    let (cmd_tx, _status_rx, handle) = spawn_worker(mixer.port());
+    let (cmd_tx, _status_rx, handle, _shared) = spawn_worker(mixer.port());
 
     let found = mixer.wait_for_addr("/info", Duration::from_secs(10));
     assert!(found, "Mock mixer should receive /info heartbeat from worker");
@@ -75,7 +75,7 @@ fn mock_receives_heartbeat() {
 #[test]
 fn sync_now_sets_delay_on_mock() {
     let mixer = MockMixer::start_with_slots(all_dly_slots());
-    let (cmd_tx, status_rx, handle) = spawn_worker(mixer.port());
+    let (cmd_tx, status_rx, handle, _shared) = spawn_worker(mixer.port());
 
     assert!(wait_for_status(&status_rx, Duration::from_secs(5))
         .is_some_and(|s| matches!(s, NetworkStatus::Connected)));
@@ -101,7 +101,7 @@ fn sync_now_sets_delay_on_mock() {
 #[test]
 fn hard_reset_mutes_sets_unmutes() {
     let mixer = MockMixer::start_with_slots(all_dly_slots());
-    let (cmd_tx, status_rx, handle) = spawn_worker(mixer.port());
+    let (cmd_tx, status_rx, handle, _shared) = spawn_worker(mixer.port());
 
     assert!(wait_for_status(&status_rx, Duration::from_secs(5))
         .is_some_and(|s| matches!(s, NetworkStatus::Connected)));
@@ -141,7 +141,7 @@ fn hard_reset_mutes_sets_unmutes() {
 #[test]
 fn disconnect_and_reconnect() {
     let mixer = MockMixer::start();
-    let (cmd_tx, status_rx, handle) = spawn_worker(mixer.port());
+    let (cmd_tx, status_rx, handle, _shared) = spawn_worker(mixer.port());
 
     assert!(wait_for_status(&status_rx, Duration::from_secs(5))
         .is_some_and(|s| matches!(s, NetworkStatus::Connected)));
@@ -171,7 +171,7 @@ fn disconnect_and_reconnect() {
 #[test]
 fn audit_slots_discovers_compatible_slots() {
     let mixer = MockMixer::start();
-    let (cmd_tx, status_rx, handle) = spawn_worker(mixer.port());
+    let (cmd_tx, status_rx, handle, shared) = spawn_worker(mixer.port());
 
     assert!(wait_for_status(&status_rx, Duration::from_secs(5))
         .is_some_and(|s| matches!(s, NetworkStatus::Connected)));
@@ -179,25 +179,27 @@ fn audit_slots_discovers_compatible_slots() {
 
     cmd_tx.send(NetworkCommand::AuditSlots).unwrap();
 
-    let scan = wait_for_specific_status(
+    // SlotScanDone is the allocation-free sentinel; actual data is in shared mutexes.
+    let done = wait_for_specific_status(
         &status_rx,
-        |s| matches!(s, NetworkStatus::SlotScan { .. }),
+        |s| matches!(s, NetworkStatus::SlotScanDone),
         Duration::from_secs(5),
     );
-    match scan {
-        Some(NetworkStatus::SlotScan { compatible, occupied, slot_types }) => {
-            assert_eq!(compatible, vec![1u8, 3],
-                "Should find DLY slots 1 and 3 (bus slots) as compatible, got {:?}", compatible);
-            assert!(occupied.contains(&1), "Slot 1 should be occupied");
-            assert!(occupied.contains(&2), "Slot 2 should be occupied");
-            assert!(!occupied.contains(&5), "Slot 5 should be empty");
-            assert!(!occupied.contains(&7), "Slot 7 should be empty");
-            assert_eq!(slot_types[0], Some(10));
-            assert_eq!(slot_types[1], Some(1));
-            assert_eq!(slot_types[4], None);
-        }
-        other => panic!("Expected SlotScan, got {:?}", other),
-    }
+    assert!(done.is_some(), "Expected SlotScanDone sentinel");
+
+    let compatible = shared.compatible_slots.lock().clone();
+    let occupied   = shared.occupied_slots.lock().clone();
+    let slot_types = *shared.slot_types.lock();
+
+    assert_eq!(compatible, vec![1u8, 3],
+        "Should find DLY slots 1 and 3 (bus slots) as compatible, got {:?}", compatible);
+    assert!(occupied.contains(&1), "Slot 1 should be occupied");
+    assert!(occupied.contains(&2), "Slot 2 should be occupied");
+    assert!(!occupied.contains(&5), "Slot 5 should be empty");
+    assert!(!occupied.contains(&7), "Slot 7 should be empty");
+    assert_eq!(slot_types[0], Some(10));
+    assert_eq!(slot_types[1], Some(1));
+    assert_eq!(slot_types[4], None);
 
     drop(cmd_tx);
     handle.join().expect("worker thread panicked");
@@ -215,9 +217,14 @@ fn telemetry_poll_updates_hardware_float() {
     let worker = NetworkWorker::new(
         cmd_rx,
         status_tx,
-        Arc::new(parking_lot::Mutex::new(1)),
+        Arc::new(parking_lot::Mutex::new(1u8)),
         Arc::new(parking_lot::Mutex::new(slot_types)),
         hardware_float.clone(),
+        Arc::new(parking_lot::Mutex::new(Vec::new())),
+        Arc::new(parking_lot::Mutex::new(Vec::new())),
+        Arc::new(parking_lot::Mutex::new(Vec::new())),
+        Arc::new(parking_lot::Mutex::new((String::new(), String::new()))),
+        Arc::new(std::sync::atomic::AtomicU64::new(0)),
     );
     let handle = std::thread::Builder::new()
         .name("ethertap-net-test".into())
@@ -270,7 +277,7 @@ fn telemetry_poll_updates_hardware_float() {
 #[test]
 fn audit_slots_empty_mixer() {
     let mixer = MockMixer::start_with_slots(all_empty_slots());
-    let (cmd_tx, status_rx, handle) = spawn_worker(mixer.port());
+    let (cmd_tx, status_rx, handle, shared) = spawn_worker(mixer.port());
 
     assert!(wait_for_status(&status_rx, Duration::from_secs(5))
         .is_some_and(|s| matches!(s, NetworkStatus::Connected)));
@@ -278,20 +285,21 @@ fn audit_slots_empty_mixer() {
 
     cmd_tx.send(NetworkCommand::AuditSlots).unwrap();
 
-    let scan = wait_for_specific_status(
+    let done = wait_for_specific_status(
         &status_rx,
-        |s| matches!(s, NetworkStatus::SlotScan { .. }),
+        |s| matches!(s, NetworkStatus::SlotScanDone),
         Duration::from_secs(5),
     );
-    match scan {
-        Some(NetworkStatus::SlotScan { compatible, occupied, slot_types }) => {
-            assert!(compatible.is_empty(), "No compatible slots expected, got {:?}", compatible);
-            assert!(occupied.is_empty(), "No occupied slots expected, got {:?}", occupied);
-            assert!(slot_types.iter().all(|t| t.is_none()),
-                "All slot types should be None for empty mixer");
-        }
-        other => panic!("Expected SlotScan, got {:?}", other),
-    }
+    assert!(done.is_some(), "Expected SlotScanDone sentinel");
+
+    let compatible = shared.compatible_slots.lock().clone();
+    let occupied   = shared.occupied_slots.lock().clone();
+    let slot_types = *shared.slot_types.lock();
+
+    assert!(compatible.is_empty(), "No compatible slots expected, got {:?}", compatible);
+    assert!(occupied.is_empty(), "No occupied slots expected, got {:?}", occupied);
+    assert!(slot_types.iter().all(|t| t.is_none()),
+        "All slot types should be None for empty mixer");
 
     drop(cmd_tx);
     handle.join().expect("worker thread panicked");

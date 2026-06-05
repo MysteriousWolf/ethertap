@@ -17,11 +17,12 @@
 ///
 /// # Phase sync — resync gap on BPM change
 ///
-/// When the DAW BPM changes by more than 0.5 BPM the worker inserts a 1 500 ms
-/// silence (no 0xF8 bytes).  Receivers detect the missing pulses, reset their
-/// tempo-averaging filter, and snap to the new BPM immediately on the first
-/// burst after the gap.  Resumption is held until the next beat-boundary tick
-/// so the receiver's pulse counter is aligned with the DAW click track.
+/// When the DAW BPM changes by more than 0.5 BPM the worker inserts a silence
+/// gap (no 0xF8 bytes) sized to 1.5 beats, floored at 1 500 ms and capped at
+/// 3 000 ms.  Receivers detect the missing pulses, reset their tempo-averaging
+/// filter, and snap to the new BPM immediately on the first burst after the
+/// gap.  Resumption is held until the next beat-boundary tick so the receiver's
+/// pulse counter is aligned with the DAW click track.
 ///
 /// When transport starts from stopped (`TransportStart`) there is no silence
 /// gap — we simply hold off until the next beat boundary so the first 0xF8
@@ -46,11 +47,23 @@ use parking_lot::Mutex;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-/// Silence inserted after `BpmChanged` to force receivers to reset their
-/// tempo-averaging filter, followed by beat-aligned resumption.
-/// 1 500 ms ≈ 3× the former 500 ms — gives sluggish receivers (some Behringer
-/// units need >800 ms) a clean window to detect the gap and reset phase.
-const RESYNC_GAP_MS: u64 = 1_500;
+/// Minimum silence inserted after `BpmChanged`.  1 500 ms ≈ 3× the former
+/// 500 ms — gives sluggish receivers (some Behringer units need >800 ms) a
+/// clean window to detect the gap and reset phase.
+const MIN_RESYNC_GAP_MS: u64 = 1_500;
+
+/// Maximum silence cap.  At very slow BPM (≤13) the 1.5-beat formula would
+/// exceed 4 500 ms.  Receivers that implement a "no clock = stopped" timeout
+/// (typically 2–5 s) would misinterpret such a long gap as a transport stop
+/// and emit a spurious MIDI Start on resumption.  3 000 ms is safely below
+/// common timeouts while still being long enough for all known receivers.
+const MAX_RESYNC_GAP_MS: u64 = 3_000;
+
+/// Gap duration expressed in beats.  Must be > 1.0 to guarantee at least one
+/// *full* silent beat regardless of where within the current beat the gap
+/// starts.  1.5 beats is the smallest value that satisfies this and is long
+/// enough for receivers that count multiple missing pulses before resetting.
+const BEATS_IN_GAP: f64 = 1.5;
 
 
 
@@ -92,12 +105,17 @@ pub enum ClockMsg {
     /// BPM changed significantly (> 0.5 BPM).
     /// Worker inserts a 1 500 ms silence, then waits for the next beat-boundary
     /// tick before resuming, giving receivers a clean phase-locked restart.
-    BpmChanged,
+    BpmChanged { new_bpm: f64 },
 
     /// Transport moved from stopped → playing.
     /// No silence gap is inserted; the worker simply holds off until the next
     /// beat-boundary tick so the first 0xF8 is phase-aligned with the DAW click.
     TransportStart,
+
+    /// Transport stopped.  Gates all pending ticks so that 0xF8 pulses queued
+    /// in the channel before the stop do not reach the output after transport
+    /// halts.  The next `TransportStart` re-arms phase alignment.
+    Stop,
 }
 
 // ─── Worker struct ────────────────────────────────────────────────────────────
@@ -273,7 +291,7 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
         }
     };
 
-    let (pass_tx, _pass_rx) = crossbeam_channel::bounded::<Vec<u8>>(256);
+    let (pass_tx, pass_rx) = crossbeam_channel::bounded::<Vec<u8>>(256);
 
     let mut current_device: Option<String> = worker.initial_device.clone();
     let mut phys_out: Option<MidiOutputConnection> = None;
@@ -310,6 +328,8 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
     let mut win_idx:    usize                   = 0;
     // Total pulses received — used to detect wrap and to gate stat updates.
     let mut win_total:  usize                   = 0;
+    // Per-instance tick counter for debug log throttling (replaces static AtomicU64).
+    let mut tick_count: u64                     = 0;
 
     // Periodic port scan timer — fires every 1 s regardless of clock activity.
     let port_scan_timer = crossbeam_channel::tick(Duration::from_secs(1));
@@ -326,21 +346,40 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
 
                 match msg {
                     // ── BPM changed: insert silence gap ──────────────────────
-                    ClockMsg::BpmChanged => {
+                    ClockMsg::BpmChanged { new_bpm } => {
+                        let beat_ms = 60_000.0 / new_bpm.max(1.0);
+                        let gap_ms = (BEATS_IN_GAP * beat_ms)
+                            .max(MIN_RESYNC_GAP_MS as f64)
+                            .min(MAX_RESYNC_GAP_MS as f64) as u64;
                         gap_expires = Some(Instant::now()
-                            + Duration::from_millis(RESYNC_GAP_MS));
+                            + Duration::from_millis(gap_ms));
                         // Discard timing history — the gap will corrupt intervals.
                         last_send = None;
                     }
 
                     // ── Transport started: phase-align without gap ────────────
                     ClockMsg::TransportStart => {
+                        // Cancel any in-progress BPM-change gap — the user
+                        // explicitly restarted transport, so phase-align now
+                        // rather than waiting for the gap to drain.
+                        gap_expires      = None;
                         waiting_for_beat = true;
                         // Reset timing history so stats start fresh each play.
                         last_send  = None;
                         win_total  = 0;
                         win_idx    = 0;
                         *worker.clock_stats.lock() = ClockStats::default();
+                    }
+
+                    // ── Transport stopped: gate pending ticks ─────────────────
+                    ClockMsg::Stop => {
+                        // Any ticks already queued before this Stop was sent will
+                        // be consumed and silenced by the waiting_for_beat gate.
+                        // The next TransportStart re-arms with a beat-boundary
+                        // realignment so resumption is always in-phase.
+                        gap_expires      = None;
+                        waiting_for_beat = true;
+                        last_send        = None;
                     }
 
                     // ── Clock tick (forwarded immediately — no sleep) ─────────
@@ -376,9 +415,9 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
                             win_idx   = (win_idx + 1) % STAT_WINDOW;
                             win_total = win_total.saturating_add(1);
 
-                            // Update stats every 24 pulses (one beat) once we have
-                            // at least 48 samples (2 beats — enough for p50/p95).
-                            // After 256 samples the full window is valid.
+                            // Update stats every 24 ticks (one beat at PPQ=24;
+                            // proportionally more/less often at other PPQ values).
+                            // Gate on ≥48 samples so p50/p95 are meaningful.
                             if win_total.is_multiple_of(24) && win_total >= 48 {
                                 let n = win_total.min(STAT_WINDOW);
                                 let stats = compute_stats(&win_us, n);
@@ -386,10 +425,9 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
                             }
                         }
                         last_send = Some(Instant::now());
-                        static TICK_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                        let n = TICK_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        if n.is_multiple_of(96) {
-                            log::info!("[EtherTap] tick #{} to virtual port, enabled={}", n, *worker.enabled.lock());
+                        tick_count = tick_count.wrapping_add(1);
+                        if tick_count.is_multiple_of(96) {
+                            log::info!("[EtherTap] tick #{} to virtual port, enabled={}", tick_count, *worker.enabled.lock());
                         }
                         if let Some(ref mut vc) = virt_conn {
                             if vc.send(CLOCK_BYTE).is_err() {
@@ -403,6 +441,15 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
                                 worker.bridge_connected.store(false, Ordering::Release);
                             }
                         }
+                    }
+                }
+            }
+
+            // ── Passthrough: forward non-clock bytes from physical input ───
+            recv(pass_rx) -> msg => {
+                if let Ok(bytes) = msg {
+                    if let Some(ref mut vc) = virt_conn {
+                        let _ = vc.send(&bytes);
                     }
                 }
             }
@@ -502,7 +549,7 @@ fn handle_port_scan(
 
     if let Some(ref name) = current_device {
         let present = known_ports.iter().any(|p| p == name);
-        log::info!("[EtherTap] handle_port_scan: device={:?}, present={}, phys_out.is_some()={}",
+        log::debug!("[EtherTap] handle_port_scan: device={:?}, present={}, phys_out.is_some()={}",
             name, present, phys_out.is_some());
 
         if present && phys_out.is_none() {
@@ -512,14 +559,21 @@ fn handle_port_scan(
             *phys_out = try_connect_out(name);
             if phys_out.is_some() {
                 *phys_in = try_connect_in(name, pass_tx.clone());
-                backoff.record_success();
+                // Enforce both-or-none: if the input couldn't be opened, close
+                // the output too so bridge_connected accurately reflects the
+                // full bridge state (clock + passthrough).
+                if phys_in.is_none() { *phys_out = None; }
+                else { backoff.record_success(); }
             }
             worker.bridge_connecting.store(false, Ordering::Release);
             worker.bridge_connected.store(phys_out.is_some(), Ordering::Release);
         } else if !present && phys_out.is_some() {
             *phys_out = None;
             *phys_in = None;
-            worker.bridge_connecting.store(true, Ordering::Release);
+            // Device disappeared — show as disconnected, not "connecting".
+            // bridge_connecting will become true only once the next reconnect
+            // attempt actually starts (in the `present && phys_out.is_none()` branch).
+            worker.bridge_connecting.store(false, Ordering::Release);
             worker.bridge_connected.store(false, Ordering::Release);
         } else if present && phys_out.is_some() {
             worker.bridge_connecting.store(false, Ordering::Release);
