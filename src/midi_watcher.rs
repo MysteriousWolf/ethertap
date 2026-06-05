@@ -10,9 +10,13 @@ use std::sync::OnceLock;
 use std::time::Instant;
 use crossbeam_channel::{Receiver, Sender, bounded};
 #[cfg(not(target_os = "macos"))]
-use crossbeam_channel::{select, tick};
+use crossbeam_channel::tick;
 #[cfg(not(target_os = "macos"))]
 use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+#[cfg(not(target_os = "macos"))]
+use std::sync::atomic::Ordering;
 
 /// Minimum interval between device-list broadcasts — rate-limits flurries of
 /// CoreMIDI notifications during USB hub plug/unplug.
@@ -33,6 +37,10 @@ pub struct MidiWatcherChannels {
     pub editor_rx: Receiver<Vec<String>>,
     /// For the MIDI clock worker — triggers immediate reconnection attempts.
     pub worker_rx: Receiver<Vec<String>>,
+    /// Set to `true` to request the polling thread to exit on next tick.
+    /// macOS uses CFRunLoop and cannot be interrupted; the OS cleans it up on
+    /// process exit.
+    pub shutdown: Arc<AtomicBool>,
 }
 
 /// Spawns a background device watcher and returns two receivers (editor +
@@ -41,14 +49,15 @@ pub struct MidiWatcherChannels {
 pub fn spawn() -> MidiWatcherChannels {
     let (ed_tx, ed_rx) = bounded::<Vec<String>>(16);
     let (wk_tx, wk_rx) = bounded::<Vec<String>>(16);
+    let shutdown = Arc::new(AtomicBool::new(false));
 
     #[cfg(target_os = "macos")]
     spawn_macos(ed_tx, wk_tx);
 
     #[cfg(not(target_os = "macos"))]
-    spawn_polling(ed_tx, wk_tx);
+    spawn_polling(ed_tx, wk_tx, shutdown.clone());
 
-    MidiWatcherChannels { editor_rx: ed_rx, worker_rx: wk_rx }
+    MidiWatcherChannels { editor_rx: ed_rx, worker_rx: wk_rx, shutdown }
 }
 
 // ─── macOS: CoreMIDI notification watcher ──────────────────────────────────────
@@ -67,7 +76,7 @@ fn enumerate_devices() -> Vec<String> {
 
 #[cfg(target_os = "macos")]
 fn spawn_macos(ed_tx: Sender<Vec<String>>, wk_tx: Sender<Vec<String>>) {
-    std::thread::Builder::new()
+    if let Err(e) = std::thread::Builder::new()
         .name("ethertap-midi-watch".into())
         .spawn(move || {
             use core_foundation::runloop::CFRunLoop;
@@ -123,35 +132,42 @@ fn spawn_macos(ed_tx: Sender<Vec<String>>, wk_tx: Sender<Vec<String>>) {
             // notification callback when the thread exits.
             CFRunLoop::run_current();
         })
-        .expect("spawn macOS MIDI watcher");
+    {
+        log::error!("[EtherTap] failed to spawn MIDI watcher thread: {e}");
+    }
 }
 
 // ─── Non-macOS: polling fallback ─────────────────────────────────────────────
 
 #[cfg(not(target_os = "macos"))]
-fn spawn_polling(ed_tx: Sender<Vec<String>>, wk_tx: Sender<Vec<String>>) {
-    std::thread::Builder::new()
+fn spawn_polling(ed_tx: Sender<Vec<String>>, wk_tx: Sender<Vec<String>>, shutdown: Arc<AtomicBool>) {
+    if let Err(e) = std::thread::Builder::new()
         .name("ethertap-midi-watch".into())
         .spawn(move || {
             let scan_timer = tick(Duration::from_secs(POLL_INTERVAL_SECS));
             loop {
-                select! {
-                    recv(scan_timer) -> _ => {
-                        let devices: Vec<String> =
-                            if let Ok(out) = midir::MidiOutput::new("EtherTap-Scan") {
-                                out.ports()
-                                    .iter()
-                                    .filter_map(|p| out.port_name(p).ok())
-                                    .filter(|n| n != "EtherTap MIDI Clock")
-                                    .collect()
-                            } else {
-                                Vec::new()
-                            };
-                        let _ = ed_tx.try_send(devices.clone());
-                        let _ = wk_tx.try_send(devices);
-                    }
+                let _ = scan_timer.recv();
+                if shutdown.load(Ordering::Acquire) {
+                    break;
                 }
+                let devices: Vec<String> =
+                    match midir::MidiOutput::new("EtherTap-Scan") {
+                        Ok(out) => out.ports()
+                            .iter()
+                            .filter_map(|p| out.port_name(p).ok())
+                            .filter(|n| n != "EtherTap MIDI Clock")
+                            .collect(),
+                        Err(e) => {
+                            log::warn!("[EtherTap] MIDI port scan failed: {e} \
+                                        (is ALSA/JACK available?)");
+                            Vec::new()
+                        }
+                    };
+                let _ = ed_tx.try_send(devices.clone());
+                let _ = wk_tx.try_send(devices);
             }
         })
-        .expect("spawn polling MIDI watcher");
+    {
+        log::error!("[EtherTap] failed to spawn MIDI poll thread: {e}");
+    }
 }
