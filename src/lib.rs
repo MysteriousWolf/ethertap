@@ -41,11 +41,21 @@ use editor::EditorData;
 use network::{NetworkCommand, NetworkStatus, NetworkWorker, now_ms};
 use params::{EtherTapParams, SyncMode};
 
-// ─── Settling constant ───────────────────────────────────────────────────────
+// ─── Timing constants ────────────────────────────────────────────────────────
 
 /// A BPM change must be absent for this many milliseconds before "Sync on
 /// Change" fires.  Gives the user time to finish dragging a tempo slider.
 const SETTLE_MS: u64 = 500;
+
+/// Minimum BPM delta that restarts the settle timer (OSC sync path).
+/// Small enough to catch deliberate automation moves; large enough to ignore
+/// floating-point noise from the host.
+const BPM_SETTLE_THRESHOLD: f64 = 0.01;
+
+/// Minimum BPM delta that triggers a BpmChanged resync gap in the MIDI clock
+/// worker.  Larger than BPM_SETTLE_THRESHOLD so that tiny automation wobbles
+/// don't cause audible MIDI-clock gaps — only meaningful tempo steps do.
+const BPM_MIDI_THRESHOLD: f64 = 0.5;
 
 
 // ─── Plugin struct ───────────────────────────────────────────────────────────
@@ -475,7 +485,7 @@ impl Plugin for EtherTap {
         }
 
         // ── 4. BPM settle detection ("On Change" modes) ──────────────────
-        if self.last_bpm > 0.0 && (bpm - self.last_bpm).abs() > 0.01 {
+        if self.last_bpm > 0.0 && (bpm - self.last_bpm).abs() > BPM_SETTLE_THRESHOLD {
             // BPM just changed — restart settle timer and cancel any retry.
             self.bpm_change_ts = now;
             self.bpm_is_settling = true;
@@ -488,7 +498,7 @@ impl Plugin for EtherTap {
             if elapsed >= SETTLE_MS {
                 // Guard: if BPM drifted past 0.01 since settle started (slow
                 // automation), re-arm rather than dispatching at the wrong tempo.
-                if (bpm - self.bpm_at_settle_start).abs() > 0.01 {
+                if (bpm - self.bpm_at_settle_start).abs() > BPM_SETTLE_THRESHOLD {
                     self.bpm_change_ts = now;
                     self.bpm_at_settle_start = bpm;
                     // keep bpm_is_settling = true, wait another SETTLE_MS
@@ -616,7 +626,7 @@ impl Plugin for EtherTap {
                             None => {
                                 self.last_bpm_changed_at = Some(bpm);
                             }
-                            Some(prev) if (bpm - prev).abs() > 0.5 => {
+                            Some(prev) if (bpm - prev).abs() > BPM_MIDI_THRESHOLD => {
                                 if self.midi_clock_tx
                                     .try_send(midi_clock::ClockMsg::BpmChanged { new_bpm: bpm })
                                     .is_ok()
@@ -670,7 +680,7 @@ impl Plugin for EtherTap {
                     if tick_interval_f.is_normal() {
                         // Reset accumulator on BPM change to avoid early/late first
                         // tick after tempo change (stale phase in the accumulator).
-                        if (bpm - self.last_clock_bpm).abs() > 0.01 {
+                        if (bpm - self.last_clock_bpm).abs() > BPM_SETTLE_THRESHOLD {
                             self.standalone_tick_samples = 0.0;
                         }
                         self.last_clock_bpm = bpm;
