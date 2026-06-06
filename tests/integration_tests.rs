@@ -86,13 +86,12 @@ fn sync_now_sets_delay_on_mock() {
     std::thread::sleep(Duration::from_millis(300));
 
     let set_msgs: Vec<_> = mixer.received_filtered(|m| m.is_set_delay().is_some());
-    assert!(!set_msgs.is_empty(), "Should receive at least one delay set message");
-    if let Some((slot, value)) = set_msgs[0].is_set_delay() {
-        assert_eq!(slot, 1, "Should set slot 1");
-        let expected = 20.0 / 120.0;
-        assert!((value - expected as f32).abs() < 0.001,
-            "Delay value should be ~{expected}, got {value}");
-    }
+    assert_eq!(set_msgs.len(), 1, "Expected exactly 1 delay-set message, got {}", set_msgs.len());
+    let (slot, value) = set_msgs[0].is_set_delay().unwrap();
+    assert_eq!(slot, 1, "Should set slot 1");
+    let expected = 20.0_f32 / 120.0;
+    assert!((value - expected).abs() < 0.001,
+        "Delay value should be ~{expected}, got {value}");
 
     drop(cmd_tx);
     handle.join().expect("worker thread panicked");
@@ -112,24 +111,34 @@ fn hard_reset_mutes_sets_unmutes() {
     cmd_tx.send(NetworkCommand::HardResetBatch { slots, bpm: 120.0 }).unwrap();
     std::thread::sleep(Duration::from_millis(350));
 
-    let mutes: Vec<_> = mixer.received_filtered(|m| {
-        m.is_mute().is_some_and(|(_, muted)| muted)
-    });
+    // Collect the ordered message log once so we can verify both count and sequence.
+    let all_msgs: Vec<_> = mixer.received_filtered(|_| true);
+
+    let mute_pos = all_msgs.iter().position(|m| m.is_mute().is_some_and(|(_, v)| v));
+    let set_pos  = all_msgs.iter().position(|m| m.is_set_delay().is_some());
+    let umute_pos = all_msgs.iter().position(|m| m.is_mute().is_some_and(|(_, v)| !v));
+
+    assert!(mute_pos.is_some(), "Expected at least one mute");
+    assert!(set_pos.is_some(),  "Expected at least one delay-set");
+    assert!(umute_pos.is_some(), "Expected at least one unmute");
+    assert!(
+        mute_pos.unwrap() < set_pos.unwrap() && set_pos.unwrap() < umute_pos.unwrap(),
+        "Message order must be: mute → set_delay → unmute (got mute@{}, set@{}, unmute@{})",
+        mute_pos.unwrap(), set_pos.unwrap(), umute_pos.unwrap()
+    );
+
+    let mutes: Vec<_> = all_msgs.iter().filter(|m| m.is_mute().is_some_and(|(_, v)| v)).collect();
     assert_eq!(mutes.len(), 2, "Should receive 2 mute commands, got {}", mutes.len());
     for m in &mutes {
-        let (slot, muted) = m.is_mute().unwrap();
-        assert!(muted, "Slot {slot} should be muted");
-        assert!(slot == 1 || slot == 3, "Only slots 1 and 3, got {slot}");
+        let (slot, _) = m.is_mute().unwrap();
+        assert!(slot == 1 || slot == 3, "Only slots 1 and 3 should be muted, got {slot}");
     }
 
-    let sets: Vec<_> = mixer.received_filtered(|m| m.is_set_delay().is_some());
-    assert!(!sets.is_empty(), "Should receive delay set messages");
+    let sets: Vec<_> = all_msgs.iter().filter(|m| m.is_set_delay().is_some()).collect();
+    assert_eq!(sets.len(), 2, "Should receive 2 delay-set messages, got {}", sets.len());
 
-    let unmutes: Vec<_> = mixer.received_filtered(|m| {
-        m.is_mute().is_some_and(|(_, muted)| !muted)
-    });
-    assert!(!unmutes.is_empty(), "Should receive unmute commands");
-    assert_eq!(unmutes.len(), 2, "Should unmute 2 slots, got {}", unmutes.len());
+    let unmutes: Vec<_> = all_msgs.iter().filter(|m| m.is_mute().is_some_and(|(_, v)| !v)).collect();
+    assert_eq!(unmutes.len(), 2, "Should receive 2 unmute commands, got {}", unmutes.len());
 
     assert_eq!(mixer.sync_count(1), 1, "Slot 1 should have 1 sync");
     assert_eq!(mixer.sync_count(3), 1, "Slot 3 should have 1 sync");
