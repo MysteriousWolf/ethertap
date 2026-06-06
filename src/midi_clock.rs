@@ -65,9 +65,10 @@ const MAX_RESYNC_GAP_MS: u64 = 3_000;
 /// enough for receivers that count multiple missing pulses before resetting.
 const BEATS_IN_GAP: f64 = 1.5;
 
-
-
 const CLOCK_BYTE: &[u8] = &[0xF8];
+
+/// Log one debug line every N ticks (4 beats @ 24-PPQ = 96 ticks).
+const DEBUG_LOG_INTERVAL_TICKS: u64 = 96;
 
 /// Rolling window size for timing statistics.  256 pulses ≈ 10.7 beats @ 120 BPM.
 /// Gives a meaningful p99 (≥100 samples needed) within ~5 s of starting playback.
@@ -467,7 +468,7 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
                         }
                         last_send = Some(Instant::now());
                         tick_count = tick_count.wrapping_add(1);
-                        if tick_count.is_multiple_of(96) {
+                        if tick_count.is_multiple_of(DEBUG_LOG_INTERVAL_TICKS) {
                             log::debug!("[EtherTap] tick #{} to virtual port, enabled={}", tick_count, worker.enabled.load(Ordering::Relaxed));
                         }
                         if let Some(ref mut vc) = virt_conn {
