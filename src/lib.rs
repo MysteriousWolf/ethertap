@@ -47,11 +47,6 @@ use params::{EtherTapParams, SyncMode};
 /// Change" fires.  Gives the user time to finish dragging a tempo slider.
 const SETTLE_MS: u64 = 500;
 
-/// Small epsilon added before `ceil()` when computing the Hard Reset target
-/// beat.  Prevents floating-point representation noise (e.g. `3.9999999...`)
-/// from rounding up by an extra beat when the position is already at or very
-/// near a whole-beat boundary.
-const BEAT_CEIL_EPSILON: f64 = 1e-9;
 
 // ─── Plugin struct ───────────────────────────────────────────────────────────
 
@@ -141,8 +136,12 @@ pub struct EtherTap {
     /// Whether transport was playing in the previous process() call.
     /// Used to detect the not-playing → playing edge for TransportStart.
     prev_playing: bool,
-    /// Monotonic instant of the last standalone clock tick (no transport).
-    last_standalone_tick: std::time::Instant,
+    /// Fractional-sample accumulator for standalone MIDI clock (no DAW transport).
+    /// Stored as f64 to preserve sub-sample remainder and avoid truncation drift.
+    standalone_tick_samples: f64,
+    /// Cumulative count of MIDI clock messages dropped due to a stalled worker.
+    /// Written in process() (atomic increment), drained by the editor on each frame.
+    midi_clock_drop_count: Arc<AtomicU32>,
 
     // ── Reconnect auto-sync ───────────────────────────────────────────────
     /// Set when connection is established; cleared once SlotScan arrives and
@@ -214,14 +213,18 @@ impl Default for EtherTap {
         let worker = NetworkWorker::new(
             cmd_rx,
             status_tx,
+            params.target_ip.clone(),
+            params.target_port.clone(),
             params.fx_slot.clone(),
-            slot_types.clone(),
-            hardware_float.clone(),
-            compatible_slots.clone(),
-            occupied_slots.clone(),
-            scan_targets.clone(),
-            connected_device.clone(),
-            scan_generation.clone(),
+            network::WorkerShared {
+                hardware_float_out: hardware_float.clone(),
+                compatible_slots:   compatible_slots.clone(),
+                occupied_slots:     occupied_slots.clone(),
+                slot_types:         slot_types.clone(),
+                scan_targets:       scan_targets.clone(),
+                connected_device:   connected_device.clone(),
+                scan_generation:    scan_generation.clone(),
+            },
         );
         std::thread::Builder::new()
             .name("ethertap-net".into())
@@ -229,6 +232,7 @@ impl Default for EtherTap {
             .expect("failed to spawn network worker thread");
 
         let initial_device = params.midi_out_device.lock().clone();
+        let initial_ppq = params.midi_clock_ppq.load(std::sync::atomic::Ordering::Relaxed);
         let midi_worker = midi_clock::MidiClockWorker::new(
             params.midi_clock_enabled.clone(),
             midi_clock_rx,
@@ -238,6 +242,7 @@ impl Default for EtherTap {
             midi_bridge_connected.clone(),
             midi_bridge_connecting.clone(),
             midi_clock_stats.clone(),
+            initial_ppq,
         );
         std::thread::Builder::new()
             .name("ethertap-midi-clk".into())
@@ -296,7 +301,8 @@ impl Default for EtherTap {
             on_change_retry_bpm:        0.0,
             on_change_retry_hard_reset: false,
             on_change_last_retry_ms:    0,
-            last_standalone_tick:      std::time::Instant::now(),
+            standalone_tick_samples:    0.0,
+            midi_clock_drop_count:      Arc::new(AtomicU32::new(0)),
         }
     }
 }
@@ -394,7 +400,7 @@ impl Plugin for EtherTap {
 
         // ── 2. Sample transport ───────────────────────────────────────────
         let transport = context.transport();
-        let bpm = transport.tempo.unwrap_or(120.0);
+        let bpm = transport.tempo.unwrap_or(120.0).max(10.0);
         let pos_beats_raw = transport.pos_beats(); // None when host doesn't report position
         let pos_beats = pos_beats_raw.unwrap_or(0.0);
         let playing = transport.playing;
@@ -440,6 +446,17 @@ impl Plugin for EtherTap {
             self.last_matched_status = in_sync;
         }
 
+        // ── 3c. Backward seek / loop detection ───────────────────────────
+        // If the host jumps position backward (loop point, user scrub), the
+        // beat-crossing check and settle timer become stale.  Reset them so
+        // the first beat after the jump fires correctly.
+        if playing && pos_beats < self.last_pos_beats - 0.5 {
+            self.last_pos_beats        = pos_beats - 1.0;
+            self.bpm_is_settling       = false;
+            self.hr_pending            = false;
+            self.on_change_retry_pending = false;
+        }
+
         // ── 4. BPM settle detection ("On Change" modes) ──────────────────
         if self.last_bpm > 0.0 && (bpm - self.last_bpm).abs() > 0.01 {
             // BPM just changed — restart settle timer and cancel any retry.
@@ -465,7 +482,7 @@ impl Plugin for EtherTap {
                         let rate_mode = self.params.rate_sync_mode.value();
                         if phase_mode == SyncMode::OnChange {
                             // Quantise the Hard Reset to the next beat boundary.
-                            let next = (pos_beats + BEAT_CEIL_EPSILON).ceil();
+                            let next = pos_beats.ceil();
                             self.hr_target_beat = if next > pos_beats { next } else { next + 1.0 };
                             self.hr_pending = true;
                             // Arm retry (hard reset will be dispatched at hr_target_beat).
@@ -523,7 +540,7 @@ impl Plugin for EtherTap {
             }
         }
         // Read PPQ once per buffer — drives LED blink cadence and tick generation.
-        let midi_ppq = *self.params.midi_clock_ppq.lock();
+        let midi_ppq = self.params.midi_clock_ppq.load(Ordering::Relaxed);
 
         if playing {
             self.last_pos_beats = pos_beats;
@@ -535,7 +552,7 @@ impl Plugin for EtherTap {
         }
 
         // ── 7. MIDI clock output via CoreMIDI virtual source ─────────────────
-        if *self.params.midi_clock_enabled.lock() {
+        if self.params.midi_clock_enabled.load(Ordering::Relaxed) {
             let pos_beats_raw = transport.pos_beats(); // None = no DAW transport
 
             if let Some(beat_start) = pos_beats_raw {
@@ -545,18 +562,20 @@ impl Plugin for EtherTap {
                     if was_playing {
                         // Gate any ticks that were already queued for this
                         // buffer before we learned transport stopped.
-                        if let Err(e) = self.midi_clock_tx
+                        if self.midi_clock_tx
                             .try_send(midi_clock::ClockMsg::Stop)
+                            .is_err()
                         {
-                            log::warn!("[EtherTap] Stop dropped: {e} (worker stalled?)");
+                            self.midi_clock_drop_count.fetch_add(1, Ordering::Relaxed);
                         }
                     }
                 }
                 if playing && !was_playing {
-                    if let Err(e) = self.midi_clock_tx
+                    if self.midi_clock_tx
                         .try_send(midi_clock::ClockMsg::TransportStart)
+                        .is_err()
                     {
-                        log::warn!("[EtherTap] TransportStart dropped: {e} (worker stalled?)");
+                        self.midi_clock_drop_count.fetch_add(1, Ordering::Relaxed);
                     }
                     // Prevent a spurious BpmChanged gap on the transition frame:
                     // if BPM was changed while stopped the BpmChanged check below
@@ -574,23 +593,14 @@ impl Plugin for EtherTap {
                                 self.last_bpm_changed_at = Some(bpm);
                             }
                             Some(prev) if (bpm - prev).abs() > 0.5 => {
-                                match self.midi_clock_tx
+                                if self.midi_clock_tx
                                     .try_send(midi_clock::ClockMsg::BpmChanged { new_bpm: bpm })
+                                    .is_ok()
                                 {
-                                    Ok(_) => self.last_bpm_changed_at = Some(bpm),
-                                    Err(crossbeam_channel::TrySendError::Full(_)) => {
-                                        log::warn!(
-                                            "[EtherTap] BpmChanged dropped: midi_clock_tx full \
-                                             (worker stalled?); bpm={bpm:.2} prev={prev:.2}",
-                                        );
-                                        self.last_bpm_changed_at = Some(bpm);
-                                    }
-                                    Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
-                                        log::error!(
-                                            "[EtherTap] BpmChanged dropped: midi clock worker \
-                                             disconnected; bpm={bpm:.2}"
-                                        );
-                                    }
+                                    self.last_bpm_changed_at = Some(bpm);
+                                } else {
+                                    self.midi_clock_drop_count.fetch_add(1, Ordering::Relaxed);
+                                    self.last_bpm_changed_at = Some(bpm);
                                 }
                             }
                             Some(_) => {}
@@ -622,44 +632,42 @@ impl Plugin for EtherTap {
                             }
                         }
                         if tick_drops > 0 {
-                            log::warn!(
-                                "[EtherTap] dropped {tick_drops} MIDI clock tick(s): \
-                                 midi_clock_tx full (worker stalled?)",
-                            );
+                            self.midi_clock_drop_count.fetch_add(tick_drops, Ordering::Relaxed);
                         }
                     }
                 }
             } else {
-                // Standalone (no DAW): emit ticks at default BPM.
-                let bpm = 120.0;
-                let ppq = midi_ppq as f64;
-                let tick_interval_us =
-                    (60.0 / bpm / ppq * 1_000_000.0) as u64;
-                let now_instant = std::time::Instant::now();
-                if self.last_standalone_tick.elapsed().as_micros() as u64
-                    >= tick_interval_us
-                {
-                    let _ = self.midi_clock_tx
-                        .try_send(midi_clock::ClockMsg::Tick { on_beat: true });
-                    self.midi_clock_pulse_count += 1;
-                    if self.midi_clock_pulse_count >= midi_ppq {
-                        self.midi_clock_pulse_count = 0;
-                        self.midi_clock_activity_ts
-                            .store(now, Ordering::Relaxed);
+                // Standalone (no DAW transport): derive tick interval from sample count
+                // to avoid Instant::now() syscalls on the audio thread.
+                let buf_len = buffer.samples();
+                if buf_len > 0 {
+                    let ppq = midi_ppq as f64;
+                    let tick_interval_f = self.sample_rate as f64 * 60.0 / bpm / ppq;
+                    if tick_interval_f > 0.0 {
+                        self.standalone_tick_samples += buf_len as f64;
+                        while self.standalone_tick_samples >= tick_interval_f {
+                            let _ = self.midi_clock_tx
+                                .try_send(midi_clock::ClockMsg::Tick { on_beat: true });
+                            self.standalone_tick_samples -= tick_interval_f;
+                            self.midi_clock_pulse_count += 1;
+                            if self.midi_clock_pulse_count >= midi_ppq {
+                                self.midi_clock_pulse_count = 0;
+                                self.midi_clock_activity_ts
+                                    .store(now, Ordering::Relaxed);
+                            }
+                        }
                     }
-                    self.last_standalone_tick = now_instant;
                 }
             }
         }
 
         // ── 8. Force triggers — param automation edges + UI atomics ─────────
 
-        // Connection control via automation.
+        // Connection control via automation: send ConnectToLast so the network
+        // worker reads ip/port itself — no String allocation on the audio thread.
         let connect_param = self.params.connect_to_last.value();
         if connect_param && !self.prev_connect_to_last {
-            let ip   = self.params.target_ip.lock().clone();
-            let port = *self.params.target_port.lock();
-            let _ = self.cmd_tx.try_send(NetworkCommand::UpdateTarget { ip, port });
+            let _ = self.cmd_tx.try_send(NetworkCommand::ConnectToLast);
             let _ = self.cmd_tx.try_send(NetworkCommand::AuditSlots);
             self.all_slots_mode.store(true, Ordering::Release);
         }
@@ -726,6 +734,7 @@ impl Plugin for EtherTap {
             midi_bridge_connected: self.midi_bridge_connected.clone(),
             midi_bridge_connecting: self.midi_bridge_connecting.clone(),
             midi_clock_stats: self.midi_clock_stats.clone(),
+            midi_clock_drop_count: self.midi_clock_drop_count.clone(),
         });
         editor::create(data)
     }
@@ -766,16 +775,16 @@ impl EtherTap {
         let mut n = 0usize;
 
         if self.all_slots_mode.load(Ordering::Acquire) {
-            // Read single-slot fallback before locking compatible_slots so we
-            // never hold two mutexes simultaneously.
+            // Snapshot filter and types before locking compatible_slots so we
+            // never hold two mutexes simultaneously on the audio thread.
             let fallback_slot = *self.params.fx_slot.lock();
+            let filter = *self.params.fx_type_filter.lock();
+            let types  = *self.slot_types.lock();
             let cs = self.compatible_slots.lock();
             if cs.is_empty() {
                 slots[0] = Some(fallback_slot);
                 n = 1;
             } else {
-                let filter = *self.params.fx_type_filter.lock();
-                let types  = *self.slot_types.lock();
                 for &slot in cs.iter() {
                     if n >= slots.len() { break; }
                     let include = match types[(slot - 1) as usize] {
@@ -964,12 +973,12 @@ mod tests {
         let json = serde_json::to_string(&*params.fx_type_filter.lock()).unwrap();
         assert_eq!(serde_json::from_str::<u32>(&json).unwrap(), 0b000_0011u32);
 
-        *params.midi_clock_enabled.lock() = false;
-        let json = serde_json::to_string(&*params.midi_clock_enabled.lock()).unwrap();
+        params.midi_clock_enabled.store(false, Ordering::Relaxed);
+        let json = serde_json::to_string(&params.midi_clock_enabled.load(Ordering::Relaxed)).unwrap();
         assert_eq!(serde_json::from_str::<bool>(&json).unwrap(), false);
 
-        *params.midi_clock_ppq.lock() = 48u8;
-        let json = serde_json::to_string(&*params.midi_clock_ppq.lock()).unwrap();
+        params.midi_clock_ppq.store(48u8, Ordering::Relaxed);
+        let json = serde_json::to_string(&params.midi_clock_ppq.load(Ordering::Relaxed)).unwrap();
         assert_eq!(serde_json::from_str::<u8>(&json).unwrap(), 48);
 
         let device = Some("Midi Through Port-0".to_owned());

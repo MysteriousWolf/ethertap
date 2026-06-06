@@ -217,14 +217,18 @@ fn telemetry_poll_updates_hardware_float() {
     let worker = NetworkWorker::new(
         cmd_rx,
         status_tx,
+        Arc::new(parking_lot::Mutex::new(String::new())),
+        Arc::new(parking_lot::Mutex::new(0u16)),
         Arc::new(parking_lot::Mutex::new(1u8)),
-        Arc::new(parking_lot::Mutex::new(slot_types)),
-        hardware_float.clone(),
-        Arc::new(parking_lot::Mutex::new(Vec::new())),
-        Arc::new(parking_lot::Mutex::new(Vec::new())),
-        Arc::new(parking_lot::Mutex::new(Vec::new())),
-        Arc::new(parking_lot::Mutex::new((String::new(), String::new()))),
-        Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        ethertap::network::WorkerShared {
+            hardware_float_out: hardware_float.clone(),
+            compatible_slots:   Arc::new(parking_lot::Mutex::new(Vec::new())),
+            occupied_slots:     Arc::new(parking_lot::Mutex::new(Vec::new())),
+            slot_types:         Arc::new(parking_lot::Mutex::new(slot_types)),
+            scan_targets:       Arc::new(parking_lot::Mutex::new(Vec::new())),
+            connected_device:   Arc::new(parking_lot::Mutex::new((String::new(), String::new()))),
+            scan_generation:    Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        },
     );
     let handle = std::thread::Builder::new()
         .name("ethertap-net-test".into())

@@ -121,7 +121,7 @@ pub enum ClockMsg {
 // ─── Worker struct ────────────────────────────────────────────────────────────
 
 pub struct MidiClockWorker {
-    enabled:          Arc<Mutex<bool>>,
+    enabled:          Arc<AtomicBool>,
     clock_rx:         Receiver<ClockMsg>,
     device_change_rx: Receiver<Option<String>>,
     device_watch_rx:  Receiver<Vec<String>>,
@@ -130,12 +130,14 @@ pub struct MidiClockWorker {
     bridge_connecting: Arc<AtomicBool>,
     /// Shared timing statistics — written by this worker, read by the editor.
     pub clock_stats:   Arc<Mutex<ClockStats>>,
+    /// Pulses per quarter note — used to gate stats updates at beat boundaries.
+    pub midi_ppq:      u8,
 }
 
 impl MidiClockWorker {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        enabled:           Arc<Mutex<bool>>,
+        enabled:           Arc<AtomicBool>,
         clock_rx:          Receiver<ClockMsg>,
         device_change_rx:  Receiver<Option<String>>,
         device_watch_rx:   Receiver<Vec<String>>,
@@ -143,9 +145,10 @@ impl MidiClockWorker {
         bridge_connected:  Arc<AtomicBool>,
         bridge_connecting: Arc<AtomicBool>,
         clock_stats:       Arc<Mutex<ClockStats>>,
+        midi_ppq:          u8,
     ) -> Self {
         Self { enabled, clock_rx, device_change_rx, device_watch_rx,
-               initial_device, bridge_connected, bridge_connecting, clock_stats }
+               initial_device, bridge_connected, bridge_connecting, clock_stats, midi_ppq }
     }
 
     pub fn run(self) {
@@ -403,7 +406,7 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
                             waiting_for_beat = false;
                         }
 
-                        if !*worker.enabled.lock() {
+                        if !worker.enabled.load(Ordering::Relaxed) {
                             continue;
                         }
 
@@ -415,10 +418,10 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
                             win_idx   = (win_idx + 1) % STAT_WINDOW;
                             win_total = win_total.saturating_add(1);
 
-                            // Update stats every 24 ticks (one beat at PPQ=24;
-                            // proportionally more/less often at other PPQ values).
-                            // Gate on ≥48 samples so p50/p95 are meaningful.
-                            if win_total.is_multiple_of(24) && win_total >= 48 {
+                            // Update stats every PPQ ticks (one beat).
+                            // Gate on ≥2*PPQ samples so p50/p95 are meaningful.
+                            let ppq_usize = worker.midi_ppq as usize;
+                            if win_total.is_multiple_of(ppq_usize) && win_total >= ppq_usize * 2 {
                                 let n = win_total.min(STAT_WINDOW);
                                 let stats = compute_stats(&win_us, n);
                                 *worker.clock_stats.lock() = stats;
@@ -427,7 +430,7 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
                         last_send = Some(Instant::now());
                         tick_count = tick_count.wrapping_add(1);
                         if tick_count.is_multiple_of(96) {
-                            log::info!("[EtherTap] tick #{} to virtual port, enabled={}", tick_count, *worker.enabled.lock());
+                            log::debug!("[EtherTap] tick #{} to virtual port, enabled={}", tick_count, worker.enabled.load(Ordering::Relaxed));
                         }
                         if let Some(ref mut vc) = virt_conn {
                             if vc.send(CLOCK_BYTE).is_err() {
@@ -467,7 +470,10 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
                     phys_out = try_connect_out(name);
                     if phys_out.is_some() {
                         phys_in = try_connect_in(name, pass_tx.clone());
-                        if phys_in.is_none() { phys_out = None; }
+                        if phys_in.is_none() {
+                            log::warn!("[EtherTap] MIDI passthrough unavailable: \
+                                        no input port matching '{name}'");
+                        }
                     }
                     worker.bridge_connecting.store(false, Ordering::Release);
                     worker.bridge_connected.store(phys_out.is_some(), Ordering::Release);
@@ -554,16 +560,17 @@ fn handle_port_scan(
 
         if present && phys_out.is_none() {
             log::info!("[EtherTap] handle_port_scan: attempting to connect to {:?}", name);
-            backoff.record_failure();
             worker.bridge_connecting.store(true, Ordering::Release);
             *phys_out = try_connect_out(name);
             if phys_out.is_some() {
+                backoff.record_success();
                 *phys_in = try_connect_in(name, pass_tx.clone());
-                // Enforce both-or-none: if the input couldn't be opened, close
-                // the output too so bridge_connected accurately reflects the
-                // full bridge state (clock + passthrough).
-                if phys_in.is_none() { *phys_out = None; }
-                else { backoff.record_success(); }
+                if phys_in.is_none() {
+                    log::warn!("[EtherTap] MIDI passthrough unavailable: \
+                                no input port matching '{name}'");
+                }
+            } else {
+                backoff.record_failure();
             }
             worker.bridge_connecting.store(false, Ordering::Release);
             worker.bridge_connected.store(phys_out.is_some(), Ordering::Release);

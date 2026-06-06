@@ -188,9 +188,7 @@ const MAX_DELAY_MS: f64 = 3_000.0;
 /// assert_eq!(ethertap::osc::bpm_to_float(20.0), 1.0);   // ceiling
 /// ```
 pub fn bpm_to_float(bpm: f64) -> f32 {
-    debug_assert!(bpm > 0.0, "BPM must be positive");
     if bpm <= 0.0 {
-        log::warn!("[EtherTap] bpm_to_float: bpm={bpm} ≤ 0, returning max delay");
         return 1.0;
     }
     let beat_ms = 60_000.0 / bpm;

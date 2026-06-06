@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, AtomicU8},
+    Arc,
+};
 
 use nih_plug::prelude::*;
 use nih_plug_iced::{Font, IcedState};
@@ -63,12 +66,12 @@ pub struct EtherTapParams {
     /// When true (default), the plugin emits MIDI clock on its MIDI output
     /// while the host transport is playing.
     #[persist = "midi-clock-enabled"]
-    pub midi_clock_enabled: Arc<Mutex<bool>>,
+    pub midi_clock_enabled: Arc<AtomicBool>,
 
     /// MIDI clock pulses per quarter note.
     /// Options: 3, 4, 6, 8, 12, 16, 24, 32, 48, 96.  Default: 24 (MIDI spec).
     #[persist = "midi-clock-ppq"]
-    pub midi_clock_ppq: Arc<Mutex<u8>>,
+    pub midi_clock_ppq: Arc<AtomicU8>,
 
     /// Physical MIDI output device to send clock to and bridge MIDI from.
     /// `None` = virtual port only (legacy behaviour).
@@ -136,8 +139,8 @@ impl Default for EtherTapParams {
             target_port: Arc::new(Mutex::new(10023)),
             fx_slot: Arc::new(Mutex::new(1)),
             fx_type_filter: Arc::new(Mutex::new(0x7F_u32)),
-            midi_clock_enabled: Arc::new(Mutex::new(true)),
-            midi_clock_ppq: Arc::new(Mutex::new(24_u8)),
+            midi_clock_enabled: Arc::new(AtomicBool::new(true)),
+            midi_clock_ppq: Arc::new(AtomicU8::new(24_u8)),
             midi_out_device: Arc::new(Mutex::new(None)),
             rate_sync_mode: EnumParam::new("Rate Sync Mode", SyncMode::OnChange),
             phase_sync_mode: EnumParam::new("Phase Sync Mode", SyncMode::Manual),

@@ -77,6 +77,9 @@ impl DeviceInfo {
 pub enum NetworkCommand {
     /// Bind a new UDP socket and connect to the given target.
     UpdateTarget { ip: String, port: u16 },
+    /// Connect using the ip/port already stored in the shared params.
+    /// Lets the audio thread trigger a connect without allocating or locking.
+    ConnectToLast,
     /// Drop the socket and mark as disconnected.
     Disconnect,
     /// Dispatch the BPM-derived delay time to the given FX slot immediately.
@@ -117,6 +120,29 @@ pub enum NetworkStatus {
     ScanDone,
 }
 
+// ─── Shared state ────────────────────────────────────────────────────────────
+
+/// Arcs written by the network worker and read by the audio thread or editor.
+/// Passed as a single unit to [`NetworkWorker::new`] to keep the constructor
+/// argument count manageable.
+pub struct WorkerShared {
+    /// Last polled hardware delay-time float (f32 bits via `f32::from/to_bits`).
+    pub hardware_float_out: Arc<AtomicU32>,
+    /// BPM-compatible FX slots — written after `AuditSlots`, read by audio thread.
+    pub compatible_slots: Arc<Mutex<Vec<u8>>>,
+    /// All occupied FX slots — written after `AuditSlots`, read by editor.
+    pub occupied_slots: Arc<Mutex<Vec<u8>>>,
+    /// Raw effect type ID for each slot (index = slot-1, `None` = not yet queried).
+    pub slot_types: Arc<Mutex<[Option<i32>; 8]>>,
+    /// Discovered network scan targets — written here, read by editor.
+    pub scan_targets: Arc<Mutex<Vec<DeviceInfo>>>,
+    /// Name and model of the connected device from `/info` responses.
+    pub connected_device: Arc<Mutex<(String, String)>>,
+    /// Monotonically-increasing counter; background scan threads discard results
+    /// when this changes, preventing stale results from a previous scan.
+    pub scan_generation: Arc<AtomicU64>,
+}
+
 // ─── Worker ──────────────────────────────────────────────────────────────────
 
 pub struct NetworkWorker {
@@ -126,25 +152,18 @@ pub struct NetworkWorker {
     target: Option<SocketAddr>,
     last_heartbeat: Instant,
     telemetry_timer: Instant,
+    /// Persisted target ip/port — read when ConnectToLast is received so the
+    /// audio thread never has to lock or clone to trigger a reconnect.
+    target_ip: Arc<Mutex<String>>,
+    target_port: Arc<Mutex<u16>>,
     /// Shared reference to the active FX slot, updated when the user changes it.
     fx_slot: Arc<Mutex<u8>>,
-    /// Raw effect type ID for each slot (index = slot-1).  Used to choose the
-    /// correct par/NN address when dispatching or polling delay time.
-    slot_types: Arc<Mutex<[Option<i32>; 8]>>,
-    /// Shared output for the last polled hardware delay float (f32 bits).
     hardware_float_out: Arc<AtomicU32>,
-    // ── Directly-written shared state (avoid allocation on audio thread) ──
-    /// BPM-compatible FX slots — written here after AuditSlots, read by audio.
     compatible_slots: Arc<Mutex<Vec<u8>>>,
-    /// All occupied FX slots — written here after AuditSlots, read by editor.
     occupied_slots: Arc<Mutex<Vec<u8>>>,
-    /// Discovered network scan targets — written here, read by editor.
+    slot_types: Arc<Mutex<[Option<i32>; 8]>>,
     scan_targets: Arc<Mutex<Vec<DeviceInfo>>>,
-    /// Name/model of the connected device from /info responses — written here.
     connected_device: Arc<Mutex<(String, String)>>,
-    /// Monotonically-increasing counter incremented by the editor each time it
-    /// opens the scan modal and clears stale results.  Background scan threads
-    /// capture this value at spawn and discard their results if it has changed.
     scan_generation: Arc<AtomicU64>,
     /// Set by an explicit `Disconnect` command; prevents automatic reconnect.
     /// Cleared when a new `UpdateTarget` arrives.
@@ -154,18 +173,13 @@ pub struct NetworkWorker {
 }
 
 impl NetworkWorker {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cmd_rx: Receiver<NetworkCommand>,
         status_tx: Sender<NetworkStatus>,
+        target_ip: Arc<Mutex<String>>,
+        target_port: Arc<Mutex<u16>>,
         fx_slot: Arc<Mutex<u8>>,
-        slot_types: Arc<Mutex<[Option<i32>; 8]>>,
-        hardware_float_out: Arc<AtomicU32>,
-        compatible_slots: Arc<Mutex<Vec<u8>>>,
-        occupied_slots: Arc<Mutex<Vec<u8>>>,
-        scan_targets: Arc<Mutex<Vec<DeviceInfo>>>,
-        connected_device: Arc<Mutex<(String, String)>>,
-        scan_generation: Arc<AtomicU64>,
+        shared: WorkerShared,
     ) -> Self {
         let now = Instant::now();
         Self {
@@ -175,14 +189,16 @@ impl NetworkWorker {
             target: None,
             last_heartbeat: now,
             telemetry_timer: now,
+            target_ip,
+            target_port,
             fx_slot,
-            slot_types,
-            hardware_float_out,
-            compatible_slots,
-            occupied_slots,
-            scan_targets,
-            connected_device,
-            scan_generation,
+            hardware_float_out: shared.hardware_float_out,
+            compatible_slots: shared.compatible_slots,
+            occupied_slots: shared.occupied_slots,
+            slot_types: shared.slot_types,
+            scan_targets: shared.scan_targets,
+            connected_device: shared.connected_device,
+            scan_generation: shared.scan_generation,
             user_disconnected: false,
             connected: false,
             backoff: Backoff::new(2000, 10000),
@@ -237,22 +253,30 @@ impl NetworkWorker {
 
     // ── Command dispatch ──────────────────────────────────────────────────
 
+    fn connect(&mut self, ip: String, port: u16) {
+        match format!("{ip}:{port}").parse::<SocketAddr>() {
+            Ok(addr) => {
+                self.user_disconnected = false;
+                self.backoff.record_success();
+                self.target = Some(addr);
+                let _ = self.rebind();
+                // Record the reference point *before* the blocking heartbeat
+                // call so the next periodic heartbeat uses a clean baseline.
+                self.last_heartbeat = Instant::now();
+                self.send_heartbeat();
+            }
+            Err(_) => log::warn!("[EtherTap] invalid target: {ip}:{port}"),
+        }
+    }
+
     fn handle(&mut self, cmd: NetworkCommand) {
         match cmd {
-            NetworkCommand::UpdateTarget { ip, port } => {
-                match format!("{ip}:{port}").parse::<SocketAddr>() {
-                    Ok(addr) => {
-                        self.user_disconnected = false;
-                        self.backoff.record_success();
-                        self.target = Some(addr);
-                        let _ = self.rebind();
-                        // Record the reference point *before* the blocking heartbeat
-                        // call so the next periodic heartbeat uses a clean baseline.
-                        self.last_heartbeat = Instant::now();
-                        self.send_heartbeat();
-                    }
-                    Err(_) => log::warn!("[EtherTap] invalid target: {ip}:{port}"),
-                }
+            NetworkCommand::UpdateTarget { ip, port } => self.connect(ip, port),
+
+            NetworkCommand::ConnectToLast => {
+                let ip   = self.target_ip.lock().clone();
+                let port = *self.target_port.lock();
+                self.connect(ip, port);
             }
 
             NetworkCommand::Disconnect => {
@@ -436,7 +460,8 @@ impl NetworkWorker {
                     Ok(cmd @ (NetworkCommand::SyncNow { .. }
                             | NetworkCommand::HardResetBatch { .. }
                             | NetworkCommand::Disconnect
-                            | NetworkCommand::UpdateTarget { .. })) => self.handle(cmd),
+                            | NetworkCommand::UpdateTarget { .. }
+                            | NetworkCommand::ConnectToLast)) => self.handle(cmd),
                     Ok(_) => {} // defer AuditSlots / ScanTargets
                     Err(_) => break,
                 }
@@ -723,7 +748,7 @@ impl NetworkWorker {
         let idx = slot.saturating_sub(1) as usize;
         let t = self.slot_types.lock().get(idx).and_then(|t| *t);
         if t.is_none() {
-            log::debug!(
+            log::warn!(
                 "[EtherTap] slot_type_for: slot {slot} type unknown (audit pending), \
                  defaulting to DLY — wrong par address if slot holds a different effect"
             );

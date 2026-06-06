@@ -291,22 +291,42 @@ impl text_input::StyleSheet for EtherInput {
 }
 
 /// Dimmed style for IP/port inputs when a connection is active.
-struct EtherInputLocked;
+#[derive(Clone, Copy)]
+enum EtherInputLocked { Editable, Locked }
 
 impl text_input::StyleSheet for EtherInputLocked {
     fn active(&self) -> text_input::Style {
-        text_input::Style {
-            background: Background::Color(THEME.inset_bg),
-            border_radius: 4.0,
-            border_width: 1.0,
-            border_color: THEME.section_border,
+        match self {
+            Self::Editable => EtherInput.active(),
+            Self::Locked => text_input::Style {
+                background: Background::Color(THEME.inset_bg),
+                border_radius: 4.0,
+                border_width: 1.0,
+                border_color: THEME.section_border,
+            },
         }
     }
-    fn focused(&self)      -> text_input::Style { self.active() }
-    fn hovered(&self)      -> text_input::Style { self.active() }
-    fn placeholder_color(&self) -> Color { THEME.surface_border }
-    fn value_color(&self)       -> Color { THEME.text_dim }
-    fn selection_color(&self)   -> Color { THEME.bg }
+    fn focused(&self) -> text_input::Style {
+        match self {
+            Self::Editable => EtherInput.focused(),
+            Self::Locked   => self.active(),
+        }
+    }
+    fn hovered(&self) -> text_input::Style {
+        match self {
+            Self::Editable => EtherInput.hovered(),
+            Self::Locked   => self.active(),
+        }
+    }
+    fn placeholder_color(&self) -> Color {
+        match self { Self::Editable => THEME.text_dim,      Self::Locked => THEME.surface_border }
+    }
+    fn value_color(&self) -> Color {
+        match self { Self::Editable => THEME.text,          Self::Locked => THEME.text_dim }
+    }
+    fn selection_color(&self) -> Color {
+        match self { Self::Editable => THEME.selected_bg,   Self::Locked => THEME.bg }
+    }
 }
 
 // ─── PickList stylesheet ──────────────────────────────────────────────────────
@@ -476,6 +496,9 @@ pub struct EditorData {
     pub midi_bridge_connecting: Arc<AtomicBool>,
     /// Rolling timing statistics from the MIDI clock worker.
     pub midi_clock_stats: Arc<Mutex<crate::midi_clock::ClockStats>>,
+    /// Cumulative count of MIDI clock messages dropped on the audio thread.
+    /// Written lock-free by process(); drained and logged here on each frame.
+    pub midi_clock_drop_count: Arc<AtomicU32>,
 }
 
 // ─── Editor entry point ───────────────────────────────────────────────────────
@@ -665,11 +688,10 @@ impl IcedEditor for EtherTapEditor {
                 *filter ^= 1_u32 << bit;
             }
             Message::ToggleMidiClock => {
-                let mut enabled = self.data.params.midi_clock_enabled.lock();
-                *enabled = !*enabled;
+                self.data.params.midi_clock_enabled.fetch_xor(true, Ordering::Relaxed);
             }
             Message::SetClockPpq(ppq) => {
-                *self.data.params.midi_clock_ppq.lock() = ppq;
+                self.data.params.midi_clock_ppq.store(ppq, Ordering::Relaxed);
             }
             Message::ToggleMidiPicker => {
                 self.show_midi_picker = !self.show_midi_picker;
@@ -720,13 +742,18 @@ impl IcedEditor for EtherTapEditor {
                     list.extend(ports.iter().filter(|n| n.as_str() != "EtherTap MIDI Clock").cloned());
                     self.midi_out_ports = list;
                 }
+                // Drain MIDI clock drop counter written by the audio thread.
+                let drops = self.data.midi_clock_drop_count.swap(0, Ordering::Relaxed);
+                if drops > 0 {
+                    log::warn!("[EtherTap] {drops} MIDI clock message(s) dropped (worker stalled?)");
+                }
             }
             Message::SelectTarget(ip, port) => {
-                self.ip_buf   = ip.clone();
+                self.ip_buf   = ip;
                 self.port_buf = port.to_string();
-                *self.data.params.target_ip.lock()   = ip.clone();
+                *self.data.params.target_ip.lock()   = self.ip_buf.clone();
                 *self.data.params.target_port.lock() = port;
-                let _ = self.data.cmd_tx.try_send(NetworkCommand::UpdateTarget { ip, port });
+                let _ = self.data.cmd_tx.try_send(NetworkCommand::UpdateTarget { ip: self.ip_buf.clone(), port });
                 self.show_scan_results = false;
             }
             Message::Connect => {
@@ -997,25 +1024,15 @@ impl IcedEditor for EtherTapEditor {
         .style(BannerBg);
 
         // ── Network config + scan + connect ──────────────────────────────
-        let (ip_input, port_input): (Element<'_, Message>, Element<'_, Message>) = if connected {
-            (
-                TextInput::new(&mut self.ip_state, "IP address", &self.ip_buf, Message::IpEdited)
-                    .size(11).font(MONO_FONT).padding(4).width(Length::FillPortion(3))
-                    .style(EtherInputLocked).into(),
-                TextInput::new(&mut self.port_state, "Port", &self.port_buf, Message::PortEdited)
-                    .size(11).font(MONO_FONT).padding(4).width(Length::FillPortion(2))
-                    .style(EtherInputLocked).into(),
-            )
-        } else {
-            (
-                TextInput::new(&mut self.ip_state, "IP address", &self.ip_buf, Message::IpEdited)
-                    .size(11).font(MONO_FONT).padding(4).width(Length::FillPortion(3))
-                    .style(EtherInput).into(),
-                TextInput::new(&mut self.port_state, "Port", &self.port_buf, Message::PortEdited)
-                    .size(11).font(MONO_FONT).padding(4).width(Length::FillPortion(2))
-                    .style(EtherInput).into(),
-            )
-        };
+        let input_style = if connected { EtherInputLocked::Locked } else { EtherInputLocked::Editable };
+        let ip_input: Element<'_, Message> =
+            TextInput::new(&mut self.ip_state, "IP address", &self.ip_buf, Message::IpEdited)
+                .size(11).font(MONO_FONT).padding(4).width(Length::FillPortion(3))
+                .style(input_style).into();
+        let port_input: Element<'_, Message> =
+            TextInput::new(&mut self.port_state, "Port", &self.port_buf, Message::PortEdited)
+                .size(11).font(MONO_FONT).padding(4).width(Length::FillPortion(2))
+                .style(input_style).into();
 
         let scan_btn = {
             let icon_color = if connected { THEME.surface_border } else { THEME.text_dim };
@@ -1273,8 +1290,8 @@ impl IcedEditor for EtherTapEditor {
             .align_items(Alignment::Center);
 
         // ── Output clock section (PPQ + MIDI OUT device + toggle — one row) ─
-        let clock_on  = *self.data.params.midi_clock_enabled.lock();
-        let clock_ppq = *self.data.params.midi_clock_ppq.lock();
+        let clock_on  = self.data.params.midi_clock_enabled.load(Ordering::Relaxed);
+        let clock_ppq = self.data.params.midi_clock_ppq.load(Ordering::Relaxed);
 
         const PPQ_OPTIONS: &[u8] = &[3, 4, 6, 8, 12, 16, 24, 32, 48, 96];
 

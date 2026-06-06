@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -10,9 +8,9 @@ use parking_lot::Mutex;
 
 use crossbeam_channel::{Receiver, Sender};
 use ethertap::network::{NetworkCommand, NetworkStatus, NetworkWorker};
-use parking_lot::Mutex as PLMutex;
 use rosc::{encoder, decoder, OscMessage, OscPacket, OscType};
 
+#[allow(dead_code)]
 pub const WORKER_TIMEOUT: Duration = Duration::from_secs(10);
 pub const DLY: i32 = 10;
 pub const EMPTY: i32 = -1;
@@ -55,7 +53,9 @@ pub struct MockMixer {
 pub struct ReceivedMsg {
     pub addr: String,
     pub args: Vec<OscType>,
+    #[allow(dead_code)]
     pub from: SocketAddr,
+    #[allow(dead_code)]
     pub timestamp: Instant,
 }
 
@@ -80,7 +80,9 @@ impl ReceivedMsg {
         }
         None
     }
+    #[allow(dead_code)]
     pub fn is_heartbeat(&self) -> bool { self.addr == "/info" }
+    #[allow(dead_code)]
     pub fn addr_only(&self) -> &str { &self.addr }
 }
 
@@ -126,6 +128,7 @@ impl MockMixer {
         self.slots.lock().get(idx).map_or(0, |s| s.sync_count)
     }
 
+    #[allow(dead_code)]
     pub fn rx_bpm(&self, slot: u8) -> Option<f64> {
         let idx = (slot as usize).saturating_sub(1);
         self.slots.lock().get(idx).and_then(|s| s.rx_bpm)
@@ -144,6 +147,7 @@ impl MockMixer {
         false
     }
 
+    #[allow(dead_code)]
     pub fn stop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
         if let Some(h) = self.handle.take() {
@@ -273,15 +277,17 @@ pub fn all_empty_slots() -> [SlotState; 8] {
     [SlotState::empty(); 8]
 }
 
-/// Shared state written directly by `NetworkWorker` (bypasses the status channel
-/// to avoid allocation on the audio thread).  Returned by `create_worker` so
-/// tests can read slot/scan data after receiving the `SlotScanDone` sentinel.
+/// Test-visible slice of the Arcs written by `NetworkWorker`.
+/// Returned by `create_worker` so tests can inspect slot/scan data after
+/// receiving the `SlotScanDone` sentinel.
 pub struct WorkerShared {
-    pub compatible_slots: std::sync::Arc<PLMutex<Vec<u8>>>,
-    pub occupied_slots:   std::sync::Arc<PLMutex<Vec<u8>>>,
-    pub slot_types:       std::sync::Arc<PLMutex<[Option<i32>; 8]>>,
-    pub scan_targets:     std::sync::Arc<PLMutex<Vec<ethertap::network::DeviceInfo>>>,
-    pub connected_device: std::sync::Arc<PLMutex<(String, String)>>,
+    pub compatible_slots: std::sync::Arc<Mutex<Vec<u8>>>,
+    pub occupied_slots:   std::sync::Arc<Mutex<Vec<u8>>>,
+    pub slot_types:       std::sync::Arc<Mutex<[Option<i32>; 8]>>,
+    #[allow(dead_code)]
+    pub scan_targets:     std::sync::Arc<Mutex<Vec<ethertap::network::DeviceInfo>>>,
+    #[allow(dead_code)]
+    pub connected_device: std::sync::Arc<Mutex<(String, String)>>,
 }
 
 pub fn create_worker(
@@ -292,13 +298,13 @@ pub fn create_worker(
     let (cmd_tx, cmd_rx) = crossbeam_channel::bounded::<NetworkCommand>(64);
     let (status_tx, status_rx) = crossbeam_channel::bounded::<NetworkStatus>(64);
 
-    let compatible_slots  = std::sync::Arc::new(PLMutex::new(Vec::<u8>::new()));
-    let occupied_slots    = std::sync::Arc::new(PLMutex::new(Vec::<u8>::new()));
-    let slot_types_shared = std::sync::Arc::new(PLMutex::new(slot_types_init));
-    let scan_targets      = std::sync::Arc::new(PLMutex::new(Vec::new()));
-    let connected_device  = std::sync::Arc::new(PLMutex::new((String::new(), String::new())));
+    let compatible_slots  = std::sync::Arc::new(Mutex::new(Vec::<u8>::new()));
+    let occupied_slots    = std::sync::Arc::new(Mutex::new(Vec::<u8>::new()));
+    let slot_types_shared = std::sync::Arc::new(Mutex::new(slot_types_init));
+    let scan_targets      = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let connected_device  = std::sync::Arc::new(Mutex::new((String::new(), String::new())));
 
-    let shared = WorkerShared {
+    let test_shared = WorkerShared {
         compatible_slots:  compatible_slots.clone(),
         occupied_slots:    occupied_slots.clone(),
         slot_types:        slot_types_shared.clone(),
@@ -309,19 +315,24 @@ pub fn create_worker(
     let worker = NetworkWorker::new(
         cmd_rx,
         status_tx,
-        std::sync::Arc::new(PLMutex::new(fx_slot)),
-        slot_types_shared,
-        hardware_float_out,
-        compatible_slots,
-        occupied_slots,
-        scan_targets,
-        connected_device,
-        std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        std::sync::Arc::new(Mutex::new(String::new())),
+        std::sync::Arc::new(Mutex::new(0u16)),
+        std::sync::Arc::new(Mutex::new(fx_slot)),
+        ethertap::network::WorkerShared {
+            hardware_float_out,
+            compatible_slots,
+            occupied_slots,
+            slot_types: slot_types_shared,
+            scan_targets,
+            connected_device,
+            scan_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        },
     );
 
-    (worker, cmd_tx, status_rx, shared)
+    (worker, cmd_tx, status_rx, test_shared)
 }
 
+#[allow(dead_code)]
 pub fn create_default_worker(
 ) -> (NetworkWorker, Sender<NetworkCommand>, Receiver<NetworkStatus>, WorkerShared) {
     let hardware_float = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -369,6 +380,7 @@ pub fn wait_for_status(
     None
 }
 
+#[allow(dead_code)]
 pub fn drain_status(status_rx: &Receiver<NetworkStatus>) -> Option<NetworkStatus> {
     let mut last = None;
     while let Ok(status) = status_rx.try_recv() {

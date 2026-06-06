@@ -140,29 +140,41 @@ fn spawn_macos(ed_tx: Sender<Vec<String>>, wk_tx: Sender<Vec<String>>) {
 // ─── Non-macOS: polling fallback ─────────────────────────────────────────────
 
 #[cfg(not(target_os = "macos"))]
+fn scan_ports() -> Vec<String> {
+    match midir::MidiOutput::new("EtherTap-Scan") {
+        Ok(out) => out.ports()
+            .iter()
+            .filter_map(|p| out.port_name(p).ok())
+            .filter(|n| n != "EtherTap MIDI Clock")
+            .collect(),
+        Err(e) => {
+            log::warn!("[EtherTap] MIDI port scan failed: {e} \
+                        (is ALSA/JACK available?)");
+            Vec::new()
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
 fn spawn_polling(ed_tx: Sender<Vec<String>>, wk_tx: Sender<Vec<String>>, shutdown: Arc<AtomicBool>) {
     if let Err(e) = std::thread::Builder::new()
         .name("ethertap-midi-watch".into())
         .spawn(move || {
+            // Send initial device list immediately, mirroring the macOS path.
+            // Without this the MIDI clock worker starts with an empty port list
+            // and the first connection attempt cannot succeed until the first
+            // timer tick (POLL_INTERVAL_SECS seconds later).
+            let initial = scan_ports();
+            let _ = ed_tx.try_send(initial.clone());
+            let _ = wk_tx.try_send(initial);
+
             let scan_timer = tick(Duration::from_secs(POLL_INTERVAL_SECS));
             loop {
                 let _ = scan_timer.recv();
                 if shutdown.load(Ordering::Acquire) {
                     break;
                 }
-                let devices: Vec<String> =
-                    match midir::MidiOutput::new("EtherTap-Scan") {
-                        Ok(out) => out.ports()
-                            .iter()
-                            .filter_map(|p| out.port_name(p).ok())
-                            .filter(|n| n != "EtherTap MIDI Clock")
-                            .collect(),
-                        Err(e) => {
-                            log::warn!("[EtherTap] MIDI port scan failed: {e} \
-                                        (is ALSA/JACK available?)");
-                            Vec::new()
-                        }
-                    };
+                let devices = scan_ports();
                 let _ = ed_tx.try_send(devices.clone());
                 let _ = wk_tx.try_send(devices);
             }
