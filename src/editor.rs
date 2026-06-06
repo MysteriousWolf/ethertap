@@ -514,8 +514,6 @@ pub fn create(data: Arc<EditorData>) -> Option<Box<dyn nih_plug::prelude::Editor
 struct EtherTapEditor {
     data:       Arc<EditorData>,
     context:    Arc<dyn GuiContext>,
-    ip_buf:     String,
-    port_buf:   String,
     ip_state:   text_input::State,
     port_state: text_input::State,
     // Rate Sync — 3 radio buttons + force (bolt-only)
@@ -591,12 +589,9 @@ impl IcedEditor for EtherTapEditor {
     type InitializationFlags = Arc<EditorData>;
 
     fn new(data: Arc<EditorData>, context: Arc<dyn GuiContext>) -> (Self, Command<Message>) {
-        let ip_buf   = data.params.target_ip.lock().clone();
-        let port_buf = data.params.target_port.lock().to_string();
         (
             Self {
                 data, context,
-                ip_buf, port_buf,
                 ip_state:   Default::default(),
                 port_state: Default::default(),
                 btn_rate_manual:  Default::default(),
@@ -643,19 +638,17 @@ impl IcedEditor for EtherTapEditor {
     fn update(&mut self, _window: &mut WindowQueue, msg: Message) -> Command<Message> {
         match msg {
             Message::IpEdited(s) => {
-                // Only update the buffer when disconnected — editing while connected is ignored.
+                // Only update when disconnected — editing while connected is ignored.
                 if !self.data.conn_status.load(Ordering::Acquire) {
-                    self.ip_buf = s.clone();
                     *self.data.params.target_ip.lock() = s;
                 }
             }
             Message::PortEdited(s) => {
                 if !self.data.conn_status.load(Ordering::Acquire) {
                     if let Ok(port) = s.parse::<u16>() {
-                        self.port_buf = s;
                         *self.data.params.target_port.lock() = port;
                     }
-                    // invalid input: buffer unchanged, non-numeric chars rejected
+                    // invalid input: rejected; params unchanged, TextInput reverts on next frame
                 }
             }
             Message::SlotSelected(slot) => {
@@ -754,11 +747,9 @@ impl IcedEditor for EtherTapEditor {
                 }
             }
             Message::SelectTarget(ip, port) => {
-                self.ip_buf   = ip;
-                self.port_buf = port.to_string();
-                *self.data.params.target_ip.lock()   = self.ip_buf.clone();
+                *self.data.params.target_ip.lock()   = ip.clone();
                 *self.data.params.target_port.lock() = port;
-                let _ = self.data.cmd_tx.try_send(NetworkCommand::UpdateTarget { ip: self.ip_buf.clone(), port });
+                let _ = self.data.cmd_tx.try_send(NetworkCommand::UpdateTarget { ip, port });
                 self.show_scan_results = false;
             }
             Message::Connect => {
@@ -1039,12 +1030,15 @@ impl IcedEditor for EtherTapEditor {
 
         // ── Network config + scan + connect ──────────────────────────────
         let input_style = if connected { EtherInputLocked::Locked } else { EtherInputLocked::Editable };
+        // Single source of truth: read display values from params each frame.
+        let ip_val   = self.data.params.target_ip.lock().clone();
+        let port_val = self.data.params.target_port.lock().to_string();
         let ip_input: Element<'_, Message> =
-            TextInput::new(&mut self.ip_state, "IP address", &self.ip_buf, Message::IpEdited)
+            TextInput::new(&mut self.ip_state, "IP address", &ip_val, Message::IpEdited)
                 .size(11).font(MONO_FONT).padding(4).width(Length::FillPortion(3))
                 .style(input_style).into();
         let port_input: Element<'_, Message> =
-            TextInput::new(&mut self.port_state, "Port", &self.port_buf, Message::PortEdited)
+            TextInput::new(&mut self.port_state, "Port", &port_val, Message::PortEdited)
                 .size(11).font(MONO_FONT).padding(4).width(Length::FillPortion(2))
                 .style(input_style).into();
 
