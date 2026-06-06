@@ -127,6 +127,9 @@ pub struct EtherTap {
 
     // ── Continuous sync beat tracking ─────────────────────────────────────
     last_pos_beats: f64,
+    /// Integer beat index (pos_beats.floor() as i64) from the previous buffer.
+    /// Used for beat-crossing detection without floating-point epsilon hacks.
+    last_beat_idx: i64,
 
     // ── MIDI clock LED pulse counter ──────────────────────────────────────
     /// Counts outgoing 0xF8 pulses; resets at 24 so the LED blinks once/beat.
@@ -290,6 +293,7 @@ impl Default for EtherTap {
             hr_pending: false,
             hr_target_beat: 0.0,
             last_pos_beats: 0.0,
+            last_beat_idx: -1,
             midi_clock_pulse_count: 0,
             last_clock_bpm: 0.0,
             last_bpm_changed_at: None,
@@ -543,10 +547,8 @@ impl Plugin for EtherTap {
         }
 
         // ── 6. Continuous sync (fires on every beat crossing) ────────────
-        // Nudge pos_beats by a small epsilon before flooring so that a DAW
-        // reporting e.g. 3.9999998 instead of 4.0 still triggers the crossing.
-        const BEAT_EPS: f64 = 0.001;
-        if playing && (pos_beats + BEAT_EPS).floor() > self.last_pos_beats.floor() {
+        let beat_idx = pos_beats.floor() as i64;
+        if playing && beat_idx > self.last_beat_idx {
             let phase_mode = self.params.phase_sync_mode.value();
             let rate_mode = self.params.rate_sync_mode.value();
             if phase_mode == SyncMode::Continuous {
@@ -560,8 +562,10 @@ impl Plugin for EtherTap {
 
         if playing {
             self.last_pos_beats = pos_beats;
+            self.last_beat_idx = beat_idx;
         } else {
             self.last_pos_beats = -1.0; // reset so the first beat after play fires
+            self.last_beat_idx = -1;
             // Prime the counter so the first tick after resumption fires the LED
             // immediately, regardless of the PPQ setting.
             self.midi_clock_pulse_count = midi_ppq.saturating_sub(1);
