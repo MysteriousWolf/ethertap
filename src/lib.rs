@@ -767,9 +767,10 @@ impl Plugin for EtherTap {
                 if standalone_is_playing && buf_len > 0 {
                     let beats_this_buf =
                         buf_len as f64 / (transport.sample_rate as f64 * 60.0 / bpm);
-                    let prev_pos = f64::from_bits(
+                    let raw_pos = f64::from_bits(
                         self.standalone_pos_beats.load(Ordering::Relaxed),
                     );
+                    let prev_pos = if raw_pos.is_finite() { raw_pos } else { 0.0 };
                     self.standalone_pos_beats.store(
                         (prev_pos + beats_this_buf).to_bits(),
                         Ordering::Relaxed,
