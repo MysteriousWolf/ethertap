@@ -627,7 +627,7 @@ impl Plugin for EtherTap {
                         }
                         self.last_clock_bpm = bpm;
 
-                        let samples_per_beat = self.sample_rate as f64 * 60.0 / bpm;
+                        let samples_per_beat = transport.sample_rate as f64 * 60.0 / bpm;
                         let beats_per_sample = 1.0 / samples_per_beat;
                         let beat_end =
                             beat_start + buf_len as f64 * beats_per_sample;
@@ -662,7 +662,7 @@ impl Plugin for EtherTap {
                 let buf_len = buffer.samples();
                 if buf_len > 0 {
                     let ppq = midi_ppq as f64;
-                    let tick_interval_f = self.sample_rate as f64 * 60.0 / bpm / ppq;
+                    let tick_interval_f = transport.sample_rate as f64 * 60.0 / bpm / ppq;
                     if tick_interval_f.is_normal() {
                         // Reset accumulator on BPM change to avoid early/late first
                         // tick after tempo change (stale phase in the accumulator).
