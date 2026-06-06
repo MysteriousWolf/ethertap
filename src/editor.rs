@@ -649,10 +649,11 @@ impl IcedEditor for EtherTapEditor {
             }
             Message::PortEdited(s) => {
                 if !self.data.conn_status.load(Ordering::Acquire) {
-                    self.port_buf = s.clone();
                     if let Ok(port) = s.parse::<u16>() {
+                        self.port_buf = s;
                         *self.data.params.target_port.lock() = port;
                     }
+                    // invalid input: buffer unchanged, non-numeric chars rejected
                 }
             }
             Message::SlotSelected(slot) => {
@@ -680,8 +681,7 @@ impl IcedEditor for EtherTapEditor {
                 let _ = self.data.cmd_tx.try_send(NetworkCommand::AuditSlots);
             }
             Message::ToggleAutoSlots => {
-                let prev = self.data.all_slots_mode.load(Ordering::Acquire);
-                self.data.all_slots_mode.store(!prev, Ordering::Release);
+                self.data.all_slots_mode.fetch_xor(true, Ordering::Release);
             }
             Message::ToggleFxType(bit) => {
                 let mut filter = self.data.params.fx_type_filter.lock();
