@@ -385,8 +385,14 @@ impl Plugin for EtherTap {
                 NetworkStatus::DelayReadback(_) => {}
                 NetworkStatus::SlotScanDone => {
                     // Slot data already written to compatible_slots/occupied_slots/
-                    // slot_types by the worker.  Just fire the reconnect auto-sync.
-                    if self.reconnect_sync_pending && self.last_bpm > 0.0 {
+                    // slot_types by the worker.  Fire the reconnect auto-sync only
+                    // when BPM has settled — dispatching during a BPM transition
+                    // sends a stale pre-settle BPM.  The settle handler clears
+                    // reconnect_sync_pending when it takes over.
+                    if self.reconnect_sync_pending
+                        && self.last_bpm > 0.0
+                        && !self.bpm_is_settling
+                    {
                         self.reconnect_sync_pending = false;
                         self.dispatch(self.last_bpm, false);
                     }
@@ -477,6 +483,10 @@ impl Plugin for EtherTap {
                     // keep bpm_is_settling = true, wait another SETTLE_MS
                 } else {
                     self.bpm_is_settling = false;
+                    // Settle supersedes any deferred reconnect sync — the correct
+                    // settled BPM will be dispatched below (On Change mode) or the
+                    // reconnect sync should not fire at all (Manual mode).
+                    self.reconnect_sync_pending = false;
                     if playing {
                         let phase_mode = self.params.phase_sync_mode.value();
                         let rate_mode = self.params.rate_sync_mode.value();
@@ -643,7 +653,13 @@ impl Plugin for EtherTap {
                 if buf_len > 0 {
                     let ppq = midi_ppq as f64;
                     let tick_interval_f = self.sample_rate as f64 * 60.0 / bpm / ppq;
-                    if tick_interval_f > 0.0 {
+                    if tick_interval_f.is_normal() && tick_interval_f > 0.0 {
+                        // Reset accumulator on BPM change to avoid early/late first
+                        // tick after tempo change (stale phase in the accumulator).
+                        if (bpm - self.last_clock_bpm).abs() > 0.01 {
+                            self.standalone_tick_samples = 0.0;
+                        }
+                        self.last_clock_bpm = bpm;
                         self.standalone_tick_samples += buf_len as f64;
                         while self.standalone_tick_samples >= tick_interval_f {
                             let _ = self.midi_clock_tx
