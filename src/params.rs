@@ -117,12 +117,12 @@ pub struct EtherTapParams {
 
     // ── Read-only status (plugin → host) ─────────────────────────────────
     /// True while the plugin has an active UDP connection to the mixer.
-    /// Updated by the GUI thread; read by the host for automation read-back.
+    /// Updated by the audio thread via context.set_parameter(); read-only from GUI.
     #[id = "is_connected"]
     pub is_connected: BoolParam,
 
     /// True when host BPM and hardware delay float are within tolerance.
-    /// Updated by the GUI thread; read by the host for automation read-back.
+    /// Updated by the audio thread via context.set_parameter(); read-only from GUI.
     #[id = "is_matched"]
     pub is_matched: BoolParam,
 }

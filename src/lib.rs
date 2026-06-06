@@ -659,7 +659,7 @@ impl Plugin for EtherTap {
                 if buf_len > 0 {
                     let ppq = midi_ppq as f64;
                     let tick_interval_f = self.sample_rate as f64 * 60.0 / bpm / ppq;
-                    if tick_interval_f.is_normal() && tick_interval_f > 0.0 {
+                    if tick_interval_f.is_normal() {
                         // Reset accumulator on BPM change to avoid early/late first
                         // tick after tempo change (stale phase in the accumulator).
                         if (bpm - self.last_clock_bpm).abs() > 0.01 {

@@ -1,4 +1,4 @@
-use std::net::{SocketAddr, UdpSocket};
+use std::net::UdpSocket;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -51,10 +51,6 @@ pub struct MockMixer {
 pub struct ReceivedMsg {
     pub addr: String,
     pub args: Vec<OscType>,
-    #[allow(dead_code)]
-    pub from: SocketAddr,
-    #[allow(dead_code)]
-    pub timestamp: Instant,
 }
 
 impl ReceivedMsg {
@@ -78,10 +74,6 @@ impl ReceivedMsg {
         }
         None
     }
-    #[allow(dead_code)]
-    pub fn is_heartbeat(&self) -> bool { self.addr == "/info" }
-    #[allow(dead_code)]
-    pub fn addr_only(&self) -> &str { &self.addr }
 }
 
 impl MockMixer {
@@ -180,8 +172,6 @@ fn run_mock_mixer(
                     received_msgs.lock().push(ReceivedMsg {
                         addr: msg.addr.clone(),
                         args: msg.args.clone(),
-                        from: peer,
-                        timestamp: Instant::now(),
                     });
                     if let Some(response) = handle_request(&msg, &slots) {
                         let _ = sock.send_to(&response, peer);
