@@ -7,7 +7,7 @@
 #[cfg(target_os = "macos")]
 use std::sync::OnceLock;
 #[cfg(target_os = "macos")]
-use std::time::Instant;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use crossbeam_channel::{Receiver, Sender, bounded};
 #[cfg(not(target_os = "macos"))]
 use crossbeam_channel::tick;
@@ -97,15 +97,17 @@ fn spawn_macos(ed_tx: Sender<Vec<String>>, wk_tx: Sender<Vec<String>>) {
 
                     // Cooldown — CoreMIDI may fire multiple notifications for
                     // a single physical plug/unplug (USB hub topology).
-                    static LAST: OnceLock<std::sync::Mutex<Instant>> = OnceLock::new();
+                    static LAST_MS: OnceLock<AtomicU64> = OnceLock::new();
                     {
-                        let guard = LAST
-                            .get_or_init(|| std::sync::Mutex::new(Instant::now()));
-                        let Ok(mut last) = guard.lock() else { return; };
-                        if (last.elapsed().as_millis() as u64) < BROADCAST_COOLDOWN_MS {
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |d| d.as_millis() as u64);
+                        let last = LAST_MS.get_or_init(|| AtomicU64::new(0));
+                        let prev = last.load(AtomicOrdering::Relaxed);
+                        if now_ms.saturating_sub(prev) < BROADCAST_COOLDOWN_MS {
                             return;
                         }
-                        *last = Instant::now();
+                        last.store(now_ms, AtomicOrdering::Relaxed);
                     }
 
                     let devices = enumerate_devices();
