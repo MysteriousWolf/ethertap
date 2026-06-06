@@ -668,8 +668,9 @@ impl Plugin for EtherTap {
                         self.last_clock_bpm = bpm;
                         self.standalone_tick_samples += buf_len as f64;
                         while self.standalone_tick_samples >= tick_interval_f {
+                            let on_beat = self.midi_clock_pulse_count == 0;
                             let _ = self.midi_clock_tx
-                                .try_send(midi_clock::ClockMsg::Tick { on_beat: true });
+                                .try_send(midi_clock::ClockMsg::Tick { on_beat });
                             self.standalone_tick_samples -= tick_interval_f;
                             self.midi_clock_pulse_count += 1;
                             if self.midi_clock_pulse_count >= midi_ppq {
