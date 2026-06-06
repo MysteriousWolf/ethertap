@@ -463,10 +463,14 @@ impl Plugin for EtherTap {
         // If the host jumps position backward (loop point, user scrub), the
         // beat-crossing check and settle timer become stale.  Reset them so
         // the first beat after the jump fires correctly.
+        // Re-arm a pending Hard Reset at the next beat after the jump landing:
+        // a loop-back is exactly when we want phase sync, not when to cancel it.
         if playing && pos_beats < self.last_pos_beats - 0.5 {
-            self.last_pos_beats        = pos_beats - 1.0;
-            self.bpm_is_settling       = false;
-            self.hr_pending            = false;
+            self.last_pos_beats          = pos_beats - 1.0;
+            self.last_beat_idx           = pos_beats.floor() as i64 - 1;
+            self.bpm_is_settling         = false;
+            self.hr_pending              = true;
+            self.hr_target_beat          = pos_beats.ceil();
             self.on_change_retry_pending = false;
         }
 
