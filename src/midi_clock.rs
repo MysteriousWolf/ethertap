@@ -37,13 +37,13 @@
 /// matching MIDI input and forwards every non-clock byte through the virtual
 /// port, making it a transparent proxy.
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU32, Ordering},
     Arc,
 };
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
-use parking_lot::Mutex;
+
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -93,6 +93,41 @@ pub struct ClockStats {
     pub sample_n:    u32,  // samples currently in window (≤ 256)
 }
 
+/// Lock-free version of `ClockStats` for sharing between the RT-priority MIDI
+/// worker (writer) and the editor GUI thread (reader).  Replacing
+/// `Mutex<ClockStats>` eliminates the mutex acquisition on the RT thread.
+#[derive(Default)]
+pub struct AtomicClockStats {
+    pub interval_us: AtomicU32,
+    pub p50_us:      AtomicU32,
+    pub p95_us:      AtomicU32,
+    pub p99_us:      AtomicU32,
+    pub max_us:      AtomicU32,
+    pub sample_n:    AtomicU32,
+}
+
+impl AtomicClockStats {
+    pub fn store(&self, s: &ClockStats) {
+        self.interval_us.store(s.interval_us, Ordering::Relaxed);
+        self.p50_us     .store(s.p50_us,      Ordering::Relaxed);
+        self.p95_us     .store(s.p95_us,      Ordering::Relaxed);
+        self.p99_us     .store(s.p99_us,      Ordering::Relaxed);
+        self.max_us     .store(s.max_us,      Ordering::Relaxed);
+        self.sample_n   .store(s.sample_n,    Ordering::Relaxed);
+    }
+
+    pub fn load(&self) -> ClockStats {
+        ClockStats {
+            interval_us: self.interval_us.load(Ordering::Relaxed),
+            p50_us:      self.p50_us     .load(Ordering::Relaxed),
+            p95_us:      self.p95_us     .load(Ordering::Relaxed),
+            p99_us:      self.p99_us     .load(Ordering::Relaxed),
+            max_us:      self.max_us     .load(Ordering::Relaxed),
+            sample_n:    self.sample_n   .load(Ordering::Relaxed),
+        }
+    }
+}
+
 // ─── Clock message ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy)]
@@ -129,7 +164,7 @@ pub struct MidiClockWorker {
     bridge_connected:  Arc<AtomicBool>,
     bridge_connecting: Arc<AtomicBool>,
     /// Shared timing statistics — written by this worker, read by the editor.
-    pub clock_stats:   Arc<Mutex<ClockStats>>,
+    pub clock_stats:   Arc<AtomicClockStats>,
     /// Pulses per quarter note — used to gate stats updates at beat boundaries.
     pub midi_ppq:      u8,
 }
@@ -144,7 +179,7 @@ impl MidiClockWorker {
         initial_device:    Option<String>,
         bridge_connected:  Arc<AtomicBool>,
         bridge_connecting: Arc<AtomicBool>,
-        clock_stats:       Arc<Mutex<ClockStats>>,
+        clock_stats:       Arc<AtomicClockStats>,
         midi_ppq:          u8,
     ) -> Self {
         Self { enabled, clock_rx, device_change_rx, device_watch_rx,
@@ -371,7 +406,7 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
                         last_send  = None;
                         win_total  = 0;
                         win_idx    = 0;
-                        *worker.clock_stats.lock() = ClockStats::default();
+                        worker.clock_stats.store(&ClockStats::default());
                     }
 
                     // ── Transport stopped: gate pending ticks ─────────────────
@@ -424,7 +459,7 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
                             if win_total.is_multiple_of(ppq_usize) && win_total >= ppq_usize * 2 {
                                 let n = win_total.min(STAT_WINDOW);
                                 let stats = compute_stats(&win_us, n);
-                                *worker.clock_stats.lock() = stats;
+                                worker.clock_stats.store(&stats);
                             }
                         }
                         last_send = Some(Instant::now());

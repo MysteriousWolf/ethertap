@@ -74,7 +74,7 @@ pub struct EtherTap {
     /// True while the MIDI worker is attempting to reconnect to the selected physical output.
     midi_bridge_connecting: Arc<AtomicBool>,
     /// Timing statistics from the MIDI clock worker (updated once per beat).
-    midi_clock_stats: Arc<Mutex<midi_clock::ClockStats>>,
+    midi_clock_stats: Arc<midi_clock::AtomicClockStats>,
     /// Polled hardware delay float stored as u32 bits (f32::from_bits).
     hardware_float: Arc<AtomicU32>,
     /// Current host BPM stored as u32 bits (f32::from_bits).
@@ -202,7 +202,7 @@ impl Default for EtherTap {
             crossbeam_channel::bounded::<Option<String>>(16);
         let midi_bridge_connected  = Arc::new(AtomicBool::new(false));
         let midi_bridge_connecting = Arc::new(AtomicBool::new(false));
-        let midi_clock_stats       = Arc::new(Mutex::new(midi_clock::ClockStats::default()));
+        let midi_clock_stats       = Arc::new(midi_clock::AtomicClockStats::default());
 
         // Spawn the MIDI device watcher BEFORE any midir::MidiOutput is created
         // (macOS: CoreMIDI notification client must be first).

@@ -495,7 +495,7 @@ pub struct EditorData {
     /// True while the worker is attempting to reconnect to the selected MIDI output.
     pub midi_bridge_connecting: Arc<AtomicBool>,
     /// Rolling timing statistics from the MIDI clock worker.
-    pub midi_clock_stats: Arc<Mutex<crate::midi_clock::ClockStats>>,
+    pub midi_clock_stats: Arc<crate::midi_clock::AtomicClockStats>,
     /// Cumulative count of MIDI clock messages dropped on the audio thread.
     /// Written lock-free by process(); drained and logged here on each frame.
     pub midi_clock_drop_count: Arc<AtomicU32>,
@@ -1412,7 +1412,7 @@ impl IcedEditor for EtherTapEditor {
         //   avg value  = 5 chars + "ms"
         //   jitter val = 5 chars + "µs"
         let clock_stats_row: Element<'_, Message> = {
-            let stats   = *self.data.midi_clock_stats.lock();
+            let stats   = self.data.midi_clock_stats.load();
             let has_data = clock_on && stats.sample_n >= 48;
 
             // Colour for the p99 / max values.
