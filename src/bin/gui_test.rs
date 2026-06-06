@@ -12,6 +12,7 @@ fn main() {
     env_logger::init();
 
     if !nih_plug::nih_export_standalone::<ethertap::EtherTap>() {
+        eprintln!("[EtherTap] standalone init failed");
         std::process::exit(1);
     }
 }

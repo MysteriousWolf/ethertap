@@ -10,8 +10,6 @@ use crossbeam_channel::{Receiver, Sender};
 use ethertap::network::{NetworkCommand, NetworkStatus, NetworkWorker};
 use rosc::{encoder, decoder, OscMessage, OscPacket, OscType};
 
-#[allow(dead_code)]
-pub const WORKER_TIMEOUT: Duration = Duration::from_secs(10);
 pub const DLY: i32 = 10;
 pub const EMPTY: i32 = -1;
 
@@ -332,16 +330,6 @@ pub fn create_worker(
     (worker, cmd_tx, status_rx, test_shared)
 }
 
-#[allow(dead_code)]
-pub fn create_default_worker(
-) -> (NetworkWorker, Sender<NetworkCommand>, Receiver<NetworkStatus>, WorkerShared) {
-    let hardware_float = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-    let slot_types: [Option<i32>; 8] = [
-        Some(10), Some(1), Some(10), Some(3),
-        None, Some(10), None, Some(2),
-    ];
-    create_worker(1, slot_types, hardware_float)
-}
 
 pub fn spawn_worker(
     port: u16,
@@ -380,17 +368,6 @@ pub fn wait_for_status(
     None
 }
 
-#[allow(dead_code)]
-pub fn drain_status(status_rx: &Receiver<NetworkStatus>) -> Option<NetworkStatus> {
-    let mut last = None;
-    while let Ok(status) = status_rx.try_recv() {
-        match status {
-            NetworkStatus::ActivityPulse | NetworkStatus::RxPulse => continue,
-            other => last = Some(other),
-        }
-    }
-    last
-}
 
 pub fn drain_all_status(status_rx: &Receiver<NetworkStatus>) {
     while let Ok(_) = status_rx.try_recv() {}
