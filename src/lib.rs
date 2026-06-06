@@ -140,6 +140,12 @@ pub struct EtherTap {
     /// Integer beat index (pos_beats.floor() as i64) from the previous buffer.
     /// Used for beat-crossing detection without floating-point epsilon hacks.
     last_beat_idx: i64,
+    /// Bar number from the previous buffer; -1 when transport is stopped.
+    /// Used to detect bar crossings and loop repeats (PS1).
+    last_bar_number: i32,
+    /// Time signature from the previous buffer (numerator, denominator).
+    /// Cached to detect mid-song time-sig changes (PS3).
+    last_time_sig: (i32, i32),
 
     // ── MIDI clock LED pulse counter ──────────────────────────────────────
     /// Counts outgoing 0xF8 pulses; resets at 24 so the LED blinks once/beat.
@@ -304,6 +310,8 @@ impl Default for EtherTap {
             hr_target_beat: 0.0,
             last_pos_beats: 0.0,
             last_beat_idx: -1,
+            last_bar_number: -1,
+            last_time_sig: (4, 4),
             midi_clock_pulse_count: 0,
             last_clock_bpm: 0.0,
             last_bpm_changed_at: None,
@@ -427,6 +435,18 @@ impl Plugin for EtherTap {
         let pos_beats_raw = transport.pos_beats(); // None when host doesn't report position
         let pos_beats = pos_beats_raw.unwrap_or(0.0);
         let playing = transport.playing;
+
+        // Bar / time-sig metadata for PS1-PS3 phase sync improvements.
+        let bar_number    = transport.bar_number().unwrap_or(-1);
+        let ts_num        = transport.time_sig_numerator.unwrap_or(4);
+        let ts_den        = transport.time_sig_denominator.unwrap_or(4);
+        // Quarter-note length of one bar; e.g. 4/4 → 4.0 qn, 3/4 → 3.0 qn, 7/8 → 3.5 qn.
+        let bar_len_qn    = ts_num as f64 * 4.0 / ts_den as f64;
+        // Start of the next bar in quarter notes (used for PS2 HR quantisation).
+        let next_bar_beat = transport.bar_start_pos_beats().unwrap_or(pos_beats.floor())
+                            + bar_len_qn;
+        // Active loop range, if the host has one enabled (used for PS4).
+        let loop_range    = transport.loop_range_beats();
         // Capture prev_playing now — before any updates — so step 7 can detect
         // the stopped→playing edge correctly.  self.prev_playing is written at
         // the very end of process() so it always reflects the previous call.
@@ -470,18 +490,27 @@ impl Plugin for EtherTap {
         }
 
         // ── 3c. Backward seek / loop detection ───────────────────────────
-        // If the host jumps position backward (loop point, user scrub), the
-        // beat-crossing check and settle timer become stale.  Reset them so
-        // the first beat after the jump fires correctly.
-        // Re-arm a pending Hard Reset at the next beat after the jump landing:
-        // a loop-back is exactly when we want phase sync, not when to cancel it.
+        // If the host jumps position backward, the beat-crossing check and
+        // settle timer become stale.  Reset them and re-arm a Hard Reset:
+        // a loop-back is exactly when we want phase sync, not cancel it.
+        //
+        // PS4: distinguish loop repeats from scrubs using loop_range_beats().
+        // Loop repeat → land at loop start, snap HR to next bar for tighter
+        // musical alignment.  Scrub → snap HR to next beat only.
         if playing && pos_beats < self.last_pos_beats - 0.5 {
             self.last_pos_beats          = pos_beats - 1.0;
             self.last_beat_idx           = pos_beats.floor() as i64 - 1;
+            self.last_bar_number         = bar_number - 1;
             self.bpm_is_settling         = false;
-            self.hr_pending              = true;
-            self.hr_target_beat          = pos_beats.ceil();
             self.on_change_retry_pending = false;
+
+            let is_loop_repeat = loop_range
+                .map(|(start, end)| pos_beats >= start - 0.5 && pos_beats <= start + 0.5
+                                 && self.last_pos_beats + 1.0 >= end - 0.5)
+                .unwrap_or(false);
+
+            self.hr_pending     = true;
+            self.hr_target_beat = if is_loop_repeat { next_bar_beat } else { pos_beats.ceil() };
         }
 
         // ── 4. BPM settle detection ("On Change" modes) ──────────────────
@@ -512,9 +541,11 @@ impl Plugin for EtherTap {
                         let phase_mode = self.params.phase_sync_mode.value();
                         let rate_mode = self.params.rate_sync_mode.value();
                         if phase_mode == SyncMode::OnChange {
-                            // Quantise the Hard Reset to the next beat boundary.
-                            let next = pos_beats.ceil();
-                            self.hr_target_beat = if next > pos_beats { next } else { next + 1.0 };
+                            // PS2: Quantise the Hard Reset to the next bar boundary
+                            // (musically stronger than the next beat).  next_bar_beat
+                            // is always strictly after pos_beats because bar_start +
+                            // bar_len_qn > pos_beats (we're inside the current bar).
+                            self.hr_target_beat = next_bar_beat;
                             self.hr_pending = true;
                             // Arm retry (hard reset will be dispatched at hr_target_beat).
                             self.on_change_retry_pending    = true;
@@ -571,15 +602,44 @@ impl Plugin for EtherTap {
                 self.dispatch(bpm, false); // continuous rate sync only
             }
         }
+
+        // ── 6b. PS1: Bar-crossing detection ──────────────────────────────
+        // bar_number advances by 1 each bar; any other change means a jump
+        // (loop repeat, song-position rewind) that wasn't caught above because
+        // pos_beats didn't drop by more than 0.5 (e.g., loop from bar 5 → bar 1).
+        if playing && bar_number >= 0 && bar_number != self.last_bar_number
+            && bar_number != self.last_bar_number + 1
+        {
+            // Non-sequential bar jump — re-arm a bar-boundary Hard Reset.
+            if !self.hr_pending {
+                self.hr_pending     = true;
+                self.hr_target_beat = next_bar_beat;
+            }
+        }
+
+        // ── 6c. PS3: Time signature change detection ──────────────────────
+        // A time-sig change invalidates bar-length math everywhere.  Reset bar
+        // tracking so the next bar-crossing comparison starts fresh.
+        let cur_time_sig = (ts_num, ts_den);
+        if cur_time_sig != self.last_time_sig && self.last_time_sig != (4, 4) {
+            // Re-arm a bar-boundary Hard Reset so the mixer re-aligns.
+            if !self.hr_pending {
+                self.hr_pending     = true;
+                self.hr_target_beat = next_bar_beat;
+            }
+        }
         // Read PPQ once per buffer — drives LED blink cadence and tick generation.
         let midi_ppq = self.params.midi_clock_ppq.load(Ordering::Relaxed);
 
         if playing {
-            self.last_pos_beats = pos_beats;
-            self.last_beat_idx = beat_idx;
+            self.last_pos_beats  = pos_beats;
+            self.last_beat_idx   = beat_idx;
+            self.last_bar_number = bar_number;
+            self.last_time_sig   = cur_time_sig;
         } else {
-            self.last_pos_beats = -1.0; // reset so the first beat after play fires
-            self.last_beat_idx = -1;
+            self.last_pos_beats  = -1.0; // reset so the first beat after play fires
+            self.last_beat_idx   = -1;
+            self.last_bar_number = -1;
             // Prime the counter so the first tick after resumption fires the LED
             // immediately, regardless of the PPQ setting.
             self.midi_clock_pulse_count = midi_ppq.saturating_sub(1);
