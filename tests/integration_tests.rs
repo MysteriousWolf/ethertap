@@ -139,6 +139,15 @@ fn hard_reset_mutes_sets_unmutes() {
 
     let unmutes: Vec<_> = all_msgs.iter().filter(|m| m.is_mute().is_some_and(|(_, v)| !v)).collect();
     assert_eq!(unmutes.len(), 2, "Should receive 2 unmute commands, got {}", unmutes.len());
+    // Every muted slot must have a corresponding unmute — catches bugs where
+    // one slot unmutes twice and another stays muted.
+    for m in &mutes {
+        let (muted_slot, _) = m.is_mute().unwrap();
+        assert!(
+            unmutes.iter().any(|u| u.is_mute().unwrap().0 == muted_slot),
+            "No unmute received for slot {muted_slot}",
+        );
+    }
 
     assert_eq!(mixer.sync_count(1), 1, "Slot 1 should have 1 sync");
     assert_eq!(mixer.sync_count(3), 1, "Slot 3 should have 1 sync");
