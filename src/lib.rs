@@ -678,10 +678,18 @@ impl Plugin for EtherTap {
                     let ppq = midi_ppq as f64;
                     let tick_interval_f = transport.sample_rate as f64 * 60.0 / bpm / ppq;
                     if tick_interval_f.is_normal() {
-                        // Reset accumulator on BPM change to avoid early/late first
-                        // tick after tempo change (stale phase in the accumulator).
-                        if (bpm - self.last_clock_bpm).abs() > BPM_SETTLE_THRESHOLD {
-                            self.standalone_tick_samples = 0.0;
+                        // On BPM change, rescale the accumulator to preserve phase.
+                        // Resetting to 0 would cause the next tick to fire immediately
+                        // regardless of where in the beat we were.
+                        if (bpm - self.last_clock_bpm).abs() > BPM_SETTLE_THRESHOLD
+                            && self.last_clock_bpm > 0.0
+                        {
+                            let old_interval = transport.sample_rate as f64
+                                * 60.0 / self.last_clock_bpm / ppq;
+                            if old_interval.is_normal() {
+                                self.standalone_tick_samples =
+                                    self.standalone_tick_samples * tick_interval_f / old_interval;
+                            }
                         }
                         self.last_clock_bpm = bpm;
                         self.standalone_tick_samples += buf_len as f64;
