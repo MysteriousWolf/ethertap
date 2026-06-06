@@ -6,6 +6,7 @@
 /// it, and change the `static THEME` assignment — nothing else needs to move.
 ///
 /// Solar Icon Set Bold (PUA U+E900…) is used for all non-text glyphs.
+use std::collections::VecDeque;
 use std::sync::{
     atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering},
     Arc,
@@ -578,7 +579,7 @@ struct EtherTapEditor {
     #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     bpm_input_value: String,
     #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
-    tap_times:     Vec<std::time::Instant>,
+    tap_times:     VecDeque<std::time::Instant>,
     #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     btn_daw_rate_manual:  button::State,
     #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
@@ -683,7 +684,7 @@ impl IcedEditor for EtherTapEditor {
                 btn_tap:              Default::default(),
                 bpm_input:            Default::default(),
                 bpm_input_value,
-                tap_times:            Vec::new(),
+                tap_times:            VecDeque::new(),
                 btn_daw_rate_manual:  Default::default(),
                 btn_daw_rate_change:  Default::default(),
                 btn_daw_rate_cont:    Default::default(),
@@ -859,18 +860,18 @@ impl IcedEditor for EtherTapEditor {
             Message::TapTempo => {
                 let now = std::time::Instant::now();
                 const MAX_GAP: std::time::Duration = std::time::Duration::from_secs(2);
-                if let Some(&last) = self.tap_times.last() {
+                if let Some(&last) = self.tap_times.back() {
                     if now.duration_since(last) > MAX_GAP {
                         self.tap_times.clear();
                     }
                 }
-                self.tap_times.push(now);
+                self.tap_times.push_back(now);
                 if self.tap_times.len() > 8 {
-                    self.tap_times.remove(0);
+                    self.tap_times.pop_front();
                 }
                 if self.tap_times.len() >= 2 {
                     let first = self.tap_times[0];
-                    let last  = *self.tap_times.last().unwrap();
+                    let last  = *self.tap_times.back().unwrap();
                     let secs = last.duration_since(first).as_secs_f32()
                         / (self.tap_times.len() - 1) as f32;
                     if secs > 0.0 {
