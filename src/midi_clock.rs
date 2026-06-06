@@ -330,6 +330,7 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
     };
 
     let (pass_tx, pass_rx) = crossbeam_channel::bounded::<Vec<u8>>(256);
+    let pass_drop_count = Arc::new(AtomicU32::new(0));
 
     let mut current_device: Option<String> = worker.initial_device.clone();
     let mut phys_out: Option<MidiOutputConnection> = None;
@@ -347,7 +348,7 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
         log::info!("[EtherTap] run_unix: initial_device = {:?}", name);
         phys_out = try_connect_out(name);
         if phys_out.is_some() {
-            phys_in = try_connect_in(name, pass_tx.clone());
+            phys_in = try_connect_in(name, pass_tx.clone(), pass_drop_count.clone());
         }
     } else {
         log::info!("[EtherTap] run_unix: no initial_device (user must select)");
@@ -485,6 +486,10 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
 
             // ── Passthrough: forward non-clock bytes from physical input ───
             recv(pass_rx) -> msg => {
+                let drops = pass_drop_count.swap(0, Ordering::Relaxed);
+                if drops > 0 {
+                    log::warn!("[EtherTap] MIDI passthrough: {drops} byte(s) dropped (pass channel full)");
+                }
                 if let Ok(bytes) = msg {
                     if let Some(ref mut vc) = virt_conn {
                         let _ = vc.send(&bytes);
@@ -504,7 +509,7 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
                     worker.bridge_connecting.store(true, Ordering::Release);
                     phys_out = try_connect_out(name);
                     if phys_out.is_some() {
-                        phys_in = try_connect_in(name, pass_tx.clone());
+                        phys_in = try_connect_in(name, pass_tx.clone(), pass_drop_count.clone());
                         if phys_in.is_none() {
                             log::warn!("[EtherTap] MIDI passthrough unavailable: \
                                         no input port matching '{name}'");
@@ -530,6 +535,7 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
                         &mut phys_in,
                         &mut backoff,
                         &pass_tx,
+                        &pass_drop_count,
                         &worker,
                     );
                 }
@@ -557,6 +563,7 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
                     &mut phys_in,
                     &mut backoff,
                     &pass_tx,
+                    &pass_drop_count,
                     &worker,
                 );
             }
@@ -578,6 +585,7 @@ fn handle_port_scan(
     phys_in: &mut Option<midir::MidiInputConnection<()>>,
     backoff: &mut crate::reconnect::Backoff,
     pass_tx: &crossbeam_channel::Sender<Vec<u8>>,
+    pass_drop_count: &Arc<AtomicU32>,
     worker: &MidiClockWorker,
 ) {
     if backoff.is_cooling_down() {
@@ -599,7 +607,7 @@ fn handle_port_scan(
             *phys_out = try_connect_out(name);
             if phys_out.is_some() {
                 backoff.record_success();
-                *phys_in = try_connect_in(name, pass_tx.clone());
+                *phys_in = try_connect_in(name, pass_tx.clone(), pass_drop_count.clone());
                 if phys_in.is_none() {
                     log::warn!("[EtherTap] MIDI passthrough unavailable: \
                                 no input port matching '{name}'");
@@ -657,10 +665,12 @@ fn try_connect_out(device_name: &str) -> Option<midir::MidiOutputConnection> {
 
 /// Open a MIDI input on `device_name` and forward every non-clock byte to
 /// `pass_tx`.  0xF8 bytes are dropped — EtherTap is the clock master.
+/// `drop_count` is incremented when the pass channel is full (silent drop).
 #[cfg(not(target_os = "windows"))]
 fn try_connect_in(
     device_name: &str,
     pass_tx: Sender<Vec<u8>>,
+    drop_count: Arc<AtomicU32>,
 ) -> Option<midir::MidiInputConnection<()>> {
     use midir::MidiInput;
     let inp = match MidiInput::new("EtherTap-PhysIn") {
@@ -681,7 +691,9 @@ fn try_connect_in(
     };
     match inp.connect(&port, "EtherTap-PhysIn", move |_ts, msg, _| {
         if msg.first().copied() != Some(0xF8) {
-            let _ = pass_tx.try_send(msg.to_vec());
+            if pass_tx.try_send(msg.to_vec()).is_err() {
+                drop_count.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }, ()) {
         Ok(c) => {
