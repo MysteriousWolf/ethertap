@@ -1716,6 +1716,7 @@ impl IcedEditor for EtherTapEditor {
                         .size(11)
                         .font(MONO_FONT)
                         .padding([3, 5])
+                        .style(EtherInput)
                         .width(Length::Units(52)),
                     )
                     .push(Space::with_width(Length::Units(6)))

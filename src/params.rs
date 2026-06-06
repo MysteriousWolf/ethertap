@@ -133,7 +133,7 @@ impl Default for EtherTapParams {
             #[cfg(not(feature = "standalone"))]
             editor_state: IcedState::from_size(360, 280),
             #[cfg(feature = "standalone")]
-            editor_state: IcedState::from_size(500, 310),
+            editor_state: IcedState::from_size(500, 340),
             target_ip: Arc::new(Mutex::new(if cfg!(feature = "standalone") {
                 "127.0.0.1".to_owned()
             } else {
