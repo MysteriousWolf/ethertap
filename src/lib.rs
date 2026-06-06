@@ -791,17 +791,24 @@ impl EtherTap {
         let mut n = 0usize;
 
         if self.all_slots_mode.load(Ordering::Acquire) {
-            // Snapshot filter and types before locking compatible_slots so we
-            // never hold two mutexes simultaneously on the audio thread.
+            // Snapshot all mutex state into local arrays before releasing locks —
+            // no mutex is held during the iteration loop below.
             let fallback_slot = *self.params.fx_slot.lock();
             let filter = *self.params.fx_type_filter.lock();
             let types  = *self.slot_types.lock();
-            let cs = self.compatible_slots.lock();
-            if cs.is_empty() {
+            // Stack-copy compatible_slots without allocating (Vec::clone would).
+            let mut cs_buf = [0u8; 8];
+            let cs_len = {
+                let cs = self.compatible_slots.lock();
+                let len = cs.len().min(cs_buf.len());
+                cs_buf[..len].copy_from_slice(&cs[..len]);
+                len
+            };
+            if cs_len == 0 {
                 slots[0] = Some(fallback_slot);
                 n = 1;
             } else {
-                for &slot in cs.iter() {
+                for &slot in &cs_buf[..cs_len] {
                     if n >= slots.len() { break; }
                     let include = match types[(slot - 1) as usize] {
                         Some(type_id) => match fx_type_to_bit(type_id) {
