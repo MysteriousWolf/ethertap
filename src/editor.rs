@@ -678,7 +678,9 @@ impl IcedEditor for EtherTapEditor {
                 self.data.force_sync_trigger.store(true, Ordering::Release);
             }
             Message::QuerySlots => {
-                let _ = self.data.cmd_tx.try_send(NetworkCommand::AuditSlots);
+                if self.data.cmd_tx.try_send(NetworkCommand::AuditSlots).is_err() {
+                    log::warn!("[EtherTap] editor: AuditSlots dropped (worker channel full)");
+                }
             }
             Message::ToggleAutoSlots => {
                 self.data.all_slots_mode.fetch_xor(true, Ordering::Release);
@@ -720,7 +722,9 @@ impl IcedEditor for EtherTapEditor {
                     // Clear stale entries from a previous session so the panel
                     // starts fresh; the first scan result arrives within ~600 ms.
                     self.data.scan_targets.lock().clear();
-                    let _ = self.data.cmd_tx.try_send(NetworkCommand::ScanTargets);
+                    if self.data.cmd_tx.try_send(NetworkCommand::ScanTargets).is_err() {
+                        log::warn!("[EtherTap] editor: ScanTargets dropped (worker channel full)");
+                    }
                     self.last_scan_trigger_ms = now_ms();
                 }
             }
@@ -759,12 +763,17 @@ impl IcedEditor for EtherTapEditor {
             Message::Connect => {
                 let ip   = self.data.params.target_ip.lock().clone();
                 let port = *self.data.params.target_port.lock();
-                let _ = self.data.cmd_tx.try_send(NetworkCommand::UpdateTarget { ip, port });
-                let _ = self.data.cmd_tx.try_send(NetworkCommand::AuditSlots);
+                if self.data.cmd_tx.try_send(NetworkCommand::UpdateTarget { ip, port }).is_err()
+                    || self.data.cmd_tx.try_send(NetworkCommand::AuditSlots).is_err()
+                {
+                    log::warn!("[EtherTap] editor: Connect command(s) dropped (worker channel full)");
+                }
                 self.data.all_slots_mode.store(true, Ordering::Release);
             }
             Message::Disconnect => {
-                let _ = self.data.cmd_tx.try_send(NetworkCommand::Disconnect);
+                if self.data.cmd_tx.try_send(NetworkCommand::Disconnect).is_err() {
+                    log::warn!("[EtherTap] editor: Disconnect dropped (worker channel full)");
+                }
                 // Keep connected_device so the header shows the last known name.
             }
         }
