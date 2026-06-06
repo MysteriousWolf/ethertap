@@ -22,7 +22,7 @@
 /// Real-time safety contract: `process()` must never allocate, block, or lock
 /// a contended mutex.  All X32 I/O is delegated via bounded lock-free channels.
 use std::sync::{
-    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering},
     Arc,
 };
 
@@ -86,10 +86,12 @@ pub struct EtherTap {
     force_sync_trigger: Arc<AtomicBool>,
     /// Set by the Rate Sync "Force" button — fires an immediate rate-only sync.
     force_rate_trigger: Arc<AtomicBool>,
-    compatible_slots:  Arc<Mutex<Vec<u8>>>,
-    occupied_slots:    Arc<Mutex<Vec<u8>>>,
-    /// Raw effect type ID for each slot (index = slot-1, None = not yet queried).
-    slot_types:        Arc<Mutex<[Option<i32>; 8]>>,
+    /// Bitmask: bit n set ↔ slot (n+1) is BPM-compatible. Written by network worker.
+    compatible_slots:  Arc<AtomicU8>,
+    /// Bitmask: bit n set ↔ slot (n+1) is occupied. Written by network worker.
+    occupied_slots:    Arc<AtomicU8>,
+    /// Raw effect type ID for each slot (index = slot-1). i32::MIN = not yet queried.
+    slot_types:        Arc<[AtomicI32; 8]>,
     all_slots_mode:    Arc<AtomicBool>,
     scan_targets:      Arc<Mutex<Vec<network::DeviceInfo>>>,
     /// Millisecond timestamp of the last completed TargetsFound scan result.
@@ -185,9 +187,10 @@ impl Default for EtherTap {
         let tx_activity_ts = Arc::new(AtomicU64::new(0));
         let rx_activity_ts = Arc::new(AtomicU64::new(0));
         let midi_clock_activity_ts = Arc::new(AtomicU64::new(0));
-        let compatible_slots = Arc::new(Mutex::new(Vec::new()));
-        let occupied_slots   = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let slot_types       = Arc::new(Mutex::new([None::<i32>; 8]));
+        let compatible_slots = Arc::new(AtomicU8::new(0));
+        let occupied_slots   = Arc::new(AtomicU8::new(0));
+        let slot_types: Arc<[AtomicI32; 8]> =
+            Arc::new(std::array::from_fn(|_| AtomicI32::new(i32::MIN)));
         let all_slots_mode   = Arc::new(AtomicBool::new(true));
         let scan_targets      = Arc::new(Mutex::new(Vec::<network::DeviceInfo>::new()));
         let scan_completed_ts = Arc::new(AtomicU64::new(0));
@@ -794,31 +797,27 @@ impl EtherTap {
         let mut n = 0usize;
 
         if self.all_slots_mode.load(Ordering::Acquire) {
-            // Snapshot all mutex state into local arrays before releasing locks —
-            // no mutex is held during the iteration loop below.
-            let fallback_slot = *self.params.fx_slot.lock();
-            let filter = *self.params.fx_type_filter.lock();
-            let types  = *self.slot_types.lock();
-            // Stack-copy compatible_slots without allocating (Vec::clone would).
-            let mut cs_buf = [0u8; 8];
-            let cs_len = {
-                let cs = self.compatible_slots.lock();
-                let len = cs.len().min(cs_buf.len());
-                cs_buf[..len].copy_from_slice(&cs[..len]);
-                len
-            };
-            if cs_len == 0 {
+            // All four reads are lock-free atomic loads — no mutex on the audio thread.
+            let fallback_slot = self.params.fx_slot.load(Ordering::Relaxed);
+            let filter        = self.params.fx_type_filter.load(Ordering::Relaxed);
+            // Decode compatible_slots bitmask: bit n → slot (n+1).
+            let compat_mask   = self.compatible_slots.load(Ordering::Relaxed);
+            if compat_mask == 0 {
                 slots[0] = Some(fallback_slot);
                 n = 1;
             } else {
-                for &slot in &cs_buf[..cs_len] {
+                for bit in 0..8u8 {
                     if n >= slots.len() { break; }
-                    let include = match types[(slot - 1) as usize] {
-                        Some(type_id) => match fx_type_to_bit(type_id) {
-                            Some(bit) => (filter >> bit) & 1 == 1,
-                            None      => true, // unknown type: include
-                        },
-                        None => true, // type not yet audited: include
+                    if compat_mask & (1 << bit) == 0 { continue; }
+                    let slot = bit + 1;
+                    let raw_type = self.slot_types[bit as usize].load(Ordering::Relaxed);
+                    let include = if raw_type == i32::MIN {
+                        true // not yet audited: include
+                    } else {
+                        match fx_type_to_bit(raw_type) {
+                            Some(b) => (filter >> b) & 1 == 1,
+                            None    => true, // unknown type: include
+                        }
                     };
                     if include {
                         slots[n] = Some(slot);
@@ -827,7 +826,7 @@ impl EtherTap {
                 }
             }
         } else {
-            slots[0] = Some(*self.params.fx_slot.lock());
+            slots[0] = Some(self.params.fx_slot.load(Ordering::Relaxed));
             n = 1;
         }
 
@@ -991,12 +990,12 @@ mod tests {
         let json = serde_json::to_string(&*params.target_port.lock()).unwrap();
         assert_eq!(serde_json::from_str::<u16>(&json).unwrap(), 10024);
 
-        *params.fx_slot.lock() = 4u8;
-        let json = serde_json::to_string(&*params.fx_slot.lock()).unwrap();
+        params.fx_slot.store(4u8, Ordering::Relaxed);
+        let json = serde_json::to_string(&params.fx_slot.load(Ordering::Relaxed)).unwrap();
         assert_eq!(serde_json::from_str::<u8>(&json).unwrap(), 4);
 
-        *params.fx_type_filter.lock() = 0b000_0011u32;
-        let json = serde_json::to_string(&*params.fx_type_filter.lock()).unwrap();
+        params.fx_type_filter.store(0b000_0011u32, Ordering::Relaxed);
+        let json = serde_json::to_string(&params.fx_type_filter.load(Ordering::Relaxed)).unwrap();
         assert_eq!(serde_json::from_str::<u32>(&json).unwrap(), 0b000_0011u32);
 
         params.midi_clock_enabled.store(false, Ordering::Relaxed);

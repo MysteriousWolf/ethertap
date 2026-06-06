@@ -1,5 +1,5 @@
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -279,13 +279,36 @@ pub fn all_empty_slots() -> [SlotState; 8] {
 /// Returned by `create_worker` so tests can inspect slot/scan data after
 /// receiving the `SlotScanDone` sentinel.
 pub struct WorkerShared {
-    pub compatible_slots: std::sync::Arc<Mutex<Vec<u8>>>,
-    pub occupied_slots:   std::sync::Arc<Mutex<Vec<u8>>>,
-    pub slot_types:       std::sync::Arc<Mutex<[Option<i32>; 8]>>,
+    /// Bitmask: bit n set ↔ slot (n+1) compatible. Written by network worker after audit.
+    pub compatible_slots: Arc<AtomicU8>,
+    /// Bitmask: bit n set ↔ slot (n+1) occupied. Written by network worker after audit.
+    pub occupied_slots:   Arc<AtomicU8>,
+    /// Per-slot type IDs (index = slot-1). i32::MIN = not yet queried.
+    pub slot_types:       Arc<[AtomicI32; 8]>,
     #[allow(dead_code)]
     pub scan_targets:     std::sync::Arc<Mutex<Vec<ethertap::network::DeviceInfo>>>,
     #[allow(dead_code)]
     pub connected_device: std::sync::Arc<Mutex<(String, String)>>,
+}
+
+impl WorkerShared {
+    /// Decode the compatible_slots bitmask into a sorted Vec<u8>.
+    pub fn compatible_vec(&self) -> Vec<u8> {
+        let mask = self.compatible_slots.load(Ordering::Relaxed);
+        (0..8u8).filter(|&b| mask & (1 << b) != 0).map(|b| b + 1).collect()
+    }
+    /// Decode the occupied_slots bitmask into a sorted Vec<u8>.
+    pub fn occupied_vec(&self) -> Vec<u8> {
+        let mask = self.occupied_slots.load(Ordering::Relaxed);
+        (0..8u8).filter(|&b| mask & (1 << b) != 0).map(|b| b + 1).collect()
+    }
+    /// Snapshot slot_types as [Option<i32>; 8] (i32::MIN → None).
+    pub fn slot_types_snapshot(&self) -> [Option<i32>; 8] {
+        std::array::from_fn(|i| {
+            let raw = self.slot_types[i].load(Ordering::Relaxed);
+            if raw == i32::MIN { None } else { Some(raw) }
+        })
+    }
 }
 
 pub fn create_worker(
@@ -296,9 +319,11 @@ pub fn create_worker(
     let (cmd_tx, cmd_rx) = crossbeam_channel::bounded::<NetworkCommand>(64);
     let (status_tx, status_rx) = crossbeam_channel::bounded::<NetworkStatus>(64);
 
-    let compatible_slots  = std::sync::Arc::new(Mutex::new(Vec::<u8>::new()));
-    let occupied_slots    = std::sync::Arc::new(Mutex::new(Vec::<u8>::new()));
-    let slot_types_shared = std::sync::Arc::new(Mutex::new(slot_types_init));
+    let compatible_slots: Arc<AtomicU8> = Arc::new(AtomicU8::new(0));
+    let occupied_slots: Arc<AtomicU8>   = Arc::new(AtomicU8::new(0));
+    // Encode slot_types_init into atomic array (i32::MIN = None).
+    let slot_types_shared: Arc<[AtomicI32; 8]> =
+        Arc::new(std::array::from_fn(|i| AtomicI32::new(slot_types_init[i].unwrap_or(i32::MIN))));
     let scan_targets      = std::sync::Arc::new(Mutex::new(Vec::new()));
     let connected_device  = std::sync::Arc::new(Mutex::new((String::new(), String::new())));
 
@@ -315,7 +340,7 @@ pub fn create_worker(
         status_tx,
         std::sync::Arc::new(Mutex::new(String::new())),
         std::sync::Arc::new(Mutex::new(0u16)),
-        std::sync::Arc::new(Mutex::new(fx_slot)),
+        std::sync::Arc::new(AtomicU8::new(fx_slot)),
         ethertap::network::WorkerShared {
             hardware_float_out,
             compatible_slots,

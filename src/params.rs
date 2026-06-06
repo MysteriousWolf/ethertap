@@ -1,5 +1,5 @@
 use std::sync::{
-    atomic::{AtomicBool, AtomicU8},
+    atomic::{AtomicBool, AtomicU8, AtomicU32},
     Arc,
 };
 
@@ -54,14 +54,14 @@ pub struct EtherTapParams {
     pub target_port: Arc<Mutex<u16>>,
 
     #[persist = "fx-slot"]
-    pub fx_slot: Arc<Mutex<u8>>,
+    pub fx_slot: Arc<AtomicU8>,
 
     /// Bitmask controlling which delay effect types are included when Auto mode
     /// broadcasts to all compatible slots.
     /// Bit→type: 0=DLY, 1=3TAP, 2=4TAP, 3=D/RV, 4=D/CR, 5=D/FL, 6=MODD.
     /// Default 0x7F = all enabled.
     #[persist = "fx-type-filter"]
-    pub fx_type_filter: Arc<Mutex<u32>>,
+    pub fx_type_filter: Arc<AtomicU32>,
 
     /// When true (default), the plugin emits MIDI clock on its MIDI output
     /// while the host transport is playing.
@@ -137,8 +137,8 @@ impl Default for EtherTapParams {
                 "192.168.1.100".to_owned()
             })),
             target_port: Arc::new(Mutex::new(10023)),
-            fx_slot: Arc::new(Mutex::new(1)),
-            fx_type_filter: Arc::new(Mutex::new(0x7F_u32)),
+            fx_slot: Arc::new(AtomicU8::new(1)),
+            fx_type_filter: Arc::new(AtomicU32::new(0x7F)),
             midi_clock_enabled: Arc::new(AtomicBool::new(true)),
             midi_clock_ppq: Arc::new(AtomicU8::new(24_u8)),
             midi_out_device: Arc::new(Mutex::new(None)),

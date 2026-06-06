@@ -196,9 +196,9 @@ fn audit_slots_discovers_compatible_slots() {
     );
     assert!(done.is_some(), "Expected SlotScanDone sentinel");
 
-    let compatible = shared.compatible_slots.lock().clone();
-    let occupied   = shared.occupied_slots.lock().clone();
-    let slot_types = *shared.slot_types.lock();
+    let compatible = shared.compatible_vec();
+    let occupied   = shared.occupied_vec();
+    let slot_types = shared.slot_types_snapshot();
 
     assert_eq!(compatible, vec![1u8, 3],
         "Should find DLY slots 1 and 3 (bus slots) as compatible, got {:?}", compatible);
@@ -228,12 +228,14 @@ fn telemetry_poll_updates_hardware_float() {
         status_tx,
         Arc::new(parking_lot::Mutex::new(String::new())),
         Arc::new(parking_lot::Mutex::new(0u16)),
-        Arc::new(parking_lot::Mutex::new(1u8)),
+        Arc::new(std::sync::atomic::AtomicU8::new(1u8)),
         ethertap::network::WorkerShared {
             hardware_float_out: hardware_float.clone(),
-            compatible_slots:   Arc::new(parking_lot::Mutex::new(Vec::new())),
-            occupied_slots:     Arc::new(parking_lot::Mutex::new(Vec::new())),
-            slot_types:         Arc::new(parking_lot::Mutex::new(slot_types)),
+            compatible_slots:   Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            occupied_slots:     Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            slot_types:         Arc::new(std::array::from_fn(|i| {
+                std::sync::atomic::AtomicI32::new(slot_types[i].unwrap_or(i32::MIN))
+            })),
             scan_targets:       Arc::new(parking_lot::Mutex::new(Vec::new())),
             connected_device:   Arc::new(parking_lot::Mutex::new((String::new(), String::new()))),
             scan_generation:    Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -305,9 +307,9 @@ fn audit_slots_empty_mixer() {
     );
     assert!(done.is_some(), "Expected SlotScanDone sentinel");
 
-    let compatible = shared.compatible_slots.lock().clone();
-    let occupied   = shared.occupied_slots.lock().clone();
-    let slot_types = *shared.slot_types.lock();
+    let compatible = shared.compatible_vec();
+    let occupied   = shared.occupied_vec();
+    let slot_types = shared.slot_types_snapshot();
 
     assert!(compatible.is_empty(), "No compatible slots expected, got {:?}", compatible);
     assert!(occupied.is_empty(), "No occupied slots expected, got {:?}", occupied);

@@ -7,7 +7,7 @@
 ///
 /// Solar Icon Set Bold (PUA U+E900…) is used for all non-text glyphs.
 use std::sync::{
-    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering},
     Arc,
 };
 
@@ -472,10 +472,12 @@ pub struct EditorData {
     pub host_bpm:           Arc<AtomicU32>,
     pub force_sync_trigger: Arc<AtomicBool>,
     pub force_rate_trigger: Arc<AtomicBool>,
-    pub compatible_slots:   Arc<Mutex<Vec<u8>>>,
-    pub occupied_slots:     Arc<Mutex<Vec<u8>>>,
-    /// Raw effect type ID for each slot (index = slot-1). Updated after AuditSlots.
-    pub slot_types:         Arc<Mutex<[Option<i32>; 8]>>,
+    /// Bitmask: bit n set ↔ slot (n+1) compatible. Written by network worker.
+    pub compatible_slots:   Arc<AtomicU8>,
+    /// Bitmask: bit n set ↔ slot (n+1) occupied. Written by network worker.
+    pub occupied_slots:     Arc<AtomicU8>,
+    /// Raw effect type ID per slot (index = slot-1). i32::MIN = not yet queried.
+    pub slot_types:         Arc<[AtomicI32; 8]>,
     pub all_slots_mode:     Arc<AtomicBool>,
     pub scan_targets:       Arc<Mutex<Vec<DeviceInfo>>>,
     /// Millisecond timestamp of the last completed scan (0 = never scanned).
@@ -657,7 +659,7 @@ impl IcedEditor for EtherTapEditor {
                 }
             }
             Message::SlotSelected(slot) => {
-                *self.data.params.fx_slot.lock() = slot;
+                self.data.params.fx_slot.store(slot, Ordering::Relaxed);
             }
             Message::SetRateSyncMode(mode) => {
                 let setter = ParamSetter::new(self.context.as_ref());
@@ -686,8 +688,7 @@ impl IcedEditor for EtherTapEditor {
                 self.data.all_slots_mode.fetch_xor(true, Ordering::Release);
             }
             Message::ToggleFxType(bit) => {
-                let mut filter = self.data.params.fx_type_filter.lock();
-                *filter ^= 1_u32 << bit;
+                self.data.params.fx_type_filter.fetch_xor(1_u32 << bit, Ordering::Relaxed);
             }
             Message::ToggleMidiClock => {
                 self.data.params.midi_clock_enabled.fetch_xor(true, Ordering::Relaxed);
@@ -798,12 +799,16 @@ impl IcedEditor for EtherTapEditor {
 
         let rate_mode  = self.data.params.rate_sync_mode.value();
         let phase_mode = self.data.params.phase_sync_mode.value();
-        let cur_slot   = *self.data.params.fx_slot.lock();
-        let compatible = self.data.compatible_slots.lock().clone();
-        let occupied   = self.data.occupied_slots.lock().clone();
-        let slot_types = *self.data.slot_types.lock();
+        let cur_slot    = self.data.params.fx_slot.load(Ordering::Relaxed);
+        let compat_mask = self.data.compatible_slots.load(Ordering::Acquire);
+        let occup_mask  = self.data.occupied_slots.load(Ordering::Acquire);
+        // Snapshot slot_types from atomics (i32::MIN = not yet queried → None).
+        let slot_types: [Option<i32>; 8] = std::array::from_fn(|i| {
+            let raw = self.data.slot_types[i].load(Ordering::Relaxed);
+            if raw == i32::MIN { None } else { Some(raw) }
+        });
         let all_mode   = self.data.all_slots_mode.load(Ordering::Acquire);
-        let post_audit = !compatible.is_empty() || !occupied.is_empty();
+        let post_audit = compat_mask != 0 || occup_mask != 0;
 
         // ── Scan popup modal ──────────────────────────────────────────────
         //
@@ -1089,9 +1094,9 @@ impl IcedEditor for EtherTapEditor {
         let slot_cols = self.slot_states.iter_mut().zip(1u8..=8u8).fold(
             Row::new().spacing(2).width(Length::Fill).align_items(Alignment::Center),
             |row, (state, slot)| {
-                let is_compat  = !post_audit || compatible.contains(&slot);
+                let is_compat  = !post_audit || compat_mask & (1 << (slot - 1)) != 0;
                 let is_sel     = !all_mode && slot == cur_slot && is_compat;
-                let is_all_sel = all_mode && compatible.contains(&slot);
+                let is_all_sel = all_mode && compat_mask & (1 << (slot - 1)) != 0;
 
                 let kind = if !is_compat {
                     BtnKind::Disabled
@@ -1123,9 +1128,9 @@ impl IcedEditor for EtherTapEditor {
                 } else {
                     let type_id = slot_types[(slot - 1) as usize];
                     let name = type_id.map_or("···", |t| crate::osc::fx_type_short(t, slot));
-                    let color = if compatible.contains(&slot) {
+                    let color = if compat_mask & (1 << (slot - 1)) != 0 {
                         THEME.ok
-                    } else if occupied.contains(&slot) {
+                    } else if occup_mask & (1 << (slot - 1)) != 0 {
                         THEME.warn
                     } else {
                         THEME.text_dim
@@ -1202,7 +1207,7 @@ impl IcedEditor for EtherTapEditor {
         //
         // The Auto button uses BtnKind::Force (orange) when enabled to match
         // the lightning icon style in the sync frame.
-        let filter = *self.data.params.fx_type_filter.lock();
+        let filter = self.data.params.fx_type_filter.load(Ordering::Relaxed);
         const TYPE_BITS: &[(&str, u8, &str)] = &[
             ("Delay", 0, "Stereo Delay"),
             ("3 Tap", 1, "3-Tap Delay — three echoes, delay time at par/01"),

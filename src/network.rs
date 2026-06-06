@@ -13,7 +13,7 @@
 /// Exits automatically when the audio-thread's `Sender` is dropped.
 use std::{
     net::{SocketAddr, UdpSocket},
-    sync::atomic::{AtomicU32, AtomicU64, Ordering},
+    sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -128,12 +128,12 @@ pub enum NetworkStatus {
 pub struct WorkerShared {
     /// Last polled hardware delay-time float (f32 bits via `f32::from/to_bits`).
     pub hardware_float_out: Arc<AtomicU32>,
-    /// BPM-compatible FX slots — written after `AuditSlots`, read by audio thread.
-    pub compatible_slots: Arc<Mutex<Vec<u8>>>,
-    /// All occupied FX slots — written after `AuditSlots`, read by editor.
-    pub occupied_slots: Arc<Mutex<Vec<u8>>>,
-    /// Raw effect type ID for each slot (index = slot-1, `None` = not yet queried).
-    pub slot_types: Arc<Mutex<[Option<i32>; 8]>>,
+    /// Bitmask: bit n set ↔ slot (n+1) is BPM-compatible. Written after AuditSlots.
+    pub compatible_slots: Arc<AtomicU8>,
+    /// Bitmask: bit n set ↔ slot (n+1) is occupied. Written after AuditSlots.
+    pub occupied_slots: Arc<AtomicU8>,
+    /// Raw effect type ID per slot (index = slot-1). i32::MIN = not yet queried.
+    pub slot_types: Arc<[AtomicI32; 8]>,
     /// Discovered network scan targets — written here, read by editor.
     pub scan_targets: Arc<Mutex<Vec<DeviceInfo>>>,
     /// Name and model of the connected device from `/info` responses.
@@ -157,11 +157,11 @@ pub struct NetworkWorker {
     target_ip: Arc<Mutex<String>>,
     target_port: Arc<Mutex<u16>>,
     /// Shared reference to the active FX slot, updated when the user changes it.
-    fx_slot: Arc<Mutex<u8>>,
+    fx_slot: Arc<AtomicU8>,
     hardware_float_out: Arc<AtomicU32>,
-    compatible_slots: Arc<Mutex<Vec<u8>>>,
-    occupied_slots: Arc<Mutex<Vec<u8>>>,
-    slot_types: Arc<Mutex<[Option<i32>; 8]>>,
+    compatible_slots: Arc<AtomicU8>,
+    occupied_slots: Arc<AtomicU8>,
+    slot_types: Arc<[AtomicI32; 8]>,
     scan_targets: Arc<Mutex<Vec<DeviceInfo>>>,
     connected_device: Arc<Mutex<(String, String)>>,
     scan_generation: Arc<AtomicU64>,
@@ -172,13 +172,18 @@ pub struct NetworkWorker {
     backoff: Backoff,
 }
 
+/// Encode a slot list (values 1..=8) as a u8 bitmask: bit n = slot (n+1) present.
+fn slots_to_bitmask(slots: &[u8]) -> u8 {
+    slots.iter().fold(0u8, |acc, &s| acc | (1u8 << s.saturating_sub(1)))
+}
+
 impl NetworkWorker {
     pub fn new(
         cmd_rx: Receiver<NetworkCommand>,
         status_tx: Sender<NetworkStatus>,
         target_ip: Arc<Mutex<String>>,
         target_port: Arc<Mutex<u16>>,
-        fx_slot: Arc<Mutex<u8>>,
+        fx_slot: Arc<AtomicU8>,
         shared: WorkerShared,
     ) -> Self {
         let now = Instant::now();
@@ -348,7 +353,7 @@ impl NetworkWorker {
     fn poll_delay(&mut self) {
         let Some(target) = self.target else { return };
 
-        let slot    = *self.fx_slot.lock();
+        let slot    = self.fx_slot.load(Ordering::Relaxed);
         let type_id = self.slot_type_for(slot);
         let query   = osc::query_fx_delay(slot, type_id);
 
@@ -516,10 +521,13 @@ impl NetworkWorker {
         }
         log::info!("  Compatible: {:?}  Occupied: {:?}", compatible, occupied);
 
-        // Write directly — no allocation on the audio thread.
-        *self.compatible_slots.lock() = compatible;
-        *self.occupied_slots.lock()   = occupied;
-        *self.slot_types.lock()       = slot_types;
+        // Write atomically — no allocation or lock on the audio thread.
+        // slot_types stores each element individually; i32::MIN = not yet queried.
+        for (i, t) in slot_types.iter().enumerate() {
+            self.slot_types[i].store(t.unwrap_or(i32::MIN), Ordering::Relaxed);
+        }
+        self.compatible_slots.store(slots_to_bitmask(&compatible), Ordering::Release);
+        self.occupied_slots.store(slots_to_bitmask(&occupied), Ordering::Release);
         let _ = self.status_tx.try_send(NetworkStatus::SlotScanDone);
     }
 
@@ -746,14 +754,16 @@ impl NetworkWorker {
     /// Returns 10 (DLY) as a safe default when the type is not yet known.
     fn slot_type_for(&self, slot: u8) -> i32 {
         let idx = slot.saturating_sub(1) as usize;
-        let t = self.slot_types.lock().get(idx).and_then(|t| *t);
-        if t.is_none() {
+        let raw = if idx < 8 { self.slot_types[idx].load(Ordering::Relaxed) } else { i32::MIN };
+        if raw == i32::MIN {
             log::warn!(
                 "[EtherTap] slot_type_for: slot {slot} type unknown (audit pending), \
                  defaulting to DLY — wrong par address if slot holds a different effect"
             );
+            10
+        } else {
+            raw
         }
-        t.unwrap_or(10)
     }
 }
 
