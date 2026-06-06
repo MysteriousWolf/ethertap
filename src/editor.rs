@@ -193,6 +193,8 @@ const PULSE_MS: u64 = 100;
 const BORDER_RADIUS: f32 = 4.0;
 const SPACING_BTN_BASELINE: u16 = 10;
 const SPACING_FX_ROW_GAP: u16 = 14;
+const SCAN_MODAL_W: u16 = 290;
+const MIDI_MODAL_W: u16 = 240;
 
 // ─── Button stylesheet ───────────────────────────────────────────────────────
 
@@ -870,6 +872,7 @@ impl IcedEditor for EtherTapEditor {
                     self.tap_times.pop_front();
                 }
                 if self.tap_times.len() >= 2 {
+                    debug_assert!(self.tap_times.len() >= 2);
                     let first = self.tap_times[0];
                     let last  = *self.tap_times.back().unwrap();
                     let secs = last.duration_since(first).as_secs_f32()
@@ -1007,7 +1010,7 @@ impl IcedEditor for EtherTapEditor {
             let card = Container::new(card_col)
                 .padding(12)
                 .style(ModalCard)
-                .width(Length::Units(290));
+                .width(Length::Units(SCAN_MODAL_W));
 
             return Container::new(card)
                 .width(Length::Fill)
@@ -1072,7 +1075,7 @@ impl IcedEditor for EtherTapEditor {
             let card = Container::new(picker_col)
                 .padding(12)
                 .style(ModalCard)
-                .width(Length::Units(240));
+                .width(Length::Units(MIDI_MODAL_W));
 
             return Container::new(card)
                 .width(Length::Fill)
