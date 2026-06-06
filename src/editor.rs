@@ -187,6 +187,12 @@ static THEME: Theme = Theme::dark();
 
 const PULSE_MS: u64 = 100;
 
+// ─── Layout constants ─────────────────────────────────────────────────────────
+
+const BORDER_RADIUS: f32 = 4.0;
+const SPACING_BTN_BASELINE: u16 = 10;
+const SPACING_FX_ROW_GAP: u16 = 14;
+
 // ─── Button stylesheet ───────────────────────────────────────────────────────
 
 #[derive(Clone, Copy)]
@@ -200,7 +206,7 @@ impl button::StyleSheet for EtherBtn {
             // Idle / raised surface — light top-edge bevel, filled with surface bg.
             BtnKind::Idle => button::Style {
                 background: Some(Background::Color(THEME.surface)),
-                border_radius: 4.0, border_width: 1.0,
+                border_radius: BORDER_RADIUS, border_width: 1.0,
                 border_color: THEME.bevel_hi,
                 text_color: THEME.muted,
                 ..Default::default()
@@ -208,7 +214,7 @@ impl button::StyleSheet for EtherBtn {
             // Active / selected — blue fill, no border (flat highlight).
             BtnKind::Active => button::Style {
                 background: Some(Background::Color(THEME.selected_bg)),
-                border_radius: 4.0, border_width: 0.0,
+                border_radius: BORDER_RADIUS, border_width: 0.0,
                 border_color: THEME.selected_border,
                 text_color: THEME.selected_text,
                 ..Default::default()
@@ -216,7 +222,7 @@ impl button::StyleSheet for EtherBtn {
             // Force / momentary action — amber fill, no border.
             BtnKind::Force => button::Style {
                 background: Some(Background::Color(THEME.danger_bg)),
-                border_radius: 4.0, border_width: 0.0,
+                border_radius: BORDER_RADIUS, border_width: 0.0,
                 border_color: THEME.danger_border,
                 text_color: THEME.accent,
                 ..Default::default()
@@ -224,7 +230,7 @@ impl button::StyleSheet for EtherBtn {
             // Disabled / recessed — dark fill, dark bottom-edge bevel.
             BtnKind::Disabled => button::Style {
                 background: Some(Background::Color(THEME.inset_bg)),
-                border_radius: 4.0, border_width: 1.0,
+                border_radius: BORDER_RADIUS, border_width: 1.0,
                 border_color: THEME.bevel_lo,
                 text_color: THEME.surface_border,
                 ..Default::default()
@@ -232,7 +238,7 @@ impl button::StyleSheet for EtherBtn {
             // Enabled / connected — green fill, no border.
             BtnKind::Enabled => button::Style {
                 background: Some(Background::Color(THEME.enabled_bg)),
-                border_radius: 4.0, border_width: 0.0,
+                border_radius: BORDER_RADIUS, border_width: 0.0,
                 border_color: THEME.ok,
                 text_color: THEME.ok,
                 ..Default::default()
@@ -240,7 +246,7 @@ impl button::StyleSheet for EtherBtn {
             // Error / disconnected — red fill, no border.
             BtnKind::Error => button::Style {
                 background: Some(Background::Color(THEME.error_bg)),
-                border_radius: 4.0, border_width: 0.0,
+                border_radius: BORDER_RADIUS, border_width: 0.0,
                 border_color: THEME.err,
                 text_color: THEME.err,
                 ..Default::default()
@@ -265,7 +271,7 @@ impl text_input::StyleSheet for EtherInput {
     fn active(&self) -> text_input::Style {
         text_input::Style {
             background: Background::Color(THEME.inset_bg),
-            border_radius: 4.0,
+            border_radius: BORDER_RADIUS,
             border_width: 1.0,
             border_color: THEME.inset_border,
         }
@@ -300,7 +306,7 @@ impl text_input::StyleSheet for EtherInputLocked {
             Self::Editable => EtherInput.active(),
             Self::Locked => text_input::Style {
                 background: Background::Color(THEME.inset_bg),
-                border_radius: 4.0,
+                border_radius: BORDER_RADIUS,
                 border_width: 1.0,
                 border_color: THEME.section_border,
             },
@@ -350,7 +356,7 @@ impl pick_list::StyleSheet for PpqPickStyle {
             text_color:        THEME.text,
             placeholder_color: THEME.muted,
             background:        Background::Color(THEME.surface),
-            border_radius:     4.0,
+            border_radius:     BORDER_RADIUS,
             border_width:      1.0,
             border_color:      THEME.bevel_hi,
             icon_size:         0.30,
@@ -373,7 +379,7 @@ impl container::StyleSheet for ModalCard {
     fn style(&self) -> container::Style {
         container::Style {
             background: Some(Background::Color(THEME.section_bg)),
-            border_radius: 4.0,
+            border_radius: BORDER_RADIUS,
             border_width: 1.0,
             border_color: THEME.section_border,
             text_color: None,
@@ -406,7 +412,7 @@ impl container::StyleSheet for TooltipCard {
     fn style(&self) -> container::Style {
         container::Style {
             background: Some(Background::Color(THEME.section_bg)),
-            border_radius: 4.0,
+            border_radius: BORDER_RADIUS,
             border_width: 1.0,
             border_color: THEME.inset_border,
             text_color: Some(THEME.text_dim),
@@ -421,7 +427,7 @@ impl container::StyleSheet for ModSection {
     fn style(&self) -> container::Style {
         container::Style {
             background: Some(Background::Color(THEME.section_bg)),
-            border_radius: 4.0,
+            border_radius: BORDER_RADIUS,
             border_width: 1.0,
             border_color: THEME.section_border,
             text_color: None,
@@ -1189,11 +1195,11 @@ impl IcedEditor for EtherTapEditor {
                 .style(EtherBtn(BtnKind::Idle))
                 .padding([4, 8]),
             )
-            .push(Space::with_height(Length::Units(10)))
+            .push(Space::with_height(Length::Units(SPACING_BTN_BASELINE)))
             .align_items(Alignment::Center);
         let fx_line1 = Row::new()
             .push(query_col)
-            .push(Space::with_width(Length::Units(14)))
+            .push(Space::with_width(Length::Units(SPACING_FX_ROW_GAP)))
             .push(slot_cols)
             .align_items(Alignment::Start);
 
@@ -1245,7 +1251,7 @@ impl IcedEditor for EtherTapEditor {
                 .style(EtherBtn(if all_mode { BtnKind::Enabled } else { BtnKind::Idle }))
                 .padding([4, 8]),
             )
-            .push(Space::with_width(Length::Units(14)))
+            .push(Space::with_width(Length::Units(SPACING_FX_ROW_GAP)))
             .push(fx_type_row)
             .align_items(Alignment::Center);
 
