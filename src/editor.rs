@@ -1367,7 +1367,10 @@ impl IcedEditor for EtherTapEditor {
         let (midi_icon, midi_icon_color, selected_display) = if device_selected {
             let icon = if bridge_conn { icon::LINK } else { icon::LINK_BROKEN };
             let color = if bridge_conn { THEME.ok } else { THEME.muted };
-            (icon, color, current_out_device.expect("device_selected=true ⇒ Some"))
+            (icon, color, current_out_device.unwrap_or_else(|| {
+                log::error!("[EtherTap] device_selected=true but current_out_device is None");
+                String::new()
+            }))
         } else {
             let count = self.midi_out_ports.len().saturating_sub(1);
             let label = if count == 0 {

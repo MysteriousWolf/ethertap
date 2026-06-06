@@ -335,7 +335,9 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
     let mut current_device: Option<String> = worker.initial_device.clone();
     let mut phys_out: Option<MidiOutputConnection> = None;
     // phys_in kept alive for its Drop impl (stops the CoreMIDI input callback).
-    #[allow(unused_variables, unused_assignments)]
+    // unused_assignments: the compiler sees some stores as "unused" because the
+    // value is never explicitly read — holding it IS the purpose (RAII guard).
+    #[allow(unused_assignments)]
     let mut phys_in: Option<MidiInputConnection<()>> = None;
 
     // ── Resync gap — silence inserted after BPM change ───────────────────────
