@@ -1,5 +1,13 @@
 # EtherTap — Persistent AI Coding Guidelines
 
+<atomic-signals>
+
+## Project signals (auto-loaded)
+
+@.claude/project/signals.md
+
+</atomic-signals>
+
 ## Real-Time Safety (Non-Negotiable)
 
 `process()` in `src/lib.rs` is called on the **audio thread**.  It must never:
