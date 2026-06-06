@@ -20,7 +20,7 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use parking_lot::Mutex;
-use rosc::{decoder, OscPacket, OscType};
+use rosc::{decoder, OscMessage, OscPacket, OscType};
 
 use crate::osc;
 use crate::reconnect::Backoff;
@@ -759,13 +759,17 @@ impl NetworkWorker {
 
 // ─── OSC response parsers ────────────────────────────────────────────────────
 
+fn decode_osc_message(data: &[u8]) -> Option<OscMessage> {
+    match decoder::decode_udp(data).ok()? {
+        (_, OscPacket::Message(msg)) => Some(msg),
+        _ => None,
+    }
+}
+
 fn parse_fx_type(data: &[u8]) -> Option<i32> {
-    let (_, packet) = decoder::decode_udp(data).ok()?;
-    match packet {
-        OscPacket::Message(msg) => match msg.args.first() {
-            Some(OscType::Int(id)) => Some(*id),
-            _ => None,
-        },
+    let msg = decode_osc_message(data)?;
+    match msg.args.first() {
+        Some(OscType::Int(id)) => Some(*id),
         _ => None,
     }
 }
@@ -794,12 +798,9 @@ fn parse_info_strings(data: &[u8]) -> (String, String) {
 }
 
 fn parse_fx_delay_response(data: &[u8]) -> Option<f32> {
-    let (_, packet) = decoder::decode_udp(data).ok()?;
-    match packet {
-        OscPacket::Message(msg) => match msg.args.first() {
-            Some(OscType::Float(f)) => Some(*f),
-            _ => None,
-        },
+    let msg = decode_osc_message(data)?;
+    match msg.args.first() {
+        Some(OscType::Float(f)) => Some(*f),
         _ => None,
     }
 }
