@@ -540,7 +540,10 @@ impl Plugin for EtherTap {
         }
 
         // ── 6. Continuous sync (fires on every beat crossing) ────────────
-        if playing && pos_beats.floor() > self.last_pos_beats.floor() {
+        // Nudge pos_beats by a small epsilon before flooring so that a DAW
+        // reporting e.g. 3.9999998 instead of 4.0 still triggers the crossing.
+        const BEAT_EPS: f64 = 0.001;
+        if playing && (pos_beats + BEAT_EPS).floor() > self.last_pos_beats.floor() {
             let phase_mode = self.params.phase_sync_mode.value();
             let rate_mode = self.params.rate_sync_mode.value();
             if phase_mode == SyncMode::Continuous {
