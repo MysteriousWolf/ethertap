@@ -192,6 +192,16 @@ pub struct EtherTap {
     on_change_retry_hard_reset: bool,
     /// Timestamp of the last retry dispatch (ms since epoch).
     on_change_last_retry_ms: u64,
+
+    // ── Standalone transport (no DAW host) ───────────────────────────────
+    /// BPM set by the standalone transport panel (f32 bits). Used when
+    /// transport.tempo is None (dummy audio backend / no host DAW).
+    standalone_bpm:       Arc<AtomicU32>,
+    /// Play/stop state set by the standalone transport panel.
+    standalone_playing:   Arc<AtomicBool>,
+    /// Cumulative beat position in standalone mode (f64 bits). Written by
+    /// process(), read by the editor transport display.
+    standalone_pos_beats: Arc<AtomicU64>,
 }
 
 impl Default for EtherTap {
@@ -215,6 +225,10 @@ impl Default for EtherTap {
         let scan_completed_ts = Arc::new(AtomicU64::new(0));
         let connected_device  = Arc::new(Mutex::new((String::new(), String::new())));
         let scan_generation   = Arc::new(AtomicU64::new(0));
+
+        let standalone_bpm       = Arc::new(AtomicU32::new(120.0f32.to_bits()));
+        let standalone_playing   = Arc::new(AtomicBool::new(true));
+        let standalone_pos_beats = Arc::new(AtomicU64::new(0u64));
 
         let (cmd_tx, cmd_rx) = crossbeam_channel::bounded::<NetworkCommand>(64);
         let (status_tx, status_rx) = crossbeam_channel::bounded::<NetworkStatus>(64);
@@ -328,6 +342,9 @@ impl Default for EtherTap {
             on_change_last_retry_ms:    0,
             standalone_tick_samples:    0.0,
             midi_clock_drop_count:      Arc::new(AtomicU32::new(0)),
+            standalone_bpm,
+            standalone_playing,
+            standalone_pos_beats,
         }
     }
 }
@@ -431,10 +448,22 @@ impl Plugin for EtherTap {
 
         // ── 2. Sample transport ───────────────────────────────────────────
         let transport = context.transport();
-        let bpm = transport.tempo.unwrap_or(120.0).max(10.0);
         let pos_beats_raw = transport.pos_beats(); // None when host doesn't report position
         let pos_beats = pos_beats_raw.unwrap_or(0.0);
-        let playing = transport.playing;
+
+        // When pos_beats_raw is None we are in standalone mode (dummy audio backend or
+        // a host that doesn't expose transport position).  Use the UI-driven atomics
+        // instead of the transport struct values.  Note: the dummy backend DOES set
+        // transport.tempo, but that value is fixed at startup and unresponsive to the
+        // BPM control; pos_beats is the reliable sentinel.
+        let (bpm, playing) = if pos_beats_raw.is_none() {
+            let raw = f32::from_bits(self.standalone_bpm.load(Ordering::Relaxed)) as f64;
+            let b   = if raw.is_finite() && raw > 0.0 { raw } else { 120.0 };
+            let p   = self.standalone_playing.load(Ordering::Relaxed);
+            (b, p)
+        } else {
+            (transport.tempo.unwrap_or(120.0).max(10.0), transport.playing)
+        };
 
         // Bar / time-sig metadata for PS1-PS3 phase sync improvements.
         let bar_number    = transport.bar_number().unwrap_or(-1);
@@ -733,8 +762,19 @@ impl Plugin for EtherTap {
             } else {
                 // Standalone (no DAW transport): derive tick interval from sample count
                 // to avoid Instant::now() syscalls on the audio thread.
+                let standalone_is_playing = self.standalone_playing.load(Ordering::Relaxed);
                 let buf_len = buffer.samples();
-                if buf_len > 0 {
+                if standalone_is_playing && buf_len > 0 {
+                    let beats_this_buf =
+                        buf_len as f64 / (transport.sample_rate as f64 * 60.0 / bpm);
+                    let prev_pos = f64::from_bits(
+                        self.standalone_pos_beats.load(Ordering::Relaxed),
+                    );
+                    self.standalone_pos_beats.store(
+                        (prev_pos + beats_this_buf).to_bits(),
+                        Ordering::Relaxed,
+                    );
+
                     let ppq = midi_ppq as f64;
                     let tick_interval_f = transport.sample_rate as f64 * 60.0 / bpm / ppq;
                     if tick_interval_f.is_normal() {
@@ -844,6 +884,9 @@ impl Plugin for EtherTap {
             midi_bridge_connecting: self.midi_bridge_connecting.clone(),
             midi_clock_stats: self.midi_clock_stats.clone(),
             midi_clock_drop_count: self.midi_clock_drop_count.clone(),
+            standalone_bpm: self.standalone_bpm.clone(),
+            standalone_playing: self.standalone_playing.clone(),
+            standalone_pos_beats: self.standalone_pos_beats.clone(),
         });
         editor::create(data)
     }

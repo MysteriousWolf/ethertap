@@ -507,6 +507,12 @@ pub struct EditorData {
     /// Cumulative count of MIDI clock messages dropped on the audio thread.
     /// Written lock-free by process(); drained and logged here on each frame.
     pub midi_clock_drop_count: Arc<AtomicU32>,
+    /// BPM set by the standalone transport panel (f32 bits).
+    pub standalone_bpm:       Arc<AtomicU32>,
+    /// Play/stop state for standalone mode.
+    pub standalone_playing:   Arc<AtomicBool>,
+    /// Cumulative beat position in standalone mode (f64 bits), written by process().
+    pub standalone_pos_beats: Arc<AtomicU64>,
 }
 
 // ─── Editor entry point ───────────────────────────────────────────────────────
@@ -554,6 +560,41 @@ struct EtherTapEditor {
     show_scan_results:     bool,
     /// ms-since-epoch when the last ScanTargets command was dispatched.
     last_scan_trigger_ms:  u64,
+
+    // ── Standalone DAW frame ─────────────────────────────────────────────
+    // These fields are only read in #[cfg(feature = "standalone")] view code.
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    standalone_bpm:       Arc<AtomicU32>,
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    standalone_playing:   Arc<AtomicBool>,
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    standalone_pos_beats: Arc<AtomicU64>,
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    btn_play_stop: button::State,
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    btn_tap:       button::State,
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    bpm_input:     text_input::State,
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    bpm_input_value: String,
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    tap_times:     Vec<std::time::Instant>,
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    btn_daw_rate_manual:  button::State,
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    btn_daw_rate_change:  button::State,
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    btn_daw_rate_cont:    button::State,
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    btn_daw_phase_manual: button::State,
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    btn_daw_phase_change: button::State,
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    btn_daw_phase_cont:   button::State,
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    btn_daw_force_rate:   button::State,
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    btn_daw_force_phase:  button::State,
 }
 
 // ─── Messages ────────────────────────────────────────────────────────────────
@@ -585,6 +626,13 @@ enum Message {
     SelectTarget(String, u16),
     Connect,
     Disconnect,
+    // Standalone transport controls (constructed only in --features standalone view code)
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    SetStandaloneBpm(String),
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    ToggleStandalonePlay,
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    TapTempo,
 }
 
 // ─── IcedEditor impl ─────────────────────────────────────────────────────────
@@ -595,6 +643,11 @@ impl IcedEditor for EtherTapEditor {
     type InitializationFlags = Arc<EditorData>;
 
     fn new(data: Arc<EditorData>, context: Arc<dyn GuiContext>) -> (Self, Command<Message>) {
+        let init_bpm = f32::from_bits(data.standalone_bpm.load(Ordering::Relaxed));
+        let bpm_input_value = format!("{:.1}", init_bpm);
+        let standalone_bpm       = data.standalone_bpm.clone();
+        let standalone_playing   = data.standalone_playing.clone();
+        let standalone_pos_beats = data.standalone_pos_beats.clone();
         (
             Self {
                 data, context,
@@ -623,6 +676,22 @@ impl IcedEditor for EtherTapEditor {
                 scan_result_states:    Vec::new(),
                 show_scan_results:     false,
                 last_scan_trigger_ms:  0,
+                standalone_bpm,
+                standalone_playing,
+                standalone_pos_beats,
+                btn_play_stop:        Default::default(),
+                btn_tap:              Default::default(),
+                bpm_input:            Default::default(),
+                bpm_input_value,
+                tap_times:            Vec::new(),
+                btn_daw_rate_manual:  Default::default(),
+                btn_daw_rate_change:  Default::default(),
+                btn_daw_rate_cont:    Default::default(),
+                btn_daw_phase_manual: Default::default(),
+                btn_daw_phase_change: Default::default(),
+                btn_daw_phase_cont:   Default::default(),
+                btn_daw_force_rate:   Default::default(),
+                btn_daw_force_phase:  Default::default(),
             },
             Command::none(),
         )
@@ -773,6 +842,43 @@ impl IcedEditor for EtherTapEditor {
                     log::warn!("[EtherTap] editor: Disconnect dropped (worker channel full)");
                 }
                 // Keep connected_device so the header shows the last known name.
+            }
+            Message::SetStandaloneBpm(s) => {
+                if let Ok(v) = s.parse::<f32>() {
+                    let clamped = v.clamp(20.0, 300.0);
+                    self.standalone_bpm.store(clamped.to_bits(), Ordering::Relaxed);
+                    self.bpm_input_value = format!("{:.1}", clamped);
+                } else {
+                    self.bpm_input_value = s;
+                }
+            }
+            Message::ToggleStandalonePlay => {
+                let was = self.standalone_playing.load(Ordering::Relaxed);
+                self.standalone_playing.store(!was, Ordering::Relaxed);
+            }
+            Message::TapTempo => {
+                let now = std::time::Instant::now();
+                const MAX_GAP: std::time::Duration = std::time::Duration::from_secs(2);
+                if let Some(&last) = self.tap_times.last() {
+                    if now.duration_since(last) > MAX_GAP {
+                        self.tap_times.clear();
+                    }
+                }
+                self.tap_times.push(now);
+                if self.tap_times.len() > 8 {
+                    self.tap_times.remove(0);
+                }
+                if self.tap_times.len() >= 2 {
+                    let first = self.tap_times[0];
+                    let last  = *self.tap_times.last().unwrap();
+                    let secs = last.duration_since(first).as_secs_f32()
+                        / (self.tap_times.len() - 1) as f32;
+                    if secs > 0.0 {
+                        let bpm = (60.0 / secs).clamp(20.0, 300.0);
+                        self.standalone_bpm.store(bpm.to_bits(), Ordering::Relaxed);
+                        self.bpm_input_value = format!("{:.1}", bpm);
+                    }
+                }
             }
         }
         Command::none()
@@ -1577,11 +1683,189 @@ impl IcedEditor for EtherTapEditor {
             .padding([0, 4, 5, 4])
             .spacing(0);
 
-        Column::new()
+        // ── Standalone DAW frame (compiled only with --features standalone) ──
+        #[cfg(feature = "standalone")]
+        let result = {
+            let sa_playing = self.standalone_playing.load(Ordering::Relaxed);
+            let sa_bpm_f   = f32::from_bits(self.standalone_bpm.load(Ordering::Relaxed));
+            let sa_pos     = f64::from_bits(self.standalone_pos_beats.load(Ordering::Relaxed));
+
+            let transport_row = Container::new(
+                Row::new()
+                    .push(
+                        Button::new(
+                            &mut self.btn_play_stop,
+                            t!(if sa_playing { "\u{25a0}" } else { "\u{25b6}" })
+                                .size(11)
+                                .color(if sa_playing { THEME.ok } else { THEME.muted }),
+                        )
+                        .on_press(Message::ToggleStandalonePlay)
+                        .style(EtherBtn(BtnKind::Idle))
+                        .padding([3, 7]),
+                    )
+                    .push(Space::with_width(Length::Units(8)))
+                    .push(t!("BPM").size(9).color(THEME.text_dim))
+                    .push(Space::with_width(Length::Units(4)))
+                    .push(
+                        TextInput::new(
+                            &mut self.bpm_input,
+                            "120.0",
+                            &self.bpm_input_value,
+                            Message::SetStandaloneBpm,
+                        )
+                        .size(11)
+                        .font(MONO_FONT)
+                        .padding([3, 5])
+                        .width(Length::Units(52)),
+                    )
+                    .push(Space::with_width(Length::Units(6)))
+                    .push(
+                        Button::new(&mut self.btn_tap, t!("Tap").size(10).color(THEME.accent))
+                            .on_press(Message::TapTempo)
+                            .style(EtherBtn(BtnKind::Idle))
+                            .padding([3, 7]),
+                    )
+                    .push(Space::with_width(Length::Fill))
+                    .push(
+                        t!(format!("\u{2669} {:.2}", sa_pos))
+                            .size(9)
+                            .font(MONO_FONT)
+                            .color(THEME.text_dim),
+                    )
+                    .align_items(Alignment::Center),
+            )
+            .padding([4, 10])
+            .style(BannerBg);
+
+            let conn_dot = if connected { "\u{25cf}" } else { "\u{25cb}" };
+            let conn_col = if connected { THEME.ok } else { THEME.err };
+            let sync_dot = if in_sync { "\u{25cf}" } else { "\u{25cb}" };
+            let sync_col = if in_sync { THEME.ok } else { THEME.text_dim };
+            let hw_str   = if has_hw { format!("{:.1}", hw_bpm) }
+                           else      { "--.-".to_string() };
+
+            let daw_panel = Column::new()
+                .push(t!("DAW I/O").size(9).color(THEME.accent))
+                .push(Space::with_height(Length::Units(4)))
+                .push(t!("TRANSPORT").size(8).color(THEME.text_dim))
+                .push(Space::with_height(Length::Units(2)))
+                .push(
+                    Row::new()
+                        .push(t!("bpm  ").size(9).color(THEME.text_dim))
+                        .push(
+                            t!(format!("{:.1}", sa_bpm_f))
+                                .size(9).font(MONO_FONT).color(THEME.text),
+                        ),
+                )
+                .push(
+                    Row::new()
+                        .push(
+                            t!(if sa_playing { "\u{25cf}" } else { "\u{25cb}" })
+                                .size(9)
+                                .color(if sa_playing { THEME.ok } else { THEME.muted }),
+                        )
+                        .push(Space::with_width(Length::Units(3)))
+                        .push(t!("play").size(9).color(THEME.text_dim)),
+                )
+                .push(
+                    Row::new()
+                        .push(t!("pos  ").size(9).color(THEME.text_dim))
+                        .push(
+                            t!(format!("{:.2}\u{2669}", sa_pos))
+                                .size(9).font(MONO_FONT).color(THEME.text_dim),
+                        ),
+                )
+                .push(Space::with_height(Length::Units(5)))
+                .push(t!("PARAMS").size(8).color(THEME.text_dim))
+                .push(Space::with_height(Length::Units(2)))
+                .push(t!("RATE").size(8).color(THEME.text_dim))
+                .push(
+                    Row::new()
+                        .push(sync_btn(&mut self.btn_daw_rate_manual, "Man",
+                            rate_mode == SyncMode::Manual,
+                            Message::SetRateSyncMode(SyncMode::Manual)))
+                        .push(sync_btn(&mut self.btn_daw_rate_change, "BPM",
+                            rate_mode == SyncMode::OnChange,
+                            Message::SetRateSyncMode(SyncMode::OnChange)))
+                        .push(sync_btn(&mut self.btn_daw_rate_cont, "Con",
+                            rate_mode == SyncMode::Continuous,
+                            Message::SetRateSyncMode(SyncMode::Continuous)))
+                        .push(force_icon_btn(
+                            &mut self.btn_daw_force_rate, Message::ForceRateSync,
+                        ))
+                        .spacing(2),
+                )
+                .push(Space::with_height(Length::Units(2)))
+                .push(t!("PHASE").size(8).color(THEME.text_dim))
+                .push(
+                    Row::new()
+                        .push(sync_btn(&mut self.btn_daw_phase_manual, "Man",
+                            phase_mode == SyncMode::Manual,
+                            Message::SetPhaseSyncMode(SyncMode::Manual)))
+                        .push(sync_btn(&mut self.btn_daw_phase_change, "BPM",
+                            phase_mode == SyncMode::OnChange,
+                            Message::SetPhaseSyncMode(SyncMode::OnChange)))
+                        .push(sync_btn(&mut self.btn_daw_phase_cont, "Con",
+                            phase_mode == SyncMode::Continuous,
+                            Message::SetPhaseSyncMode(SyncMode::Continuous)))
+                        .push(force_icon_btn(
+                            &mut self.btn_daw_force_phase, Message::ForcePhaseSync,
+                        ))
+                        .spacing(2),
+                )
+                .push(Space::with_height(Length::Units(5)))
+                .push(t!("STATUS").size(8).color(THEME.text_dim))
+                .push(Space::with_height(Length::Units(2)))
+                .push(
+                    Row::new()
+                        .push(t!(conn_dot).size(9).color(conn_col))
+                        .push(Space::with_width(Length::Units(3)))
+                        .push(t!("conn").size(9).color(THEME.text_dim)),
+                )
+                .push(
+                    Row::new()
+                        .push(t!(sync_dot).size(9).color(sync_col))
+                        .push(Space::with_width(Length::Units(3)))
+                        .push(t!("sync").size(9).color(THEME.text_dim)),
+                )
+                .push(
+                    Row::new()
+                        .push(t!("hw ").size(9).color(THEME.text_dim))
+                        .push(t!(hw_str).size(9).font(MONO_FONT).color(THEME.text_dim)),
+                )
+                .padding([5, 6])
+                .spacing(1)
+                .width(Length::Units(130));
+
+            let right_col = Column::new()
+                .push(banner)
+                .push(Space::with_height(Length::Units(6)))
+                .push(Container::new(content).width(Length::Fill).height(Length::Fill))
+                .width(Length::Fill);
+
+            Column::new()
+                .push(transport_row)
+                .push(
+                    Row::new()
+                        .push(
+                            Container::new(daw_panel)
+                                .height(Length::Fill)
+                                .style(ModSection),
+                        )
+                        .push(right_col)
+                        .height(Length::Fill),
+                )
+                .into()
+        };
+
+        #[cfg(not(feature = "standalone"))]
+        let result = Column::new()
             .push(banner)
             .push(Space::with_height(Length::Units(6)))
             .push(Container::new(content).width(Length::Fill).height(Length::Fill))
-            .into()
+            .into();
+
+        result
     }
 
     fn background_color(&self) -> Color { THEME.bg }
