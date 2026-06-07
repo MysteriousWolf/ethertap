@@ -588,21 +588,23 @@ struct EtherTapEditor {
     bpm_input_value: String,
     #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     tap_times:     VecDeque<std::time::Instant>,
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    // Footer skeleton (checkpoint 2a) is content-empty; these resume use when
+    // checkpoint 2b wires rate/phase sync params into the footer's wrap/grid.
+    #[allow(dead_code)]
     btn_daw_rate_manual:  button::State,
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    #[allow(dead_code)]
     btn_daw_rate_change:  button::State,
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    #[allow(dead_code)]
     btn_daw_rate_cont:    button::State,
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    #[allow(dead_code)]
     btn_daw_phase_manual: button::State,
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    #[allow(dead_code)]
     btn_daw_phase_change: button::State,
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    #[allow(dead_code)]
     btn_daw_phase_cont:   button::State,
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    #[allow(dead_code)]
     btn_daw_force_rate:   button::State,
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    #[allow(dead_code)]
     btn_daw_force_phase:  button::State,
 }
 
@@ -1711,7 +1713,6 @@ impl IcedEditor for EtherTapEditor {
         #[cfg(feature = "standalone")]
         let result = {
             let sa_playing = self.standalone_playing.load(Ordering::Relaxed);
-            let sa_bpm_f   = f32::from_bits(self.standalone_bpm.load(Ordering::Relaxed));
             let sa_pos     = f64::from_bits(self.standalone_pos_beats.load(Ordering::Relaxed));
 
             let transport_row = Container::new(
@@ -1772,124 +1773,28 @@ impl IcedEditor for EtherTapEditor {
             .padding([4, 10])
             .style(BannerBg);
 
-            let conn_dot = if connected { "\u{25cf}" } else { "\u{25cb}" };
-            let conn_col = if connected { THEME.ok } else { THEME.err };
-            let sync_dot = if in_sync { "\u{25cf}" } else { "\u{25cb}" };
-            let sync_col = if in_sync { THEME.ok } else { THEME.text_dim };
-            let hw_str   = if has_hw { format!("{:.1}", hw_bpm) }
-                           else      { "--.-".to_string() };
-
-            let daw_panel = Column::new()
-                .push(t!("DAW I/O").size(9).color(THEME.accent))
-                .push(Space::with_height(Length::Units(4)))
-                .push(t!("TRANSPORT").size(8).color(THEME.text_dim))
-                .push(Space::with_height(Length::Units(2)))
-                .push(
-                    Row::new()
-                        .push(t!("bpm  ").size(9).color(THEME.text_dim))
-                        .push(
-                            t!(format!("{:.1}", sa_bpm_f))
-                                .size(9).font(MONO_FONT).color(THEME.text),
-                        ),
-                )
-                .push(
-                    Row::new()
-                        .push(
-                            t!(if sa_playing { "\u{25cf}" } else { "\u{25cb}" })
-                                .size(9)
-                                .color(if sa_playing { THEME.ok } else { THEME.muted }),
-                        )
-                        .push(Space::with_width(Length::Units(3)))
-                        .push(t!("play").size(9).color(THEME.text_dim)),
-                )
-                .push(
-                    Row::new()
-                        .push(t!("pos  ").size(9).color(THEME.text_dim))
-                        .push(
-                            t!(format!("{:.2}\u{25ce}", sa_pos))
-                                .size(9).font(MONO_FONT).color(THEME.text_dim),
-                        ),
-                )
-                .push(Space::with_height(Length::Units(5)))
-                .push(t!("PARAMS").size(8).color(THEME.text_dim))
-                .push(Space::with_height(Length::Units(2)))
-                .push(t!("RATE").size(8).color(THEME.text_dim))
-                .push(
-                    Row::new()
-                        .push(sync_btn(&mut self.btn_daw_rate_manual, "Man",
-                            rate_mode == SyncMode::Manual,
-                            Message::SetRateSyncMode(SyncMode::Manual)))
-                        .push(sync_btn(&mut self.btn_daw_rate_change, "BPM",
-                            rate_mode == SyncMode::OnChange,
-                            Message::SetRateSyncMode(SyncMode::OnChange)))
-                        .push(sync_btn(&mut self.btn_daw_rate_cont, "Con",
-                            rate_mode == SyncMode::Continuous,
-                            Message::SetRateSyncMode(SyncMode::Continuous)))
-                        .push(force_icon_btn(
-                            &mut self.btn_daw_force_rate, Message::ForceRateSync,
-                        ))
-                        .spacing(2),
-                )
-                .push(Space::with_height(Length::Units(2)))
-                .push(t!("PHASE").size(8).color(THEME.text_dim))
-                .push(
-                    Row::new()
-                        .push(sync_btn(&mut self.btn_daw_phase_manual, "Man",
-                            phase_mode == SyncMode::Manual,
-                            Message::SetPhaseSyncMode(SyncMode::Manual)))
-                        .push(sync_btn(&mut self.btn_daw_phase_change, "BPM",
-                            phase_mode == SyncMode::OnChange,
-                            Message::SetPhaseSyncMode(SyncMode::OnChange)))
-                        .push(sync_btn(&mut self.btn_daw_phase_cont, "Con",
-                            phase_mode == SyncMode::Continuous,
-                            Message::SetPhaseSyncMode(SyncMode::Continuous)))
-                        .push(force_icon_btn(
-                            &mut self.btn_daw_force_phase, Message::ForcePhaseSync,
-                        ))
-                        .spacing(2),
-                )
-                .push(Space::with_height(Length::Units(5)))
-                .push(t!("STATUS").size(8).color(THEME.text_dim))
-                .push(Space::with_height(Length::Units(2)))
-                .push(
-                    Row::new()
-                        .push(t!(conn_dot).size(9).color(conn_col))
-                        .push(Space::with_width(Length::Units(3)))
-                        .push(t!("conn").size(9).color(THEME.text_dim)),
-                )
-                .push(
-                    Row::new()
-                        .push(t!(sync_dot).size(9).color(sync_col))
-                        .push(Space::with_width(Length::Units(3)))
-                        .push(t!("sync").size(9).color(THEME.text_dim)),
-                )
-                .push(
-                    Row::new()
-                        .push(t!("hw ").size(9).color(THEME.text_dim))
-                        .push(t!(hw_str).size(9).font(MONO_FONT).color(THEME.text_dim)),
-                )
-                .padding([5, 6])
-                .spacing(1)
-                .width(Length::Units(130));
-
-            let right_col = Column::new()
-                .push(banner)
-                .push(Space::with_height(Length::Units(6)))
-                .push(Container::new(content).width(Length::Fill).height(Length::Fill))
-                .width(Length::Fill);
+            // ── Full-width param footer (checkpoint 2b populates with the 10
+            // EtherTapParams #[id] fields + 1-2 connection facts via wrap_rows). ──
+            let footer_items: Vec<Element<'_, Message>> = Vec::new();
+            let footer = Container::new(
+                Column::new()
+                    .push(t!("DAW I/O").size(9).color(THEME.accent))
+                    .push(Space::with_height(Length::Units(4)))
+                    .push(wrap_rows(footer_items, 5))
+                    .padding([5, 6])
+                    .spacing(2)
+                    .width(Length::Fill),
+            )
+            .width(Length::Fill)
+            .style(ModSection);
 
             Column::new()
                 .push(transport_row)
-                .push(
-                    Row::new()
-                        .push(
-                            Container::new(daw_panel)
-                                .height(Length::Fill)
-                                .style(ModSection),
-                        )
-                        .push(right_col)
-                        .height(Length::Fill),
-                )
+                .push(banner)
+                .push(Space::with_height(Length::Units(6)))
+                .push(Container::new(content).width(Length::Fill).height(Length::Fill))
+                .push(Space::with_height(Length::Units(6)))
+                .push(footer)
                 .into()
         };
 
@@ -1936,6 +1841,32 @@ fn force_icon_btn(state: &mut button::State, msg: Message) -> Button<'_, Message
     .on_press(msg)
     .style(EtherBtn(BtnKind::Force))
     .padding([4, 8])
+}
+
+/// Footer-scoped wrap/grid: chunks `items` into a `Column` of `Row`s, `per_row`
+/// items each (last row may be shorter). Count-driven so the standalone footer
+/// self-adjusts as params are added/removed — no hand-stacked layout to edit.
+/// Scoped to this footer (non-goal: no general-purpose layout component).
+#[cfg(feature = "standalone")]
+fn wrap_rows<'a>(items: Vec<Element<'a, Message>>, per_row: usize) -> Column<'a, Message> {
+    let mut rows = Column::new().spacing(4);
+    let mut chunk = Row::new().spacing(8);
+    let mut count = 0;
+
+    for item in items {
+        chunk = chunk.push(item);
+        count += 1;
+        if count == per_row {
+            rows = rows.push(chunk);
+            chunk = Row::new().spacing(8);
+            count = 0;
+        }
+    }
+    if count > 0 {
+        rows = rows.push(chunk);
+    }
+
+    rows
 }
 
 // ─── Style utility ────────────────────────────────────────────────────────────
