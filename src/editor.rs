@@ -516,6 +516,8 @@ pub struct EditorData {
     pub standalone_playing:   Arc<AtomicBool>,
     /// Cumulative beat position in standalone mode (f64 bits), written by process().
     pub standalone_pos_beats: Arc<AtomicU64>,
+    /// One-shot Stop trigger: editor sets, process() swap(false)-consumes.
+    pub standalone_stop_trigger: Arc<AtomicBool>,
 }
 
 // ─── Editor entry point ───────────────────────────────────────────────────────
@@ -573,7 +575,11 @@ struct EtherTapEditor {
     #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     standalone_pos_beats: Arc<AtomicU64>,
     #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    standalone_stop_trigger: Arc<AtomicBool>,
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     btn_play_stop: button::State,
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    btn_stop:      button::State,
     #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     btn_tap:       button::State,
     #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
@@ -635,6 +641,8 @@ enum Message {
     #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     ToggleStandalonePlay,
     #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    StopStandalone,
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     TapTempo,
 }
 
@@ -651,6 +659,7 @@ impl IcedEditor for EtherTapEditor {
         let standalone_bpm       = data.standalone_bpm.clone();
         let standalone_playing   = data.standalone_playing.clone();
         let standalone_pos_beats = data.standalone_pos_beats.clone();
+        let standalone_stop_trigger = data.standalone_stop_trigger.clone();
         (
             Self {
                 data, context,
@@ -682,7 +691,9 @@ impl IcedEditor for EtherTapEditor {
                 standalone_bpm,
                 standalone_playing,
                 standalone_pos_beats,
+                standalone_stop_trigger,
                 btn_play_stop:        Default::default(),
+                btn_stop:             Default::default(),
                 btn_tap:              Default::default(),
                 bpm_input:            Default::default(),
                 bpm_input_value,
@@ -858,6 +869,15 @@ impl IcedEditor for EtherTapEditor {
             Message::ToggleStandalonePlay => {
                 let was = self.standalone_playing.load(Ordering::Relaxed);
                 self.standalone_playing.store(!was, Ordering::Relaxed);
+            }
+            Message::StopStandalone => {
+                // One-shot trigger only — process() performs the
+                // standalone_playing/standalone_pos_beats reset itself,
+                // serialized with its own accumulation logic. Do NOT store
+                // those atomics here: a pair of independent cross-thread
+                // store()s would race process()'s Relaxed read-modify-write
+                // of standalone_pos_beats and risk a clobbered reset.
+                self.standalone_stop_trigger.store(true, Ordering::Release);
             }
             Message::TapTempo => {
                 let now = std::time::Instant::now();
@@ -1699,11 +1719,21 @@ impl IcedEditor for EtherTapEditor {
                     .push(
                         Button::new(
                             &mut self.btn_play_stop,
-                            t!(if sa_playing { "\u{25a0}" } else { "\u{25b6}" })
+                            t!(if sa_playing { "\u{2016}" } else { "\u{25b6}" })
                                 .size(11)
                                 .color(if sa_playing { THEME.ok } else { THEME.muted }),
                         )
                         .on_press(Message::ToggleStandalonePlay)
+                        .style(EtherBtn(BtnKind::Idle))
+                        .padding([3, 7]),
+                    )
+                    .push(Space::with_width(Length::Units(4)))
+                    .push(
+                        Button::new(
+                            &mut self.btn_stop,
+                            t!("\u{25a0}").size(11).color(THEME.muted),
+                        )
+                        .on_press(Message::StopStandalone)
                         .style(EtherBtn(BtnKind::Idle))
                         .padding([3, 7]),
                     )
@@ -1732,7 +1762,7 @@ impl IcedEditor for EtherTapEditor {
                     )
                     .push(Space::with_width(Length::Fill))
                     .push(
-                        t!(format!("\u{2669} {:.2}", sa_pos))
+                        t!(format!("\u{25ce} {:.2}", sa_pos))
                             .size(9)
                             .font(MONO_FONT)
                             .color(THEME.text_dim),
@@ -1776,7 +1806,7 @@ impl IcedEditor for EtherTapEditor {
                     Row::new()
                         .push(t!("pos  ").size(9).color(THEME.text_dim))
                         .push(
-                            t!(format!("{:.2}\u{2669}", sa_pos))
+                            t!(format!("{:.2}\u{25ce}", sa_pos))
                                 .size(9).font(MONO_FONT).color(THEME.text_dim),
                         ),
                 )

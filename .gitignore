@@ -16,3 +16,6 @@
 *.vst3
 *.clap
 *.component
+
+# Claude Code working memory
+/.claude/.scratchpad/

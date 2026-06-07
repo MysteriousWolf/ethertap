@@ -202,6 +202,13 @@ pub struct EtherTap {
     /// Cumulative beat position in standalone mode (f64 bits). Written by
     /// process(), read by the editor transport display.
     standalone_pos_beats: Arc<AtomicU64>,
+    /// One-shot Stop trigger: editor sets, process() swap(false)-consumes
+    /// unconditionally each buffer (independent of/before the `playing` gate)
+    /// and performs the standalone_playing/standalone_pos_beats reset itself,
+    /// serialized with its own accumulation logic — avoids the race a pair of
+    /// independent cross-thread store()s would have against the Relaxed
+    /// read-modify-write at the position-accumulation site below.
+    standalone_stop_trigger: Arc<AtomicBool>,
 }
 
 impl Default for EtherTap {
@@ -229,6 +236,7 @@ impl Default for EtherTap {
         let standalone_bpm       = Arc::new(AtomicU32::new(120.0f32.to_bits()));
         let standalone_playing   = Arc::new(AtomicBool::new(true));
         let standalone_pos_beats = Arc::new(AtomicU64::new(0u64));
+        let standalone_stop_trigger = Arc::new(AtomicBool::new(false));
 
         let (cmd_tx, cmd_rx) = crossbeam_channel::bounded::<NetworkCommand>(64);
         let (status_tx, status_rx) = crossbeam_channel::bounded::<NetworkStatus>(64);
@@ -345,6 +353,7 @@ impl Default for EtherTap {
             standalone_bpm,
             standalone_playing,
             standalone_pos_beats,
+            standalone_stop_trigger,
         }
     }
 }
@@ -458,7 +467,7 @@ impl Plugin for EtherTap {
         // #[cfg(feature = "standalone")] is exact — only the standalone binary enables it,
         // never the exported VST3.
         #[cfg(feature = "standalone")]
-        let (bpm, playing) = {
+        let (bpm, mut playing) = {
             let raw = f32::from_bits(self.standalone_bpm.load(Ordering::Relaxed)) as f64;
             let b   = if raw.is_finite() && raw > 0.0 { raw } else { 120.0 };
             let p   = self.standalone_playing.load(Ordering::Relaxed);
@@ -466,6 +475,20 @@ impl Plugin for EtherTap {
         };
         #[cfg(not(feature = "standalone"))]
         let (bpm, playing) = (transport.tempo.unwrap_or(120.0).max(10.0), transport.playing);
+
+        // Stop trigger: one-shot, consumed unconditionally every buffer —
+        // independent of and *before* the `playing` gate below — so a Stop
+        // pressed while already paused still zeroes the position. process()
+        // performs both the playing and position resets itself, serialized
+        // with its own Relaxed read-modify-write accumulation of
+        // standalone_pos_beats, eliminating the race a pair of independent
+        // editor-thread store()s would otherwise have against it.
+        #[cfg(feature = "standalone")]
+        if self.standalone_stop_trigger.swap(false, Ordering::AcqRel) {
+            playing = false;
+            self.standalone_playing.store(false, Ordering::Relaxed);
+            self.standalone_pos_beats.store(0.0f64.to_bits(), Ordering::Relaxed);
+        }
 
         // Bar / time-sig metadata for PS1-PS3 phase sync improvements.
         let bar_number    = transport.bar_number().unwrap_or(-1);
@@ -898,6 +921,7 @@ impl Plugin for EtherTap {
             standalone_bpm: self.standalone_bpm.clone(),
             standalone_playing: self.standalone_playing.clone(),
             standalone_pos_beats: self.standalone_pos_beats.clone(),
+            standalone_stop_trigger: self.standalone_stop_trigger.clone(),
         });
         editor::create(data)
     }
@@ -1088,6 +1112,71 @@ mod tests {
             (published - 120.0).abs() < 0.01,
             "expected host_bpm ≈ 120, got {published}",
         );
+    }
+
+    // ── Standalone Stop trigger ──────────────────────────────────────────
+    //
+    // Encodes WHY the trigger-atomic idiom is mandatory: a naive pair of
+    // independent editor-thread store()s on standalone_playing /
+    // standalone_pos_beats races process()'s Relaxed read-modify-write
+    // accumulation of standalone_pos_beats (see the standalone position
+    // block above). This test asserts the *outcome* the race would
+    // jeopardize — both atomics land at their Stop values after a single
+    // process() call consumes the one-shot trigger — proving process()
+    // performs the reset itself rather than relying on cross-thread stores.
+    #[cfg(feature = "standalone")]
+    #[test]
+    fn standalone_stop_trigger_zeroes_position_and_clears_playing() {
+        let mut plugin = EtherTap::default();
+        let mut ctx = MockProcessContext::new(120.0, true);
+        let mut buffer = make_buffer();
+        let mut aux = make_aux();
+
+        // Simulate: transport was running and had accumulated position.
+        plugin.standalone_playing.store(true, Ordering::Relaxed);
+        plugin.standalone_pos_beats.store(42.5f64.to_bits(), Ordering::Relaxed);
+
+        // Editor thread sets the one-shot trigger (mirrors Message::StopStandalone).
+        plugin.standalone_stop_trigger.store(true, Ordering::Release);
+
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+
+        assert!(
+            !plugin.standalone_playing.load(Ordering::Relaxed),
+            "Stop must leave standalone_playing == false",
+        );
+        let pos = f64::from_bits(plugin.standalone_pos_beats.load(Ordering::Relaxed));
+        assert_eq!(pos, 0.0, "Stop must zero standalone_pos_beats, got {pos}");
+
+        // Trigger is one-shot — a second process() call must not re-fire it
+        // (e.g. re-zeroing a position the user has since moved forward).
+        plugin.standalone_pos_beats.store(7.0f64.to_bits(), Ordering::Relaxed);
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+        let pos_after = f64::from_bits(plugin.standalone_pos_beats.load(Ordering::Relaxed));
+        assert_eq!(pos_after, 7.0, "consumed trigger must not fire again, got {pos_after}");
+    }
+
+    /// Stop pressed while already paused must still zero the position — the
+    /// trigger is consumed unconditionally each buffer, independent of and
+    /// before the `playing` gate (gating on `playing` would silently swallow
+    /// a Stop-while-paused).
+    #[cfg(feature = "standalone")]
+    #[test]
+    fn standalone_stop_trigger_resets_position_while_paused() {
+        let mut plugin = EtherTap::default();
+        let mut ctx = MockProcessContext::new(120.0, false);
+        let mut buffer = make_buffer();
+        let mut aux = make_aux();
+
+        plugin.standalone_playing.store(false, Ordering::Relaxed);
+        plugin.standalone_pos_beats.store(13.0f64.to_bits(), Ordering::Relaxed);
+        plugin.standalone_stop_trigger.store(true, Ordering::Release);
+
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+
+        assert!(!plugin.standalone_playing.load(Ordering::Relaxed));
+        let pos = f64::from_bits(plugin.standalone_pos_beats.load(Ordering::Relaxed));
+        assert_eq!(pos, 0.0, "Stop-while-paused must still zero position, got {pos}");
     }
 
     #[test]
