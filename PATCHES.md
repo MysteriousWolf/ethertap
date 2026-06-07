@@ -66,6 +66,7 @@ stops working.
 | `context_process_rs.patch` | Adds `ProcessContext::set_parameter<Pa: Param>` with a default impl that updates the param's internal atomic via `param.as_ptr().set_normalized_value()` |
 | `vst3_context_rs.patch` | Overrides `set_parameter` in `WrapperProcessContext` to additionally call `inner.set_normalized_value_by_hash()`, which schedules a `ParameterValueChanged` event on the GUI event loop so hosts pick up the new value via `getParamNormalized` |
 | `vst3_inner_rs.patch` | Extends `Task::ParameterValueChanged` handler to call `IComponentHandler::begin_edit` / `perform_edit` / `end_edit` on the DAW host before notifying the editor widget; without this the DAW never sees plugin-driven param changes |
+| `context_process_transport_visibility.patch` | Widens `Transport::new` from `pub(crate)` to `pub` — our unit tests (`src/lib.rs`) construct `Transport` directly to drive `process()` in isolation, which needs a public constructor outside the crate-internal call sites upstream restricts it to |
 
 ### Updating nih-plug
 
