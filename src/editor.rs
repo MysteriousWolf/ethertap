@@ -588,23 +588,23 @@ struct EtherTapEditor {
     bpm_input_value: String,
     #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     tap_times:     VecDeque<std::time::Instant>,
-    // Footer skeleton (checkpoint 2a) is content-empty; these resume use when
-    // checkpoint 2b wires rate/phase sync params into the footer's wrap/grid.
-    #[allow(dead_code)]
+    // ── Footer param-mode chips (checkpoint 2b: rate/phase sync mode + force
+    // triggers, mirroring the former daw_panel's RATE/PHASE rows) ─────────
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     btn_daw_rate_manual:  button::State,
-    #[allow(dead_code)]
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     btn_daw_rate_change:  button::State,
-    #[allow(dead_code)]
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     btn_daw_rate_cont:    button::State,
-    #[allow(dead_code)]
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     btn_daw_phase_manual: button::State,
-    #[allow(dead_code)]
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     btn_daw_phase_change: button::State,
-    #[allow(dead_code)]
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     btn_daw_phase_cont:   button::State,
-    #[allow(dead_code)]
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     btn_daw_force_rate:   button::State,
-    #[allow(dead_code)]
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     btn_daw_force_phase:  button::State,
 }
 
@@ -1773,14 +1773,87 @@ impl IcedEditor for EtherTapEditor {
             .padding([4, 10])
             .style(BannerBg);
 
-            // ── Full-width param footer (checkpoint 2b populates with the 10
-            // EtherTapParams #[id] fields + 1-2 connection facts via wrap_rows). ──
-            let footer_items: Vec<Element<'_, Message>> = Vec::new();
+            // ── Full-width param footer: all 10 EtherTapParams #[id] fields +
+            // 2 connection facts (target IP:port, hw BPM — already computed
+            // above for telem_row/the former daw_panel STATUS section). ──────
+            let connect_to_last_v = self.data.params.connect_to_last.value();
+            let disconnect_v      = self.data.params.disconnect.value();
+            let force_sync_rate_v  = self.data.params.force_sync_rate.value();
+            let force_sync_phase_v = self.data.params.force_sync_phase.value();
+            let force_sync_both_v  = self.data.params.force_sync_both.value();
+            let force_sync_legacy_v = self.data.params.force_sync.value();
+            let is_connected_v = self.data.params.is_connected.value();
+            let is_matched_v   = self.data.params.is_matched.value();
+
+            let bool_dot = |b: bool| if b { ("\u{25cf}", THEME.ok) } else { ("\u{25cb}", THEME.muted) };
+
+            let (conn_dot, conn_col)   = if is_connected_v { ("\u{25cf}", THEME.ok) } else { ("\u{25cb}", THEME.err) };
+            let (match_dot, match_col) = if is_matched_v   { ("\u{25cf}", THEME.ok) } else { ("\u{25cb}", THEME.text_dim) };
+            let (ctl_dot, ctl_col)     = bool_dot(connect_to_last_v);
+            let (disc_dot, disc_col)   = bool_dot(disconnect_v);
+            let (fsr_dot, fsr_col)     = bool_dot(force_sync_rate_v);
+            let (fsp_dot, fsp_col)     = bool_dot(force_sync_phase_v);
+            let (fsb_dot, fsb_col)     = bool_dot(force_sync_both_v);
+            let (fsl_dot, fsl_col)     = bool_dot(force_sync_legacy_v);
+
+            let bool_str = |b: bool| if b { "on".to_string() } else { "off".to_string() };
+
+            // RATE / PHASE sync mode chips: interactive (sync_btn/force_icon_btn,
+            // resuming the btn_daw_* button states 2a left for this purpose).
+            let rate_chip: Element<'_, Message> = Row::new()
+                .push(t!("rate_sync_mode").size(9).color(THEME.text_dim))
+                .push(Space::with_width(Length::Units(4)))
+                .push(sync_btn(&mut self.btn_daw_rate_manual, "Man",
+                    rate_mode == SyncMode::Manual,
+                    Message::SetRateSyncMode(SyncMode::Manual)))
+                .push(sync_btn(&mut self.btn_daw_rate_change, "BPM",
+                    rate_mode == SyncMode::OnChange,
+                    Message::SetRateSyncMode(SyncMode::OnChange)))
+                .push(sync_btn(&mut self.btn_daw_rate_cont, "Con",
+                    rate_mode == SyncMode::Continuous,
+                    Message::SetRateSyncMode(SyncMode::Continuous)))
+                .push(force_icon_btn(&mut self.btn_daw_force_rate, Message::ForceRateSync))
+                .spacing(2)
+                .align_items(Alignment::Center)
+                .into();
+
+            let phase_chip: Element<'_, Message> = Row::new()
+                .push(t!("phase_sync_mode").size(9).color(THEME.text_dim))
+                .push(Space::with_width(Length::Units(4)))
+                .push(sync_btn(&mut self.btn_daw_phase_manual, "Man",
+                    phase_mode == SyncMode::Manual,
+                    Message::SetPhaseSyncMode(SyncMode::Manual)))
+                .push(sync_btn(&mut self.btn_daw_phase_change, "BPM",
+                    phase_mode == SyncMode::OnChange,
+                    Message::SetPhaseSyncMode(SyncMode::OnChange)))
+                .push(sync_btn(&mut self.btn_daw_phase_cont, "Con",
+                    phase_mode == SyncMode::Continuous,
+                    Message::SetPhaseSyncMode(SyncMode::Continuous)))
+                .push(force_icon_btn(&mut self.btn_daw_force_phase, Message::ForcePhaseSync))
+                .spacing(2)
+                .align_items(Alignment::Center)
+                .into();
+
+            let footer_items: Vec<Element<'_, Message>> = vec![
+                rate_chip,
+                phase_chip,
+                param_chip(ctl_dot,  ctl_col,  "connect_to_last",  bool_str(connect_to_last_v)),
+                param_chip(disc_dot, disc_col, "disconnect",       bool_str(disconnect_v)),
+                param_chip(fsr_dot,  fsr_col,  "force_sync_rate",  bool_str(force_sync_rate_v)),
+                param_chip(fsp_dot,  fsp_col,  "force_sync_phase", bool_str(force_sync_phase_v)),
+                param_chip(fsb_dot,  fsb_col,  "force_sync_both",  bool_str(force_sync_both_v)),
+                param_chip(fsl_dot,  fsl_col,  "force_sync",       bool_str(force_sync_legacy_v)),
+                param_chip(conn_dot,  conn_col,  "is_connected", bool_str(is_connected_v)),
+                param_chip(match_dot, match_col, "is_matched",   bool_str(is_matched_v)),
+                param_chip("\u{25cf}", THEME.text_dim, "target", format!("{}:{}", target_ip, target_port)),
+                param_chip("\u{25cf}", THEME.text_dim, "hw bpm", if has_hw { format!("{:.1}", hw_bpm) } else { "--.-".to_string() }),
+            ];
+
             let footer = Container::new(
                 Column::new()
                     .push(t!("DAW I/O").size(9).color(THEME.accent))
                     .push(Space::with_height(Length::Units(4)))
-                    .push(wrap_rows(footer_items, 5))
+                    .push(wrap_rows(footer_items, 4))
                     .padding([5, 6])
                     .spacing(2)
                     .width(Length::Fill),
@@ -1841,6 +1914,26 @@ fn force_icon_btn(state: &mut button::State, msg: Message) -> Button<'_, Message
     .on_press(msg)
     .style(EtherBtn(BtnKind::Force))
     .padding([4, 8])
+}
+
+/// Footer-scoped param chip: dot + name + value, mirroring the
+/// `bridge_status`/`sync_dot`/`conn_dot` dot+label idiom used elsewhere in
+/// this editor. One chip = one `#[id]`-tagged param or connection fact.
+#[cfg(feature = "standalone")]
+fn param_chip<'a>(
+    dot: &'static str,
+    dot_color: Color,
+    name: &'static str,
+    value: String,
+) -> Element<'a, Message> {
+    Row::new()
+        .push(t!(dot).size(9).color(dot_color))
+        .push(Space::with_width(Length::Units(3)))
+        .push(t!(name).size(9).color(THEME.text_dim))
+        .push(Space::with_width(Length::Units(3)))
+        .push(t!(value).size(9).font(MONO_FONT).color(THEME.text))
+        .align_items(Alignment::Center)
+        .into()
 }
 
 /// Footer-scoped wrap/grid: chunks `items` into a `Column` of `Row`s, `per_row`
