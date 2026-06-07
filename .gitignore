@@ -19,3 +19,6 @@
 
 # Claude Code working memory
 /.claude/.scratchpad/
+
+# Isolated worktrees
+/.worktrees/
