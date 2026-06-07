@@ -4,7 +4,7 @@
 
 - Language: Rust (stable), edition 2021
 - Plugin format: VST3 via `nih-plug` (git, vendored at `vendor/nih-plug`)
-- GUI: `nih-plug-iced` (stateful widget API, 360×280 in VST3 mode, 500×310 with `standalone` feature)
+- GUI: `nih-plug-iced` (stateful widget API, 360×280 in VST3 mode, 500×340 with `standalone` feature)
 - Async/concurrency: `crossbeam-channel` 0.5 (bounded lock-free queues), `parking_lot` 0.12 (uncontended Mutex only), `std::sync::atomic`
 - OSC: `rosc` 0.10 (encoder + decoder)
 - MIDI: `midir` 0.9; macOS: `coremidi` 0.9 + `core-foundation` 0.9
@@ -27,7 +27,7 @@ CI gate: GitHub Actions on `v*` tag push — matrix: macos-latest (universal), w
 
 | Language | LOC | Files | % |
 |----------|-----|-------|---|
-| Rust | 6988 | 14 | 56% |
+| Rust | 6994 | 14 | 56% |
 | Markdown | 3168 | 9 | 25% |
 | Python | 1359 | 3 | 11% |
 | JSON | 345 | 8 | 2% |

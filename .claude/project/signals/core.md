@@ -7,7 +7,7 @@ EtherTap is a zero-audio VST3 plugin (nih-plug, Rust) that bridges DAW BPM to Be
 ## Artifacts
 
 - `src/lib.rs` — plugin struct (`EtherTap`), `Plugin` impl, `process()` audio callback, BPM settle state machine, quantised Hard Reset scheduler, reconnect-sync logic, standalone transport fallback, phase-sync PS1–PS4 bar/time-sig/loop detection
-- `src/params.rs` — `EtherTapParams` (VST3 param block), `SyncMode` enum, persisted config fields; window size conditional: 360×280 in VST3 mode, 500×310 with `standalone` feature
+- `src/params.rs` — `EtherTapParams` (VST3 param block), `SyncMode` enum, persisted config fields; window size conditional: 360×280 in VST3 mode, 500×340 with `standalone` feature
 
 ## CLI code
 

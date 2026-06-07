@@ -1,5 +1,5 @@
 ---
-generated_at: 2026-06-06T12:31:12Z
+generated_at: 2026-06-06T18:33:37Z
 atomic_version: 3.0.1
 ---
 # Deterministic signals
@@ -63,32 +63,35 @@ atomic_version: 3.0.1
 │   └── setup.sh (856cd4c, 74L, 2123ch, 2125B)
 ├── src/ (9)
 │   ├── bin/ (1)
-│   │   └── gui_test.rs (a3fe026, 17L, 558ch, 560B)
-│   ├── editor.rs (dea7b38, 1620L, 70466ch, 75598B)
-│   ├── lib.rs (5bf8068, 996L, 44567ch, 47723B)
-│   ├── midi_clock.rs (22a5735, 756L, 30466ch, 32040B)
-│   ├── midi_watcher.rs (e1619c1, 185L, 7258ch, 7580B)
-│   ├── network.rs (f459bf0, 1051L, 42095ch, 44342B)
+│   │   └── gui_test.rs (a566a3d, 18L, 614ch, 616B)
+│   ├── editor.rs (2c4ca72, 1926L, 85839ch, 91197B)
+│   ├── lib.rs (79859da, 1152L, 53392ch, 56756B)
+│   ├── midi_clock.rs (eded0f0, 806L, 32802ch, 34378B)
+│   ├── midi_watcher.rs (f0e84d8, 187L, 7447ch, 7769B)
+│   ├── network.rs (2fa7ab1, 1062L, 42593ch, 44840B)
 │   ├── osc.rs (8a47c7c, 448L, 16469ch, 17087B)
-│   ├── params.rs (9373623, 157L, 6145ch, 6993B)
+│   ├── params.rs (aca0876, 160L, 6320ch, 7168B)
 │   └── reconnect.rs (1b9bd70, 70L, 1827ch, 1832B)
 ├── tests/ (3)
 │   ├── common/ (1)
-│   │   └── mod.rs (02d76f3, 416L, 14074ch, 14074B)
-│   ├── integration_tests.rs (feef033, 310L, 10937ch, 10937B)
+│   │   └── mod.rs (e412631, 408L, 14056ch, 14062B)
+│   ├── integration_tests.rs (b17163c, 330L, 12106ch, 12112B)
 │   └── osc_tests.rs (5d10aa5, 289L, 10223ch, 10791B)
 ├── xtask/ (2)
 │   ├── src/ (1)
 │   │   └── main.rs (b8a120b, 3L, 63ch, 63B)
 │   └── Cargo.toml (ddf5501, 13L, 262ch, 262B)
 ├── .gitignore (8f4f695, 18L, 191ch, 191B)
-├── CLAUDE.md (28095da, 81L, 3848ch, 3902B)
+├── CLAUDE.md (42973bf, 89L, 3948ch, 4002B)
 ├── Cargo.lock (1d958e6, 3245L, 82806ch, 82806B)
 ├── Cargo.toml (5c389f1, 62L, 1673ch, 1675B)
 ├── LICENSE-APACHE (3141044, 162L, 8806ch, 8806B)
 ├── LICENSE-MIT (1e67820, 21L, 1068ch, 1068B)
 ├── PATCHES.md (66cb7e5, 83L, 3998ch, 4004B)
-└── README.md (ce7857c, 131L, 3821ch, 4507B)
+├── README.md (ce7857c, 131L, 3821ch, 4507B)
+├── architectural_sins.dot (f0f5355, 1270L, 180669ch, 180669B)
+├── project_map.svg (f36995e, 8998L, 680862ch, 680862B)
+└── structural_mess.txt (69cd208, 1270L, 180671ch, 180671B)
 
 ## Manifests
 
@@ -97,10 +100,10 @@ atomic_version: 3.0.1
 
 ## Languages
 
-- Rust: 6453 LOC (54%), 14 files (31%)
-- Markdown: 3160 LOC (26%), 9 files (20%)
+- Rust: 6994 LOC (56%), 14 files (31%)
+- Markdown: 3168 LOC (25%), 9 files (20%)
 - Python: 1359 LOC (11%), 3 files (6%)
 - JSON: 345 LOC (2%), 8 files (18%)
 - Shell: 280 LOC (2%), 7 files (15%)
-- YAML: 118 LOC (1%), 1 file (2%)
+- YAML: 118 LOC (0%), 1 file (2%)
 - TOML: 75 LOC (0%), 2 files (4%)
