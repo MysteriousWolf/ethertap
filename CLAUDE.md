@@ -87,3 +87,9 @@ float_to_bpm(f)   = 20.0 / f
 /fxrtn/{slot}/mix/on  int — 0=mute, 1=unmute
 /info              —      — heartbeat / connectivity probe
 ```
+
+## Documentation surfaces
+
+| Path | Covers | Voice |
+|------|--------|-------|
+| `README.md` | project overview, install, mixer connection / setup | atomic-prose |
