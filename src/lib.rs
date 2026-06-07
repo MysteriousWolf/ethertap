@@ -451,19 +451,21 @@ impl Plugin for EtherTap {
         let pos_beats_raw = transport.pos_beats(); // None when host doesn't report position
         let pos_beats = pos_beats_raw.unwrap_or(0.0);
 
-        // When pos_beats_raw is None we are in standalone mode (dummy audio backend or
-        // a host that doesn't expose transport position).  Use the UI-driven atomics
-        // instead of the transport struct values.  Note: the dummy backend DOES set
-        // transport.tempo, but that value is fixed at startup and unresponsive to the
-        // BPM control; pos_beats is the reliable sentinel.
-        let (bpm, playing) = if pos_beats_raw.is_none() {
+        // In standalone builds always use the UI-driven atomics for BPM and playing.
+        // pos_beats_raw.is_none() cannot be used as a sentinel: Transport::pos_beats()
+        // computes from pos_samples + tempo when both are present, and the dummy backend
+        // sets both, so pos_beats_raw is never None even without a real DAW.
+        // #[cfg(feature = "standalone")] is exact — only the standalone binary enables it,
+        // never the exported VST3.
+        #[cfg(feature = "standalone")]
+        let (bpm, playing) = {
             let raw = f32::from_bits(self.standalone_bpm.load(Ordering::Relaxed)) as f64;
             let b   = if raw.is_finite() && raw > 0.0 { raw } else { 120.0 };
             let p   = self.standalone_playing.load(Ordering::Relaxed);
             (b, p)
-        } else {
-            (transport.tempo.unwrap_or(120.0).max(10.0), transport.playing)
         };
+        #[cfg(not(feature = "standalone"))]
+        let (bpm, playing) = (transport.tempo.unwrap_or(120.0).max(10.0), transport.playing);
 
         // Bar / time-sig metadata for PS1-PS3 phase sync improvements.
         let bar_number    = transport.bar_number().unwrap_or(-1);
@@ -676,7 +678,14 @@ impl Plugin for EtherTap {
 
         // ── 7. MIDI clock output via CoreMIDI virtual source ─────────────────
         if self.params.midi_clock_enabled.load(Ordering::Relaxed) {
+            // Standalone builds always take the tick-accumulator path below —
+            // pos_beats_raw is forced to None so transport-derived beat_start
+            // (computed by the dummy backend from pos_samples + fixed tempo,
+            // see the #[cfg] block above) never drives MIDI clock timing.
+            #[cfg(not(feature = "standalone"))]
             let pos_beats_raw = transport.pos_beats(); // None = no DAW transport
+            #[cfg(feature = "standalone")]
+            let pos_beats_raw: Option<f64> = None;
 
             if let Some(beat_start) = pos_beats_raw {
                 // DAW mode: follow transport position and play state.
@@ -761,10 +770,11 @@ impl Plugin for EtherTap {
                 }
             } else {
                 // Standalone (no DAW transport): derive tick interval from sample count
-                // to avoid Instant::now() syscalls on the audio thread.
-                let standalone_is_playing = self.standalone_playing.load(Ordering::Relaxed);
+                // to avoid Instant::now() syscalls on the audio thread. `playing` is
+                // already sourced from standalone_playing in standalone builds (see
+                // the #[cfg] block above) and from transport.playing otherwise.
                 let buf_len = buffer.samples();
-                if standalone_is_playing && buf_len > 0 {
+                if playing && buf_len > 0 {
                     let beats_this_buf =
                         buf_len as f64 / (transport.sample_rate as f64 * 60.0 / bpm);
                     let raw_pos = f64::from_bits(

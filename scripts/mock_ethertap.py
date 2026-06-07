@@ -71,6 +71,9 @@ _MIXER_LOG_VISIBLE  = 15          # rows shown at once
 _MIXER_STALE_WARN   = 10.0        # seconds without any OSC → yellow
 _MIXER_STALE_DEAD   = 30.0        # seconds without any OSC → red
 
+_BPM_DRIFT_WARN_PCT = 2.0         # |MIDI − OSC| / OSC → yellow "drift"
+_BPM_DRIFT_ERR_PCT  = 5.0         # |MIDI − OSC| / OSC → red "mismatch"
+
 _SPARK              = "▁▂▃▄▅▆▇█"
 
 
@@ -509,14 +512,49 @@ def _svc_badge(running: bool, error: str, label: str, key: str) -> str:
     return f"{dot} [bold]{label}[/bold] {state} [dim]{key}[/dim]"
 
 
+def _bpm_crosscheck() -> str:
+    """Compare the live MIDI clock BPM against the most recently OSC-synced BPM.
+
+    EtherTap should drive both at the same tempo. A drift here means the BPM
+    used for MIDI clock generation and the BPM dispatched to the mixer have
+    fallen out of sync inside the plugin — the kind of bug that's invisible
+    if you only watch one panel at a time.
+    """
+    midi_stats = _midi_compute_stats()
+    midi_bpm   = midi_stats["bpm"] if midi_stats else None
+
+    with _mixer_lock:
+        synced = [
+            (cfg["rx_ts"], cfg["rx_bpm"])
+            for cfg in _mixer_slots.values()
+            if cfg["rx_bpm"] is not None and cfg["rx_ts"] is not None
+        ]
+    osc_bpm = max(synced, key=lambda pair: pair[0])[1] if synced else None
+
+    if midi_bpm is None or osc_bpm is None or midi_bpm <= 0 or osc_bpm <= 0:
+        return "[dim]BPM cross-check: waiting for both sources…[/dim]"
+
+    pct = abs(midi_bpm - osc_bpm) / osc_bpm * 100.0
+    if pct > _BPM_DRIFT_ERR_PCT:
+        color, label = "red",    f"✗ MISMATCH Δ{pct:.1f}%"
+    elif pct > _BPM_DRIFT_WARN_PCT:
+        color, label = "yellow", f"⚠ drift Δ{pct:.1f}%"
+    else:
+        color, label = "green",  "✓ match"
+
+    return (f"BPM cross-check  MIDI [bold]{midi_bpm:.1f}[/bold]  "
+            f"OSC [bold]{osc_bpm:.1f}[/bold]  [{color} bold]{label}[/{color} bold]")
+
+
 # ── Panel builders ────────────────────────────────────────────────────────────
 
 def _build_header() -> Panel:
     midi_b  = _svc_badge(_midi_running,  _midi_error,  "MIDI sink",    "k")
     mixer_b = _svc_badge(_mixer_running, _mixer_error, "Mixer :10023", "m")
     hints   = "[dim]↑↓[/dim] scroll  [dim]r[/dim] latest  [dim]q[/dim] quit"
+    cross   = _bpm_crosscheck()
     return Panel(
-        f"  {midi_b}      {mixer_b}      {hints}",
+        f"  {midi_b}      {mixer_b}      {cross}\n  {hints}",
         box=box.HORIZONTALS,
         padding=(0, 0),
     )
@@ -676,7 +714,7 @@ def _build_mixer_panel() -> Panel:
 def _build_layout() -> Layout:
     layout = Layout()
     layout.split_column(
-        Layout(name="header", size=3),
+        Layout(name="header", size=4),
         Layout(name="body"),
     )
     layout["body"].split_row(
