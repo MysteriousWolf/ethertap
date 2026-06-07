@@ -158,6 +158,10 @@ pub enum ClockMsg {
 
 pub struct MidiClockWorker {
     enabled:          Arc<AtomicBool>,
+    /// When true, auto-pick + connect the first available physical MIDI
+    /// device whenever a port scan finds none currently selected. Mirrors
+    /// the mixer's `connect_to_last` reconnect posture. Default OFF.
+    auto_connect:     Arc<AtomicBool>,
     clock_rx:         Receiver<ClockMsg>,
     device_change_rx: Receiver<Option<String>>,
     device_watch_rx:  Receiver<Vec<String>>,
@@ -174,6 +178,7 @@ impl MidiClockWorker {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         enabled:           Arc<AtomicBool>,
+        auto_connect:      Arc<AtomicBool>,
         clock_rx:          Receiver<ClockMsg>,
         device_change_rx:  Receiver<Option<String>>,
         device_watch_rx:   Receiver<Vec<String>>,
@@ -183,7 +188,7 @@ impl MidiClockWorker {
         clock_stats:       Arc<AtomicClockStats>,
         midi_ppq:          u8,
     ) -> Self {
-        Self { enabled, clock_rx, device_change_rx, device_watch_rx,
+        Self { enabled, auto_connect, clock_rx, device_change_rx, device_watch_rx,
                initial_device, bridge_connected, bridge_connecting, clock_stats, midi_ppq }
     }
 
@@ -533,7 +538,7 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
                     handle_port_scan(
                         &ports_now,
                         &mut known_ports,
-                        &current_device,
+                        &mut current_device,
                         &mut phys_out,
                         &mut phys_in,
                         &mut backoff,
@@ -561,7 +566,7 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
                 handle_port_scan(
                     &ports_now,
                     &mut known_ports,
-                    &current_device,
+                    &mut current_device,
                     &mut phys_out,
                     &mut phys_in,
                     &mut backoff,
@@ -583,7 +588,7 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
 fn handle_port_scan(
     ports_now: &[String],
     known_ports: &mut Vec<String>,
-    current_device: &Option<String>,
+    current_device: &mut Option<String>,
     phys_out: &mut Option<midir::MidiOutputConnection>,
     phys_in: &mut Option<midir::MidiInputConnection<()>>,
     backoff: &mut crate::reconnect::Backoff,
@@ -598,6 +603,21 @@ fn handle_port_scan(
 
     known_ports.clear();
     known_ports.extend_from_slice(ports_now);
+
+    // ── Auto-connect guard: device present, none selected ─────────────────
+    // Mirrors `connect_to_last`'s reconnect posture (params.rs `connect_to_last`).
+    // Only auto-picks when the toggle is explicitly ON — default OFF means
+    // zero behavior change ("no surprise automation", CLAUDE.md).
+    if worker.auto_connect.load(Ordering::Relaxed)
+        && current_device.is_none()
+        && !known_ports.is_empty()
+    {
+        let picked = known_ports[0].clone();
+        log::info!("[EtherTap] handle_port_scan: auto_connect ON, no device selected — \
+                    auto-picking '{picked}'");
+        *current_device = Some(picked);
+        backoff.reset();
+    }
 
     if let Some(ref name) = current_device {
         let present = known_ports.iter().any(|p| p == name);
@@ -791,6 +811,92 @@ mod tests {
         b.record_failure();
         assert!(b.is_cooling_down());
         std::hint::black_box(&b);
+    }
+
+    /// Builds a `MidiClockWorker` with dummy channels/atomics for exercising
+    /// `handle_port_scan` directly — no real MIDI I/O involved.
+    fn make_test_worker(auto_connect: bool) -> MidiClockWorker {
+        let (_clock_tx, clock_rx) = crossbeam_channel::bounded(1);
+        let (_dc_tx, device_change_rx) = crossbeam_channel::bounded(1);
+        let (_dw_tx, device_watch_rx) = crossbeam_channel::bounded(1);
+        MidiClockWorker::new(
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicBool::new(auto_connect)),
+            clock_rx,
+            device_change_rx,
+            device_watch_rx,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicClockStats::default()),
+            24,
+        )
+    }
+
+    /// ON + no device selected + a device is present → auto-pick the first
+    /// available device (mirrors `connect_to_last`'s "device present, none
+    /// selected" guard). The actual `try_connect_out` will fail in CI (no real
+    /// port named "Fake Device 1"), but the auto-pick of `current_device`
+    /// itself is the deterministic, testable signal that the guard fired.
+    #[test]
+    fn handle_port_scan_auto_connect_on_picks_first_device_when_none_selected() {
+        let worker = make_test_worker(true);
+        let mut known_ports: Vec<String> = Vec::new();
+        let mut current_device: Option<String> = None;
+        let mut phys_out = None;
+        let mut phys_in = None;
+        let mut backoff = crate::reconnect::Backoff::new(1000, 10000);
+        let (pass_tx, _pass_rx) = crossbeam_channel::bounded::<Vec<u8>>(16);
+        let pass_drop_count = Arc::new(AtomicU32::new(0));
+
+        handle_port_scan(
+            &["Fake Device 1".to_string(), "Fake Device 2".to_string()],
+            &mut known_ports,
+            &mut current_device,
+            &mut phys_out,
+            &mut phys_in,
+            &mut backoff,
+            &pass_tx,
+            &pass_drop_count,
+            &worker,
+        );
+
+        assert_eq!(
+            current_device,
+            Some("Fake Device 1".to_string()),
+            "auto_connect ON + no device selected must auto-pick the first available device"
+        );
+    }
+
+    /// OFF (default) → zero behavior change: no auto-pick, `current_device`
+    /// stays `None`, connection remains fully manual.
+    #[test]
+    fn handle_port_scan_auto_connect_off_is_a_no_op() {
+        let worker = make_test_worker(false);
+        let mut known_ports: Vec<String> = Vec::new();
+        let mut current_device: Option<String> = None;
+        let mut phys_out = None;
+        let mut phys_in = None;
+        let mut backoff = crate::reconnect::Backoff::new(1000, 10000);
+        let (pass_tx, _pass_rx) = crossbeam_channel::bounded::<Vec<u8>>(16);
+        let pass_drop_count = Arc::new(AtomicU32::new(0));
+
+        handle_port_scan(
+            &["Fake Device 1".to_string(), "Fake Device 2".to_string()],
+            &mut known_ports,
+            &mut current_device,
+            &mut phys_out,
+            &mut phys_in,
+            &mut backoff,
+            &pass_tx,
+            &pass_drop_count,
+            &worker,
+        );
+
+        assert_eq!(
+            current_device, None,
+            "auto_connect OFF must leave device selection untouched — fully manual, no surprise automation"
+        );
     }
 
     #[test]

@@ -78,6 +78,13 @@ pub struct EtherTapParams {
     #[persist = "midi-out-device"]
     pub midi_out_device: Arc<Mutex<Option<String>>>,
 
+    /// When true, auto-pick and connect the first available physical MIDI
+    /// device when none is currently selected (mirrors `connect_to_last`'s
+    /// reconnect posture for the mixer). Default **false** — "no surprise
+    /// automation" (CLAUDE.md): connection stays fully manual until opted in.
+    #[persist = "midi-auto-connect"]
+    pub midi_auto_connect: Arc<AtomicBool>,
+
     // ── Rate Sync mode ───────────────────────────────────────────────────
     /// Controls when a plain delay-time (rate) sync fires.
     /// Default: **OnChange** — sync fires when BPM settles.
@@ -145,6 +152,7 @@ impl Default for EtherTapParams {
             midi_clock_enabled: Arc::new(AtomicBool::new(true)),
             midi_clock_ppq: Arc::new(AtomicU8::new(24_u8)),
             midi_out_device: Arc::new(Mutex::new(None)),
+            midi_auto_connect: Arc::new(AtomicBool::new(false)),
             rate_sync_mode: EnumParam::new("Rate Sync Mode", SyncMode::OnChange),
             phase_sync_mode: EnumParam::new("Phase Sync Mode", SyncMode::Manual),
             connect_to_last: BoolParam::new("Connect to Last", false),

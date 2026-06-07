@@ -279,6 +279,7 @@ impl Default for EtherTap {
         let initial_ppq = params.midi_clock_ppq.load(std::sync::atomic::Ordering::Relaxed);
         let midi_worker = midi_clock::MidiClockWorker::new(
             params.midi_clock_enabled.clone(),
+            params.midi_auto_connect.clone(),
             midi_clock_rx,
             device_change_rx,
             midi_watch.worker_rx,
