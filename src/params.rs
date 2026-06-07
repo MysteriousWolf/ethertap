@@ -139,8 +139,13 @@ impl Default for EtherTapParams {
         Self {
             #[cfg(not(feature = "standalone"))]
             editor_state: IcedState::from_size(360, 280),
+            // Standalone window must fit the pinned 360×280 plugin-content
+            // frame (matching VST3's true `from_size(360, 280)` above) PLUS
+            // the standalone-only transport_row + banner + footer chrome
+            // around it — 340 left the frame clipped/overflowing; 480 gives
+            // that chrome room without the window feeling oversized.
             #[cfg(feature = "standalone")]
-            editor_state: IcedState::from_size(500, 340),
+            editor_state: IcedState::from_size(500, 480),
             target_ip: Arc::new(Mutex::new(if cfg!(feature = "standalone") {
                 "127.0.0.1".to_owned()
             } else {

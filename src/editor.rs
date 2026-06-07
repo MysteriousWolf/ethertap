@@ -1931,7 +1931,16 @@ impl IcedEditor for EtherTapEditor {
                 .push(transport_row)
                 .push(banner)
                 .push(Space::with_height(Length::Units(6)))
-                .push(Container::new(content).width(Length::Fill).height(Length::Fill))
+                .push(
+                    Container::new(
+                        Container::new(content)
+                            .width(Length::Units(360))
+                            .height(Length::Units(280))
+                            .style(ModSection),
+                    )
+                    .width(Length::Fill)
+                    .center_x(),
+                )
                 .push(Space::with_height(Length::Units(6)))
                 .push(footer)
                 .into()
