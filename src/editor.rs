@@ -551,6 +551,8 @@ struct EtherTapEditor {
     btn_fx_type: [button::State; 7],
     // Output clock section — toggle button + PPQ pick list + MIDI out device
     btn_clock_toggle:    button::State,
+    btn_clock_disable:   button::State,
+    btn_midi_auto_connect: button::State,
     pick_ppq:            pick_list::State<u8>,
     /// Available MIDI output port names — first entry is always the sentinel.
     midi_out_ports:      Vec<String>,
@@ -625,6 +627,11 @@ enum Message {
     ToggleFxType(u8),
     /// Toggle MIDI clock output on/off.
     ToggleMidiClock,
+    /// Explicitly turn MIDI clock output off — distinct from the
+    /// connect-trigger button, which conflates enable/connect.
+    DisableMidiClock,
+    /// Toggle the persisted `midi_auto_connect` param.
+    ToggleMidiAutoConnect,
     /// Set MIDI clock pulses per quarter note.
     SetClockPpq(u8),
     /// Open/close the MIDI device picker modal dialog.
@@ -679,6 +686,8 @@ impl IcedEditor for EtherTapEditor {
                 btn_query:        Default::default(),
                 btn_fx_type:      Default::default(),
                 btn_clock_toggle:    Default::default(),
+                btn_clock_disable:   Default::default(),
+                btn_midi_auto_connect: Default::default(),
                 pick_ppq:            Default::default(),
                 midi_out_ports:      vec![MIDI_OUT_NONE.to_string()],
                 show_midi_picker:    false,
@@ -776,6 +785,12 @@ impl IcedEditor for EtherTapEditor {
             }
             Message::ToggleMidiClock => {
                 self.data.params.midi_clock_enabled.fetch_xor(true, Ordering::Relaxed);
+            }
+            Message::DisableMidiClock => {
+                self.data.params.midi_clock_enabled.store(false, Ordering::Relaxed);
+            }
+            Message::ToggleMidiAutoConnect => {
+                self.data.params.midi_auto_connect.fetch_xor(true, Ordering::Relaxed);
             }
             Message::SetClockPpq(ppq) => {
                 self.data.params.midi_clock_ppq.store(ppq, Ordering::Relaxed);
@@ -1459,16 +1474,55 @@ impl IcedEditor for EtherTapEditor {
             BtnKind::Idle
         };
 
-        // Bridge status dot — always visible, matches TX/RX/CK pattern.
-        let (bridge_dot, bridge_color) = if bridge_conn {
-            ("●", THEME.ok)
+        // MIDI clock status ladder — dot+label idiom (mirrors `bridge_status`/
+        // `sync_dot`/`conn_dot`), four distinct states so "is the clock on,
+        // and if so is it actually wired up" is visible at a glance:
+        //   disabled / enabled-but-disconnected / connecting / connected
+        let (bridge_dot, bridge_color, bridge_label) = if !clock_on {
+            ("○", THEME.muted,  "Off")
+        } else if bridge_conn {
+            ("●", THEME.ok,     "Connected")
         } else if bridge_connecting {
-            ("●", THEME.warn)
+            ("●", THEME.warn,   "Connecting")
         } else {
-            ("○", THEME.muted)
+            ("●", THEME.text_dim, "No device")
         };
-        let bridge_status: Element<'_, Message> =
-            t!(bridge_dot).size(10).color(bridge_color).into();
+        let bridge_status: Element<'_, Message> = Row::new()
+            .push(t!(bridge_dot).size(10).color(bridge_color))
+            .push(Space::with_width(Length::Units(3)))
+            .push(t!(bridge_label).size(9).color(THEME.text_dim))
+            .align_items(Alignment::Center)
+            .into();
+
+        // Explicit DISABLE affordance — distinct from the connect-trigger
+        // (`midi_clk_btn` below toggles enable *and* drives connection).
+        // Only meaningfully actionable while the clock is on.
+        let midi_clk_disable_btn: Element<'_, Message> = Button::new(
+            &mut self.btn_clock_disable,
+            t!("Off").size(10),
+        )
+        .on_press(Message::DisableMidiClock)
+        .style(EtherBtn(if clock_on { BtnKind::Idle } else { BtnKind::Disabled }))
+        .padding([4, 8])
+        .into();
+
+        // Persisted `midi_auto_connect` toggle — mirrors `midi_clock_enabled`
+        // wiring (`fetch_xor` on an `Arc<AtomicBool>`), placed alongside the
+        // status ladder per the design doc's framing.
+        let auto_connect_on = self.data.params.midi_auto_connect.load(Ordering::Relaxed);
+        let midi_auto_connect_btn: Element<'_, Message> = Button::new(
+            &mut self.btn_midi_auto_connect,
+            Row::new()
+                .push(t!(if auto_connect_on { "●" } else { "○" }).size(9)
+                    .color(if auto_connect_on { THEME.ok } else { THEME.muted }))
+                .push(Space::with_width(Length::Units(4)))
+                .push(t!("Auto").size(10))
+                .align_items(Alignment::Center),
+        )
+        .on_press(Message::ToggleMidiAutoConnect)
+        .style(EtherBtn(if auto_connect_on { BtnKind::Enabled } else { BtnKind::Idle }))
+        .padding([4, 8])
+        .into();
 
         // MIDI clock output toggle — state-aware text and color.
         let (clk_text, clk_style) = if !clock_on {
@@ -1542,9 +1596,19 @@ impl IcedEditor for EtherTapEditor {
             .padding([4, 6])
             .width(Length::Units(48))
             .style(PpqPickStyle))
-            .push(Space::with_width(Length::Units(4)))
-            .push(bridge_status)
             .spacing(0)
+            .align_items(Alignment::Center);
+
+        // ── MIDI clock status row — status ladder, explicit disable, ──────
+        // and the persisted auto-connect toggle, grouped together so a user
+        // can see *and* control MIDI clock state without hunting (mirrors
+        // the design doc's framing: ladder placed alongside the toggle).
+        let midi_status_row = Row::new()
+            .push(bridge_status)
+            .push(Space::with_width(Length::Fill))
+            .push(midi_auto_connect_btn)
+            .push(Space::with_width(Length::Units(6)))
+            .push(midi_clk_disable_btn)
             .align_items(Alignment::Center);
 
         // ── MIDI clock timing stats (jitter percentiles) ──────────────────
@@ -1688,6 +1752,8 @@ impl IcedEditor for EtherTapEditor {
                     Container::new(
                         Column::new()
                             .push(clock_row)
+                            .push(Space::with_height(3.into()))
+                            .push(midi_status_row)
                             .push(Space::with_height(3.into()))
                             .push(clock_stats_row),
                     )
