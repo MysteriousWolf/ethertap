@@ -468,6 +468,23 @@ impl container::StyleSheet for DawChrome {
     }
 }
 
+/// Thin divider line for the standalone dimension-ruler overlay — a colored
+/// 1-unit-thick bar (horizontal: width Fill / height 1; vertical: the reverse).
+#[cfg(feature = "standalone")]
+struct DimLine;
+#[cfg(feature = "standalone")]
+impl container::StyleSheet for DimLine {
+    fn style(&self) -> container::Style {
+        container::Style {
+            background: Some(Background::Color(THEME.daw_chrome_border)),
+            border_radius: 0.0,
+            border_width: 0.0,
+            border_color: THEME.daw_chrome_border,
+            text_color: None,
+        }
+    }
+}
+
 /// Full-window dark backdrop behind the scan popup.
 struct ModalBackdrop;
 impl container::StyleSheet for ModalBackdrop {
@@ -1956,20 +1973,48 @@ impl IcedEditor for EtherTapEditor {
                 .push(Space::with_height(Length::Units(4)))
                 .push(content);
 
+            let framed_plugin = Container::new(plugin_view)
+                .width(Length::Units(360))
+                .height(Length::Units(280))
+                .style(ModSection);
+
+            // Dimension-ruler overlay: rulers sized to the frame's exact
+            // edges (360 / 280) so they double as a visual cross-check that
+            // the box really does render at true VST3 dimensions. Blank
+            // spacers mirror the ruler gutters on the opposite edges so the
+            // framed box sits dead-center of the assembly — and therefore
+            // dead-center of the DAW shell once the assembly itself is
+            // centered below.
+            const RULER_GUTTER: u16 = 40;
+            let dimensioned_frame = Column::new()
+                .push(
+                    Row::new()
+                        .push(Space::new(Length::Units(RULER_GUTTER), Length::Units(1)))
+                        .push(Space::with_width(Length::Units(4)))
+                        .push(dim_ruler_h(360, "360px".to_string()))
+                        .push(Space::with_width(Length::Units(4)))
+                        .push(Space::new(Length::Units(RULER_GUTTER), Length::Units(1))),
+                )
+                .push(Space::with_height(Length::Units(4)))
+                .push(
+                    Row::new()
+                        .push(dim_ruler_v(280, "280px".to_string()))
+                        .push(Space::with_width(Length::Units(4)))
+                        .push(framed_plugin)
+                        .push(Space::with_width(Length::Units(4)))
+                        .push(Space::new(Length::Units(RULER_GUTTER), Length::Units(280)))
+                        .align_items(Alignment::Center),
+                );
+
             Column::new()
                 .push(transport_row)
-                .push(Space::with_height(Length::Units(6)))
                 .push(
-                    Container::new(
-                        Container::new(plugin_view)
-                            .width(Length::Units(360))
-                            .height(Length::Units(280))
-                            .style(ModSection),
-                    )
-                    .width(Length::Fill)
-                    .center_x(),
+                    Container::new(dimensioned_frame)
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .center_x()
+                        .center_y(),
                 )
-                .push(Space::with_height(Length::Fill))
                 .push(footer)
                 .height(Length::Fill)
                 .into()
@@ -2060,6 +2105,50 @@ fn wrap_rows<'a>(items: Vec<Element<'a, Message>>, per_row: usize) -> Column<'a,
     }
 
     rows
+}
+
+/// Horizontal dimension ruler — `─── 360px ───`, spanning exactly `width`
+/// units so it lines up with the framed VST box's edge. Drawn in the DAW
+/// shell above the box to surface the host-rendered plugin's true pixel
+/// dimensions ("more data on the actual VST" — not guessable from the
+/// screenshot alone).
+#[cfg(feature = "standalone")]
+fn dim_ruler_h<'a>(width: u16, label: String) -> Element<'a, Message> {
+    let line = || {
+        Container::new(Space::new(Length::Fill, Length::Units(1)))
+            .width(Length::Fill)
+            .style(DimLine)
+    };
+    Row::new()
+        .push(line())
+        .push(Space::with_width(Length::Units(4)))
+        .push(t!(label).size(8).color(THEME.daw_chrome_border))
+        .push(Space::with_width(Length::Units(4)))
+        .push(line())
+        .width(Length::Units(width))
+        .align_items(Alignment::Center)
+        .into()
+}
+
+/// Vertical counterpart to [`dim_ruler_h`] — spans `height` units alongside
+/// the framed box. Label stays upright (no text rotation in this iced API).
+#[cfg(feature = "standalone")]
+fn dim_ruler_v<'a>(height: u16, label: String) -> Element<'a, Message> {
+    let line = || {
+        Container::new(Space::new(Length::Units(1), Length::Fill))
+            .height(Length::Fill)
+            .style(DimLine)
+    };
+    Column::new()
+        .push(line())
+        .push(Space::with_height(Length::Units(4)))
+        .push(t!(label).size(8).color(THEME.daw_chrome_border))
+        .push(Space::with_height(Length::Units(4)))
+        .push(line())
+        .width(Length::Units(40))
+        .height(Length::Units(height))
+        .align_items(Alignment::Center)
+        .into()
 }
 
 // ─── Style utility ────────────────────────────────────────────────────────────
