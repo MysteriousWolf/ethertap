@@ -187,8 +187,8 @@ impl Theme {
             inset_bg:        rgb( 10,  10,  14),
 
             // ── Standalone DAW-shell chrome ─────────────────────────────────
-            daw_chrome_bg:     rgb( 16,  24,  36),  // cool navy-charcoal
-            daw_chrome_border: rgb( 44,  68,  96),  // cool blue-gray edge
+            daw_chrome_bg:     rgb( 58,  58,  60),  // Asiimov gunmetal gray
+            daw_chrome_border: rgb(232, 119,  34),  // Asiimov signature orange
         }
     }
 }
