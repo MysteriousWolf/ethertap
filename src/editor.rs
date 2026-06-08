@@ -12,7 +12,7 @@ use std::sync::{
     Arc,
 };
 
-use nih_plug::prelude::{GuiContext, ParamSetter};
+use nih_plug::prelude::{GuiContext, Param, ParamSetter};
 use nih_plug_iced::{
     button, container, create_iced_editor, executor, pick_list, text_input,
     widget::{tooltip, Button, Column, Container, PickList, Row, Space, Text, TextInput},
@@ -1869,31 +1869,6 @@ impl IcedEditor for EtherTapEditor {
             .padding([4, 10])
             .style(DawChrome);
 
-            // ── Full-width param footer: all 10 EtherTapParams #[id] fields +
-            // 2 connection facts (target IP:port, hw BPM — already computed
-            // above for telem_row/the former daw_panel STATUS section). ──────
-            let connect_to_last_v = self.data.params.connect_to_last.value();
-            let disconnect_v      = self.data.params.disconnect.value();
-            let force_sync_rate_v  = self.data.params.force_sync_rate.value();
-            let force_sync_phase_v = self.data.params.force_sync_phase.value();
-            let force_sync_both_v  = self.data.params.force_sync_both.value();
-            let force_sync_legacy_v = self.data.params.force_sync.value();
-            let is_connected_v = self.data.params.is_connected.value();
-            let is_matched_v   = self.data.params.is_matched.value();
-
-            let bool_dot = |b: bool| if b { ("\u{25cf}", THEME.ok) } else { ("\u{25cb}", THEME.muted) };
-
-            let (conn_dot, conn_col)   = if is_connected_v { ("\u{25cf}", THEME.ok) } else { ("\u{25cb}", THEME.err) };
-            let (match_dot, match_col) = if is_matched_v   { ("\u{25cf}", THEME.ok) } else { ("\u{25cb}", THEME.text_dim) };
-            let (ctl_dot, ctl_col)     = bool_dot(connect_to_last_v);
-            let (disc_dot, disc_col)   = bool_dot(disconnect_v);
-            let (fsr_dot, fsr_col)     = bool_dot(force_sync_rate_v);
-            let (fsp_dot, fsp_col)     = bool_dot(force_sync_phase_v);
-            let (fsb_dot, fsb_col)     = bool_dot(force_sync_both_v);
-            let (fsl_dot, fsl_col)     = bool_dot(force_sync_legacy_v);
-
-            let bool_str = |b: bool| if b { "on".to_string() } else { "off".to_string() };
-
             // RATE / PHASE sync mode chips: interactive (sync_btn/force_icon_btn,
             // resuming the btn_daw_* button states 2a left for this purpose).
             let rate_chip: Element<'_, Message> = Row::new()
@@ -1930,26 +1905,37 @@ impl IcedEditor for EtherTapEditor {
                 .align_items(Alignment::Center)
                 .into();
 
-            let footer_items: Vec<Element<'_, Message>> = vec![
+            // Direct dump of the plugin's #[id] params, exactly as the host
+            // sees them (`Param::name()` / `Param::to_string()` — the same
+            // generic Display nih-plug uses for its own host-facing strings,
+            // not a bespoke label/icon/on-off scheme tailored to EtherTap).
+            // Grouped by direction so the split tracks the param list itself —
+            // add or remove a param here and the footer follows, no per-param
+            // styling code to maintain.
+            let inputs: Vec<Element<'_, Message>> = vec![
                 rate_chip,
                 phase_chip,
-                param_chip(ctl_dot,  ctl_col,  "connect_to_last",  bool_str(connect_to_last_v)),
-                param_chip(disc_dot, disc_col, "disconnect",       bool_str(disconnect_v)),
-                param_chip(fsr_dot,  fsr_col,  "force_sync_rate",  bool_str(force_sync_rate_v)),
-                param_chip(fsp_dot,  fsp_col,  "force_sync_phase", bool_str(force_sync_phase_v)),
-                param_chip(fsb_dot,  fsb_col,  "force_sync_both",  bool_str(force_sync_both_v)),
-                param_chip(fsl_dot,  fsl_col,  "force_sync",       bool_str(force_sync_legacy_v)),
-                param_chip(conn_dot,  conn_col,  "is_connected", bool_str(is_connected_v)),
-                param_chip(match_dot, match_col, "is_matched",   bool_str(is_matched_v)),
-                param_chip("\u{25cf}", THEME.text_dim, "target", format!("{}:{}", target_ip, target_port)),
-                param_chip("\u{25cf}", THEME.text_dim, "hw bpm", if has_hw { format!("{:.1}", hw_bpm) } else { "--.-".to_string() }),
+                raw_param_chip(self.data.params.connect_to_last.name(),  self.data.params.connect_to_last.to_string()),
+                raw_param_chip(self.data.params.disconnect.name(),       self.data.params.disconnect.to_string()),
+                raw_param_chip(self.data.params.force_sync_rate.name(),  self.data.params.force_sync_rate.to_string()),
+                raw_param_chip(self.data.params.force_sync_phase.name(), self.data.params.force_sync_phase.to_string()),
+                raw_param_chip(self.data.params.force_sync_both.name(),  self.data.params.force_sync_both.to_string()),
+                raw_param_chip(self.data.params.force_sync.name(),       self.data.params.force_sync.to_string()),
+            ];
+            let outputs: Vec<Element<'_, Message>> = vec![
+                raw_param_chip(self.data.params.is_connected.name(), self.data.params.is_connected.to_string()),
+                raw_param_chip(self.data.params.is_matched.name(),   self.data.params.is_matched.to_string()),
             ];
 
             let footer = Container::new(
                 Column::new()
-                    .push(t!("DAW I/O").size(9).color(THEME.accent))
+                    .push(t!("INPUTS \u{2192} plugin").size(9).color(THEME.accent))
                     .push(Space::with_height(Length::Units(4)))
-                    .push(wrap_rows(footer_items, 4))
+                    .push(wrap_rows(inputs, 4))
+                    .push(Space::with_height(Length::Units(6)))
+                    .push(t!("OUTPUTS \u{2192} host").size(9).color(THEME.accent))
+                    .push(Space::with_height(Length::Units(4)))
+                    .push(wrap_rows(outputs, 4))
                     .padding([5, 6])
                     .spacing(2)
                     .width(Length::Fill),
@@ -2034,21 +2020,17 @@ fn force_icon_btn(state: &mut button::State, msg: Message) -> Button<'_, Message
     .padding([4, 8])
 }
 
-/// Footer-scoped param chip: dot + name + value, mirroring the
-/// `bridge_status`/`sync_dot`/`conn_dot` dot+label idiom used elsewhere in
-/// this editor. One chip = one `#[id]`-tagged param or connection fact.
+/// Footer-scoped raw param chip: `<name> <value>`, both pulled straight from
+/// `Param::name()` / `Param::to_string()` — nih-plug's own generic host-facing
+/// representation (e.g. `BoolParam::to_string()` -> "On"/"Off"). No bespoke
+/// label text, dot icon, or value-string mapping: whatever a host's generic
+/// param inspector would show, this shows — so the list tracks the param
+/// struct automatically as params are added, renamed, or removed.
 #[cfg(feature = "standalone")]
-fn param_chip<'a>(
-    dot: &'static str,
-    dot_color: Color,
-    name: &'static str,
-    value: String,
-) -> Element<'a, Message> {
+fn raw_param_chip<'a>(name: &str, value: String) -> Element<'a, Message> {
     Row::new()
-        .push(t!(dot).size(9).color(dot_color))
-        .push(Space::with_width(Length::Units(3)))
-        .push(t!(name).size(9).color(THEME.text_dim))
-        .push(Space::with_width(Length::Units(3)))
+        .push(t!(name.to_string()).size(9).color(THEME.text_dim))
+        .push(Space::with_width(Length::Units(4)))
         .push(t!(value).size(9).font(MONO_FONT).color(THEME.text))
         .align_items(Alignment::Center)
         .into()
