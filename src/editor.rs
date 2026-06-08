@@ -121,6 +121,13 @@ struct Theme {
     // ── Inset surfaces (recessed text inputs, sunken panels) ─────────────
     inset_border:    Color, // border for recessed elements
     inset_bg:        Color, // background for recessed elements
+
+    // ── Standalone DAW-shell chrome (test harness only, never shipped) ───
+    // Deliberately cool-toned (blue-gray) against the warm-neutral VST
+    // palette above, so the framed 360×280 box reads at a glance as "this
+    // is what the host renders" vs. "this is scaffolding we built around it".
+    daw_chrome_bg:     Color, // transport row / DAW I/O footer background
+    daw_chrome_border: Color, // border for DAW-shell panels
 }
 
 const fn rgb(r: u8, g: u8, b: u8) -> Color {
@@ -178,6 +185,10 @@ impl Theme {
             // ── Inset surfaces ──────────────────────────────────────────────
             inset_border:    rgb( 22,  22,  30),
             inset_bg:        rgb( 10,  10,  14),
+
+            // ── Standalone DAW-shell chrome ─────────────────────────────────
+            daw_chrome_bg:     rgb( 16,  24,  36),  // cool navy-charcoal
+            daw_chrome_border: rgb( 44,  68,  96),  // cool blue-gray edge
         }
     }
 }
@@ -433,6 +444,25 @@ impl container::StyleSheet for ModSection {
             border_radius: BORDER_RADIUS,
             border_width: 1.0,
             border_color: THEME.section_border,
+            text_color: None,
+        }
+    }
+}
+
+/// Standalone DAW-shell chrome — transport row + "DAW I/O" footer panel.
+/// Deliberately cool-toned against `ModSection`/`BannerBg`'s warm neutrals so
+/// the framed 360×280 box reads at a glance as "real plugin content" vs.
+/// "test-harness scaffolding we built around it".
+#[cfg(feature = "standalone")]
+struct DawChrome;
+#[cfg(feature = "standalone")]
+impl container::StyleSheet for DawChrome {
+    fn style(&self) -> container::Style {
+        container::Style {
+            background: Some(Background::Color(THEME.daw_chrome_bg)),
+            border_radius: BORDER_RADIUS,
+            border_width: 1.0,
+            border_color: THEME.daw_chrome_border,
             text_color: None,
         }
     }
@@ -1837,7 +1867,7 @@ impl IcedEditor for EtherTapEditor {
                     .align_items(Alignment::Center),
             )
             .padding([4, 10])
-            .style(BannerBg);
+            .style(DawChrome);
 
             // ── Full-width param footer: all 10 EtherTapParams #[id] fields +
             // 2 connection facts (target IP:port, hw BPM — already computed
@@ -1925,7 +1955,7 @@ impl IcedEditor for EtherTapEditor {
                     .width(Length::Fill),
             )
             .width(Length::Fill)
-            .style(ModSection);
+            .style(DawChrome);
 
             // The framed 360×280 box must contain *exactly* what a real VST3
             // host renders — banner (edge-to-edge) above content, same as the
