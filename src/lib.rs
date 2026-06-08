@@ -368,6 +368,23 @@ impl Plugin for EtherTap {
     const EMAIL: &'static str = "";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
+    // VST3/CLAP hosts see a bus-less layout (EtherTap is a MIDI/OSC control
+    // surface — it never reads or writes audio buffers). The standalone CPAL
+    // backend, however, refuses to open a device with 0 channels (it filters
+    // host configs for `channels == main_output_channels.unwrap_or_default()`
+    // and errors with "device does not support 0 audio channels"), forcing a
+    // fallback to the dummy backend whose self-paced loop doesn't track wall
+    // clock precisely enough for sample-accurate MIDI clock generation. So the
+    // standalone binary declares a silent stereo passthrough purely to give
+    // CPAL a real device to drive `process()` from a hardware clock.
+    #[cfg(feature = "standalone")]
+    const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[AudioIOLayout {
+        main_input_channels: Some(new_nonzero_u32(2)),
+        main_output_channels: Some(new_nonzero_u32(2)),
+        ..AudioIOLayout::const_default()
+    }];
+
+    #[cfg(not(feature = "standalone"))]
     const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[AudioIOLayout {
         main_input_channels: None,
         main_output_channels: None,
