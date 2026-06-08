@@ -1983,8 +1983,9 @@ impl IcedEditor for EtherTapEditor {
                     .width(Length::Fill)
                     .center_x(),
                 )
-                .push(Space::with_height(Length::Units(6)))
+                .push(Space::with_height(Length::Fill))
                 .push(footer)
+                .height(Length::Fill)
                 .into()
         };
 
