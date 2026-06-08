@@ -30,19 +30,7 @@
     "cwd": "$ZED_WORKTREE_ROOT",
   },
   {
-    "label": "Run: Mock mixer",
-    "command": "uv",
-    "args": ["run", "scripts/mock_mixer.py"],
-    "cwd": "$ZED_WORKTREE_ROOT",
-  },
-  {
-    "label": "Run: Mock MIDI sink",
-    "command": "uv",
-    "args": ["run", "scripts/mock_midi_sink.py"],
-    "cwd": "$ZED_WORKTREE_ROOT",
-  },
-  {
-    "label": "Run: GUI test",
+    "label": "Run: Standalone (VST engine)",
     "command": "bash",
     "args": ["scripts/gui_test.sh"],
     "cwd": "$ZED_WORKTREE_ROOT",

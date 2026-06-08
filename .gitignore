@@ -22,3 +22,6 @@
 
 # Isolated worktrees
 /.worktrees/
+
+# Python bytecode (uv-run mock scripts)
+__pycache__/
