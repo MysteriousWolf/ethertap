@@ -1760,7 +1760,7 @@ impl IcedEditor for EtherTapEditor {
                 )
                 .style(ModSection),
             )
-            .push(Space::with_height(Length::Units(5)))
+            .push(Space::with_height(Length::Units(3)))
             .push(t!("EFFECTS").size(9).color(THEME.text_dim))
             .push(
                 Container::new(
@@ -1775,7 +1775,7 @@ impl IcedEditor for EtherTapEditor {
                 )
                 .style(ModSection),
             )
-            .push(Space::with_height(Length::Units(5)))
+            .push(Space::with_height(Length::Units(3)))
             .push(t!("MIDI").size(9).color(THEME.text_dim))
             .push(
                 Container::new(
@@ -1792,7 +1792,7 @@ impl IcedEditor for EtherTapEditor {
                 )
                 .style(ModSection),
             )
-            .push(Space::with_height(Length::Units(5)))
+            .push(Space::with_height(Length::Units(3)))
             .push(t!("SYNC").size(9).color(THEME.text_dim))
             .push(
                 Container::new(
@@ -1802,7 +1802,7 @@ impl IcedEditor for EtherTapEditor {
                 )
                 .style(ModSection),
             )
-            .padding([0, 4, 5, 4])
+            .padding([0, 4, 3, 4])
             .spacing(0);
 
         // ── Standalone DAW frame (compiled only with --features standalone) ──
@@ -1967,7 +1967,7 @@ impl IcedEditor for EtherTapEditor {
             // header look like part of the DAW shell instead of its content.
             let plugin_view = Column::new()
                 .push(banner)
-                .push(Space::with_height(Length::Units(6)))
+                .push(Space::with_height(Length::Units(4)))
                 .push(content);
 
             Column::new()
