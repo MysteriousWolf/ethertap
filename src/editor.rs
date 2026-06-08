@@ -598,7 +598,6 @@ struct EtherTapEditor {
     btn_fx_type: [button::State; 7],
     // Output clock section — toggle button + PPQ pick list + MIDI out device
     btn_clock_toggle:    button::State,
-    btn_clock_disable:   button::State,
     btn_midi_auto_connect: button::State,
     pick_ppq:            pick_list::State<u8>,
     /// Available MIDI output port names — first entry is always the sentinel.
@@ -674,9 +673,6 @@ enum Message {
     ToggleFxType(u8),
     /// Toggle MIDI clock output on/off.
     ToggleMidiClock,
-    /// Explicitly turn MIDI clock output off — distinct from the
-    /// connect-trigger button, which conflates enable/connect.
-    DisableMidiClock,
     /// Toggle the persisted `midi_auto_connect` param.
     ToggleMidiAutoConnect,
     /// Set MIDI clock pulses per quarter note.
@@ -733,7 +729,6 @@ impl IcedEditor for EtherTapEditor {
                 btn_query:        Default::default(),
                 btn_fx_type:      Default::default(),
                 btn_clock_toggle:    Default::default(),
-                btn_clock_disable:   Default::default(),
                 btn_midi_auto_connect: Default::default(),
                 pick_ppq:            Default::default(),
                 midi_out_ports:      vec![MIDI_OUT_NONE.to_string()],
@@ -832,9 +827,6 @@ impl IcedEditor for EtherTapEditor {
             }
             Message::ToggleMidiClock => {
                 self.data.params.midi_clock_enabled.fetch_xor(true, Ordering::Relaxed);
-            }
-            Message::DisableMidiClock => {
-                self.data.params.midi_clock_enabled.store(false, Ordering::Relaxed);
             }
             Message::ToggleMidiAutoConnect => {
                 self.data.params.midi_auto_connect.fetch_xor(true, Ordering::Relaxed);
@@ -1541,18 +1533,6 @@ impl IcedEditor for EtherTapEditor {
             .align_items(Alignment::Center)
             .into();
 
-        // Explicit DISABLE affordance — distinct from the connect-trigger
-        // (`midi_clk_btn` below toggles enable *and* drives connection).
-        // Only meaningfully actionable while the clock is on.
-        let midi_clk_disable_btn: Element<'_, Message> = Button::new(
-            &mut self.btn_clock_disable,
-            t!("Off").size(10),
-        )
-        .on_press(Message::DisableMidiClock)
-        .style(EtherBtn(if clock_on { BtnKind::Idle } else { BtnKind::Disabled }))
-        .padding([4, 8])
-        .into();
-
         // Persisted `midi_auto_connect` toggle — mirrors `midi_clock_enabled`
         // wiring (`fetch_xor` on an `Arc<AtomicBool>`), placed alongside the
         // status ladder per the design doc's framing.
@@ -1646,16 +1626,16 @@ impl IcedEditor for EtherTapEditor {
             .spacing(0)
             .align_items(Alignment::Center);
 
-        // ── MIDI clock status row — status ladder, explicit disable, ──────
-        // and the persisted auto-connect toggle, grouped together so a user
-        // can see *and* control MIDI clock state without hunting (mirrors
-        // the design doc's framing: ladder placed alongside the toggle).
+        // ── MIDI clock status row — status ladder and the persisted ───────
+        // auto-connect toggle, grouped together so a user can see *and*
+        // control MIDI clock state without hunting (mirrors the design
+        // doc's framing: ladder placed alongside the toggle). The on/off
+        // toggle itself lives in `midi_clk_btn` (it both enables and
+        // disables — pressing it while active turns the clock off).
         let midi_status_row = Row::new()
             .push(bridge_status)
             .push(Space::with_width(Length::Fill))
             .push(midi_auto_connect_btn)
-            .push(Space::with_width(Length::Units(6)))
-            .push(midi_clk_disable_btn)
             .align_items(Alignment::Center);
 
         // ── MIDI clock timing stats (jitter percentiles) ──────────────────
