@@ -123,11 +123,14 @@ struct Theme {
     inset_bg:        Color, // background for recessed elements
 
     // ── Standalone DAW-shell chrome (test harness only, never shipped) ───
-    // Deliberately cool-toned (blue-gray) against the warm-neutral VST
-    // palette above, so the framed 360×280 box reads at a glance as "this
-    // is what the host renders" vs. "this is scaffolding we built around it".
-    daw_chrome_bg:     Color, // transport row / DAW I/O footer background
-    daw_chrome_border: Color, // border for DAW-shell panels
+    // A separate *light* Asiimov-style (CS:GO skin) palette — white/cream
+    // base, gunmetal-gray secondary text, signature-orange accents — chosen
+    // to read as a wholly different host application surrounding the dark
+    // VST box, not a re-skin of the plugin's own dark palette.
+    daw_chrome_bg:       Color, // transport row / DAW I/O footer background
+    daw_chrome_border:   Color, // panel border + accent (Asiimov orange)
+    daw_chrome_text:     Color, // primary text on the light chrome surface
+    daw_chrome_text_dim: Color, // secondary/label text on the light chrome surface
 }
 
 const fn rgb(r: u8, g: u8, b: u8) -> Color {
@@ -187,8 +190,10 @@ impl Theme {
             inset_bg:        rgb( 10,  10,  14),
 
             // ── Standalone DAW-shell chrome ─────────────────────────────────
-            daw_chrome_bg:     rgb( 58,  58,  60),  // Asiimov gunmetal gray
-            daw_chrome_border: rgb(232, 119,  34),  // Asiimov signature orange
+            daw_chrome_bg:       rgb(236, 233, 227),  // Asiimov off-white/cream base
+            daw_chrome_border:   rgb(232, 119,  34),  // Asiimov signature orange
+            daw_chrome_text:     rgb( 46,  46,  48),  // near-black charcoal body text
+            daw_chrome_text_dim: rgb(132, 128, 122),  // warm gunmetal-gray secondary text
         }
     }
 }
@@ -1832,7 +1837,7 @@ impl IcedEditor for EtherTapEditor {
                         .padding([3, 7]),
                     )
                     .push(Space::with_width(Length::Units(8)))
-                    .push(t!("BPM").size(9).color(THEME.text_dim))
+                    .push(t!("BPM").size(9).color(THEME.daw_chrome_text_dim))
                     .push(Space::with_width(Length::Units(4)))
                     .push(
                         TextInput::new(
@@ -1859,7 +1864,7 @@ impl IcedEditor for EtherTapEditor {
                         t!(format!("\u{25ce} {:.2}", sa_pos))
                             .size(9)
                             .font(MONO_FONT)
-                            .color(THEME.text_dim),
+                            .color(THEME.daw_chrome_text_dim),
                     )
                     .align_items(Alignment::Center),
             )
@@ -1869,7 +1874,7 @@ impl IcedEditor for EtherTapEditor {
             // RATE / PHASE sync mode chips: interactive (sync_btn/force_icon_btn,
             // resuming the btn_daw_* button states 2a left for this purpose).
             let rate_chip: Element<'_, Message> = Row::new()
-                .push(t!("rate_sync_mode").size(9).color(THEME.text_dim))
+                .push(t!("rate_sync_mode").size(9).color(THEME.daw_chrome_text_dim))
                 .push(Space::with_width(Length::Units(4)))
                 .push(sync_btn(&mut self.btn_daw_rate_manual, "Man",
                     rate_mode == SyncMode::Manual,
@@ -1886,7 +1891,7 @@ impl IcedEditor for EtherTapEditor {
                 .into();
 
             let phase_chip: Element<'_, Message> = Row::new()
-                .push(t!("phase_sync_mode").size(9).color(THEME.text_dim))
+                .push(t!("phase_sync_mode").size(9).color(THEME.daw_chrome_text_dim))
                 .push(Space::with_width(Length::Units(4)))
                 .push(sync_btn(&mut self.btn_daw_phase_manual, "Man",
                     phase_mode == SyncMode::Manual,
@@ -1926,11 +1931,11 @@ impl IcedEditor for EtherTapEditor {
 
             let footer = Container::new(
                 Column::new()
-                    .push(t!("INPUTS \u{2192} plugin").size(9).color(THEME.accent))
+                    .push(t!("INPUTS \u{2192} plugin").size(9).color(THEME.daw_chrome_border))
                     .push(Space::with_height(Length::Units(4)))
                     .push(wrap_rows(inputs, 4))
                     .push(Space::with_height(Length::Units(6)))
-                    .push(t!("OUTPUTS \u{2192} host").size(9).color(THEME.accent))
+                    .push(t!("OUTPUTS \u{2192} host").size(9).color(THEME.daw_chrome_border))
                     .push(Space::with_height(Length::Units(4)))
                     .push(wrap_rows(outputs, 4))
                     .padding([5, 6])
@@ -2054,9 +2059,9 @@ fn force_icon_btn(state: &mut button::State, msg: Message) -> Button<'_, Message
 #[cfg(feature = "standalone")]
 fn raw_param_chip<'a>(name: &str, value: String) -> Element<'a, Message> {
     Row::new()
-        .push(t!(name.to_string()).size(9).color(THEME.text_dim))
+        .push(t!(name.to_string()).size(9).color(THEME.daw_chrome_text_dim))
         .push(Space::with_width(Length::Units(4)))
-        .push(t!(value).size(9).font(MONO_FONT).color(THEME.text))
+        .push(t!(value).size(9).font(MONO_FONT).color(THEME.daw_chrome_text))
         .align_items(Alignment::Center)
         .into()
 }
