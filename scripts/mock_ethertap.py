@@ -11,9 +11,10 @@ Combined EtherTap mock suite — MIDI clock sink + X32/M32 mixer in one TUI.
 
 Both services start automatically.  Toggle each independently at runtime:
 
-  k      toggle MIDI clock sink   (virtual port "EtherTap Mock MIDI Sink")
+  c      toggle MIDI clock sink   (virtual port "EtherTap Mock MIDI Sink")
   m      toggle mock mixer        (UDP OSC server, port 10023)
-  ↑ / ↓  scroll mixer message log
+  Tab    switch focused panel     (narrow terminals only — panels stack)
+  k / j  scroll mixer message log (vim-style: k=up/older, j=down/newer)
   r      jump to latest (unpin scroll)
   q      quit
 
@@ -26,6 +27,7 @@ from __future__ import annotations
 import copy
 import re
 import select
+import shutil
 import socket
 import statistics
 import struct
@@ -44,6 +46,7 @@ except ImportError:
 
 try:
     from rich import box
+    from rich.align import Align
     from rich.console import Group
     from rich.layout import Layout
     from rich.live import Live
@@ -62,19 +65,31 @@ _MIDI_PORT_NAME     = "EtherTap Mock MIDI Sink"
 _MIDI_CPB           = 24          # clocks per beat (MIDI standard)
 _CLOCK_BYTE         = 0xF8
 _MIDI_WINDOW        = 241         # timestamps → 240 intervals = 10 beats
-_MIDI_BPM_HIST      = 60          # beats of BPM history for sparkline
+_MIDI_BPM_HIST      = 180         # beats of BPM history for sparkline (wide enough to fill wide terminals)
 _CLOCK_GAP_WARN     = 2.0         # seconds without a clock → yellow
 _CLOCK_GAP_DEAD     = 8.0         # seconds without a clock → red
 
 _MIXER_LOG_CAP      = 200         # total messages kept in memory
-_MIXER_LOG_VISIBLE  = 15          # rows shown at once
 _MIXER_STALE_WARN   = 10.0        # seconds without any OSC → yellow
 _MIXER_STALE_DEAD   = 30.0        # seconds without any OSC → red
 
 _BPM_DRIFT_WARN_PCT = 2.0         # |MIDI − OSC| / OSC → yellow "drift"
 _BPM_DRIFT_ERR_PCT  = 5.0         # |MIDI − OSC| / OSC → red "mismatch"
 
+_NARROW_COLS        = 120         # terminal width below which panels stack + focus-switch
+_COMPACT_COLS       = 75          # terminal width below which a panel sheds secondary columns
+
 _SPARK              = "▁▂▃▄▅▆▇█"
+
+
+def _term_size() -> tuple[int, int]:
+    sz = shutil.get_terminal_size(fallback=(120, 40))
+    return sz.columns, sz.lines
+
+
+def _pct_of(value: float, base: float) -> str:
+    """Render `value` as a percentage of `base`, dimmed — e.g. jitter vs. mean interval."""
+    return f"[dim]({value / base * 100:.1f}%)[/dim]" if base > 0 else ""
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -395,6 +410,7 @@ def _mixer_toggle() -> None:
 
 _quit             = threading.Event()
 _mixer_log_scroll = 0  # 0 = follow latest; written only from keyboard thread
+_narrow_focus     = 0  # which panel has focus on stacked (narrow) layouts: 0=MIDI, 1=Mixer
 
 
 def _next_char(timeout: float) -> str:
@@ -408,16 +424,15 @@ def _read_key() -> str | None:
         return None
     if ch != "\x1b":
         return ch
-    # Possibly a CSI sequence — grab up to two more bytes quickly.
-    ch2 = _next_char(0.05)
-    if ch2 != "[":
-        return "esc"
-    ch3 = _next_char(0.05)
-    return {"A": "up", "B": "down", "C": "right", "D": "left"}.get(ch3, "esc")
+    # CSI sequences (arrow keys etc.) decode unreliably across terminals —
+    # we don't bind any of them, so just drain and report a bare escape.
+    if _next_char(0.05) == "[":
+        _next_char(0.05)
+    return "esc"
 
 
 def _keyboard_reader() -> None:
-    global _mixer_log_scroll
+    global _mixer_log_scroll, _narrow_focus
     if not sys.stdin.isatty():
         return
     fd  = sys.stdin.fileno()
@@ -430,16 +445,23 @@ def _keyboard_reader() -> None:
                 continue
             if key in ("q", "Q", "\x03", "\x04"):
                 _quit.set()
-            elif key in ("k", "K"):
+            elif key in ("c", "C"):
                 _midi_toggle()
             elif key in ("m", "M"):
                 _mixer_toggle()
-            elif key == "up":
+            elif key in ("k", "K"):
+                # vim-style: k = up (older). Arrow-key CSI detection is
+                # unreliable across terminals — single bytes never are.
                 _mixer_log_scroll += 1
-            elif key == "down":
+            elif key in ("j", "J"):
+                # vim-style: j = down (newer)
                 _mixer_log_scroll = max(0, _mixer_log_scroll - 1)
             elif key in ("r", "R"):
                 _mixer_log_scroll = 0
+            elif key == "\t":
+                # Arrow-key CSI detection is unreliable across terminals — Tab is unambiguous.
+                # Only meaningful on stacked (narrow) layouts — harmless no-op when side-by-side.
+                _narrow_focus ^= 1
     except Exception:
         pass
     finally:
@@ -512,7 +534,7 @@ def _svc_badge(running: bool, error: str, label: str, key: str) -> str:
     return f"{dot} [bold]{label}[/bold] {state} [dim]{key}[/dim]"
 
 
-def _bpm_crosscheck() -> str:
+def _bpm_crosscheck(compact: bool = False) -> str:
     """Compare the live MIDI clock BPM against the most recently OSC-synced BPM.
 
     EtherTap should drive both at the same tempo. A drift here means the BPM
@@ -532,35 +554,54 @@ def _bpm_crosscheck() -> str:
     osc_bpm = max(synced, key=lambda pair: pair[0])[1] if synced else None
 
     if midi_bpm is None or osc_bpm is None or midi_bpm <= 0 or osc_bpm <= 0:
-        return "[dim]BPM cross-check: waiting for both sources…[/dim]"
+        return "[dim]waiting…[/dim]" if compact else "[dim]BPM cross-check: waiting for both sources…[/dim]"
 
     pct = abs(midi_bpm - osc_bpm) / osc_bpm * 100.0
     if pct > _BPM_DRIFT_ERR_PCT:
-        color, label = "red",    f"✗ MISMATCH Δ{pct:.1f}%"
+        color, label = "red",    (f"✗ Δ{pct:.1f}%" if compact else f"✗ MISMATCH Δ{pct:.1f}%")
     elif pct > _BPM_DRIFT_WARN_PCT:
-        color, label = "yellow", f"⚠ drift Δ{pct:.1f}%"
+        color, label = "yellow", (f"⚠ Δ{pct:.1f}%" if compact else f"⚠ drift Δ{pct:.1f}%")
     else:
-        color, label = "green",  "✓ match"
+        color, label = "green",  "✓" if compact else "✓ match"
 
+    if compact:
+        return (f"MIDI [bold]{midi_bpm:.1f}[/bold]/OSC [bold]{osc_bpm:.1f}[/bold] "
+                f"[{color} bold]{label}[/{color} bold]")
     return (f"BPM cross-check  MIDI [bold]{midi_bpm:.1f}[/bold]  "
             f"OSC [bold]{osc_bpm:.1f}[/bold]  [{color} bold]{label}[/{color} bold]")
 
 
 # ── Panel builders ────────────────────────────────────────────────────────────
 
-def _build_header() -> Panel:
-    midi_b  = _svc_badge(_midi_running,  _midi_error,  "MIDI sink",    "k")
-    mixer_b = _svc_badge(_mixer_running, _mixer_error, "Mixer :10023", "m")
-    hints   = "[dim]↑↓[/dim] scroll  [dim]r[/dim] latest  [dim]q[/dim] quit"
-    cross   = _bpm_crosscheck()
+def _build_header(stacked: bool) -> Panel:
+    midi_b  = _svc_badge(_midi_running,  _midi_error,  "MIDI sink" if not stacked else "MIDI", "c")
+    mixer_b = _svc_badge(_mixer_running, _mixer_error, "Mixer :10023" if not stacked else "Mixer", "m")
+    cross   = _bpm_crosscheck(compact=stacked)
     return Panel(
-        f"  {midi_b}      {mixer_b}      {cross}\n  {hints}",
+        f"  {midi_b}   {mixer_b}   {cross}",
         box=box.HORIZONTALS,
         padding=(0, 0),
     )
 
 
-def _build_midi_panel() -> Panel:
+def _build_footer(stacked: bool) -> Panel:
+    """Controls live here so the header stays pure state — per-key hints, plus
+    the panel-switch tabs on stacked layouts (Arrow-key CSI detection is
+    unreliable across terminals; Tab is unambiguous, so that's the only bind)."""
+    if stacked:
+        def tab(label: str, focused: bool) -> str:
+            return f"[reverse bold] {label} [/reverse bold]" if focused else f"[dim] {label} [/dim]"
+        tabs = f"{tab('MIDI', _narrow_focus == 0)} {tab('Mixer', _narrow_focus == 1)}"
+        line = f"  {tabs}  [dim]Tab[/dim] switch   [dim]k/j[/dim] scroll   [dim]r[/dim] latest   [dim]q[/dim] quit"
+    else:
+        line = "  [dim]c[/dim] MIDI   [dim]m[/dim] Mixer   [dim]k/j[/dim] scroll   [dim]r[/dim] latest   [dim]q[/dim] quit"
+    return Panel(line, box=box.HORIZONTALS, padding=(0, 0))
+
+
+_MIDI_GROUPED_MIN_WIDTH = 100  # panel must be at least this wide for the 3-column grouped stat layout
+
+
+def _build_midi_panel(panel_width: int) -> Panel:
     stats               = _midi_compute_stats()
     clock_border, clock_status = _midi_clock_state(stats)
     border  = clock_border if _midi_running else "dim"
@@ -580,41 +621,91 @@ def _build_midi_panel() -> Panel:
         )
 
     bpm_color = {"green": "green", "yellow": "yellow", "red": "red"}.get(clock_border, "white")
+    ago       = time.time() - stats["last_ts"] if stats["last_ts"] else 0.0
+    mean_us   = stats["mean_us"]
+    bpm_hist  = stats["bpm_hist"]
 
-    t = Table(box=box.SIMPLE, show_header=False, padding=(0, 1))
-    t.add_column("Metric", style="bold", min_width=20)
-    t.add_column("Value",  justify="right", min_width=13)
+    def jitter(label: str, key: str, color: str = "yellow") -> tuple[str, str]:
+        return (f"[{color}]{label}[/{color}]", f"{stats[key]:.1f} µs  {_pct_of(stats[key], mean_us)}")
 
-    ago = time.time() - stats["last_ts"] if stats["last_ts"] else 0.0
+    if panel_width < _MIDI_GROUPED_MIN_WIDTH:
+        t = Table(box=box.SIMPLE, show_header=False, padding=(0, 1))
+        t.add_column("Metric", style="bold", min_width=15)
+        t.add_column("Value",  justify="right", min_width=10)
+        t.add_row("BPM",          f"[bold {bpm_color}]{stats['bpm']:.2f}[/bold {bpm_color}]")
+        t.add_row("Clock",        clock_status)
+        t.add_row("Total clocks", str(stats["total_clocks"]))
+        t.add_row("[cyan]Mean interval[/cyan]", f"{mean_us:.1f} µs")
+        t.add_row("[cyan]Std deviation[/cyan]", f"{stats['std_us']:.1f} µs  {_pct_of(stats['std_us'], mean_us)}")
+        t.add_row(*jitter("Jitter p50", "p50"))
+        t.add_row(*jitter("Jitter p95", "p95"))
+        t.add_row(*jitter("Jitter max", "max_jitter", color="red"))
+        t.add_row("Last message", stats["last_hex"] or "—")
+        t.add_row("Received",     f"{ago:.1f}s ago")
+        return Panel(Align(t, vertical="middle"), title=title, border_style=border)
 
-    t.add_row("BPM",               f"[bold {bpm_color}]{stats['bpm']:.2f}[/bold {bpm_color}]")
-    t.add_row("Clock",             clock_status)
-    t.add_row("PPQ (clocks/beat)", str(_MIDI_CPB))
-    t.add_row("Total clocks",      str(stats["total_clocks"]))
-    t.add_row("Window",            f"{stats['sample_count']} intervals")
-    t.add_row("Other MIDI msgs",   str(stats["other_msgs"]))
-    t.add_row("", "")
-    t.add_row("[cyan]Mean interval[/cyan]", f"{stats['mean_us']:.1f} µs")
-    t.add_row("[cyan]Std deviation[/cyan]", f"{stats['std_us']:.1f} µs")
-    t.add_row("", "")
-    t.add_row("[yellow]Jitter p50[/yellow]",  f"{stats['p50']:.1f} µs")
-    t.add_row("[yellow]Jitter p75[/yellow]",  f"{stats['p75']:.1f} µs")
-    t.add_row("[yellow]Jitter p95[/yellow]",  f"{stats['p95']:.1f} µs")
-    t.add_row("[red]Jitter p99[/red]",        f"{stats['p99']:.1f} µs")
-    t.add_row("[red]Jitter max[/red]",        f"{stats['max_jitter']:.1f} µs")
-    t.add_row("", "")
-    t.add_row("Last message", stats["last_hex"] or "—")
-    t.add_row("Received",     f"{ago:.1f}s ago")
+    # Grouped layout: stats split by kind into side-by-side columns so the
+    # panel's width gets used instead of one long thin list down the middle.
+    # Needs ~_MIDI_GROUPED_MIN_WIDTH cols to avoid label truncation.
+    def group(header: str, rows: list[tuple[str, str]]) -> Group:
+        g = Table.grid(padding=(0, 2))
+        g.add_column(style="bold", no_wrap=True)
+        g.add_column(justify="right", no_wrap=True)
+        for row in rows:
+            g.add_row(*row)
+        return Group(Text(header, style="bold underline dim"), g)
 
-    spark = _sparkline(stats["bpm_hist"])
-    hist_row = (
-        Group(t, Text(f"  BPM history  {spark}", no_wrap=True))
-        if spark else t
-    )
-    return Panel(hist_row, title=title, border_style=border)
+    bpm_lo, bpm_hi = (min(bpm_hist), max(bpm_hist)) if len(bpm_hist) > 1 else (None, None)
+    bpm_range = f"{bpm_lo:.1f}–{bpm_hi:.1f}" if bpm_lo is not None else "—"
+
+    clock_grp = group("CLOCK", [
+        ("BPM",     f"[bold {bpm_color}]{stats['bpm']:.2f}[/bold {bpm_color}]"),
+        ("Range",   bpm_range),
+        ("Status",  clock_status),
+        ("Clocks",  str(stats["total_clocks"])),
+        ("PPQ/bt",  str(_MIDI_CPB)),
+        ("Window",  f"{stats['sample_count']} ivl"),
+        ("Other",   str(stats["other_msgs"])),
+    ])
+    timing_grp = group("TIMING", [
+        ("[cyan]Mean[/cyan]",    f"{mean_us:.1f} µs"),
+        ("[cyan]Std dev[/cyan]", f"{stats['std_us']:.1f} µs {_pct_of(stats['std_us'], mean_us)}"),
+        ("Last msg", stats["last_hex"] or "—"),
+        ("Received", f"{ago:.1f}s ago"),
+    ])
+    jitter_grp = group("JITTER", [
+        jitter("p50", "p50"),
+        jitter("p75", "p75"),
+        jitter("p95", "p95"),
+        jitter("p99", "p99", color="red"),
+        jitter("max", "max_jitter", color="red"),
+    ])
+
+    # Natural widths, not ratio/expand — equal-thirds allocation truncates the
+    # longer TIMING labels/values regardless of panel width (Rich measures each
+    # group's no-wrap minimum as ~1 char, so ratio columns starve unevenly).
+    # Sizing each group to its real content keeps every row intact; any
+    # leftover space just trails right of JITTER.
+    groups = Table.grid(padding=(0, 4))
+    groups.add_column()
+    groups.add_column()
+    groups.add_column()
+    groups.add_row(clock_grp, timing_grp, jitter_grp)
+
+    # Sparkline stretches to the panel's actual width — plenty of room on wide
+    # terminals, and `_MIDI_BPM_HIST` is sized to keep it from running dry.
+    spark_width = max(20, panel_width - 22)
+    spark       = _sparkline(bpm_hist, width=spark_width)
+    if spark:
+        spark_line = Text.from_markup(f"  BPM history  {spark}")
+        spark_line.no_wrap = True
+        content = Group(groups, Text(""), Rule(style="dim"), spark_line)
+    else:
+        content = groups
+    return Panel(Align(content, vertical="middle"), title=title, border_style=border)
 
 
-def _build_mixer_panel() -> Panel:
+def _build_mixer_panel(narrow: bool, avail_height: int) -> Panel:
     act_border, act_status = _mixer_activity_state()
     border = act_border if _mixer_running else "dim"
     title  = f"[bold]Mock Mixer  UDP :10023[/bold]  [dim]{_uptime(_mixer_svc_start)}[/dim]"
@@ -633,10 +724,11 @@ def _build_mixer_panel() -> Panel:
     st.add_column("Slot",     justify="right", min_width=4)
     st.add_column("Name",     min_width=5)
     st.add_column("Init BPM", justify="right", min_width=9)
-    st.add_column("Rx BPM",   justify="right", min_width=14)
+    st.add_column("Rx BPM",   justify="right", min_width=14 if narrow else 20)
     st.add_column("Syncs",    justify="right", min_width=5)
-    st.add_column("Last sync",min_width=10)
-    st.add_column("Compat",   justify="center", min_width=6)
+    if not narrow:
+        st.add_column("Last sync", min_width=10)
+        st.add_column("Compat",    justify="center", min_width=6)
 
     for sn, cfg in slots_snap.items():
         is_dly  = cfg["type"] == _DLY
@@ -646,40 +738,51 @@ def _build_mixer_panel() -> Panel:
 
         rx = cfg["rx_bpm"]
         if rx is not None:
-            diff  = rx - cfg["init_bpm"] if cfg["init_bpm"] else None
-            dsuf  = f" ({'+' if diff and diff >= 0 else ''}{diff:.1f})" if diff is not None else ""
+            diff     = rx - cfg["init_bpm"] if cfg["init_bpm"] else None
+            diff_pct = diff / cfg["init_bpm"] * 100.0 if diff is not None and cfg["init_bpm"] else None
+            if diff is not None and diff_pct is not None:
+                sign = "+" if diff >= 0 else ""
+                dsuf = f" ({sign}{diff:.1f} / {sign}{diff_pct:.1f}%)"
+            else:
+                dsuf = ""
             rx_m  = f"[bold green]{rx:.1f}[/bold green][dim]{dsuf}[/dim]"
         else:
             rx_m = "[dim]—[/dim]"
 
-        ago_m = f"[dim]{time.time() - cfg['rx_ts']:.0f}s ago[/dim]" if cfg["rx_ts"] else "[dim]—[/dim]"
-        st.add_row(
+        row = [
             str(sn), name_m, init_m, rx_m,
             str(cfg["rx_count"]) if cfg["rx_count"] else "[dim]0[/dim]",
-            ago_m,
-            "[green]✓[/green]" if is_dly else "[dim]—[/dim]",
-        )
+        ]
+        if not narrow:
+            ago_m = f"[dim]{time.time() - cfg['rx_ts']:.0f}s ago[/dim]" if cfg["rx_ts"] else "[dim]—[/dim]"
+            row += [ago_m, "[green]✓[/green]" if is_dly else "[dim]—[/dim]"]
+        st.add_row(*row)
 
     # ── Message log with scroll ───────────────────────────────────────────
+    # Size the log to whatever vertical room the panel actually has, so it
+    # fills the frame instead of leaving a blank gap below a fixed row count.
+    # Budget: slot-table header + its rows, the rule, and the trailing status line.
+    overhead     = 1 + len(slots_snap) + 1 + 1
+    visible_rows = max(3, avail_height - overhead)
     n      = len(log_full)
-    scroll = min(_mixer_log_scroll, max(0, n - _MIXER_LOG_VISIBLE))
+    scroll = min(_mixer_log_scroll, max(0, n - visible_rows))
 
     if scroll == 0:
-        visible    = log_full[-_MIXER_LOG_VISIBLE:]
-        above      = max(0, n - _MIXER_LOG_VISIBLE)
+        visible    = log_full[-visible_rows:]
+        above      = max(0, n - visible_rows)
         below      = 0
     else:
         end_idx    = n - scroll
-        start_idx  = max(0, end_idx - _MIXER_LOG_VISIBLE)
+        start_idx  = max(0, end_idx - visible_rows)
         visible    = log_full[start_idx:end_idx]
         above      = start_idx
         below      = scroll  # = n - end_idx
 
-    lt = Table(box=box.SIMPLE, show_header=True, header_style="bold", padding=(0, 1))
+    lt = Table(box=box.SIMPLE, show_header=True, header_style="bold", padding=(0, 1), expand=True)
     lt.add_column("Time",        min_width=10, style="dim")
-    lt.add_column("Peer",        min_width=18)
-    lt.add_column("OSC address", min_width=22)
-    lt.add_column("Args")
+    lt.add_column("Peer",        min_width=10 if narrow else 18)
+    lt.add_column("OSC address", min_width=16 if narrow else 22)
+    lt.add_column("Args",        ratio=1, overflow="fold")
 
     for ts_v, peer_s, addr, args in visible:
         t_str = time.strftime("%H:%M:%S", time.localtime(ts_v))
@@ -706,24 +809,48 @@ def _build_mixer_panel() -> Panel:
     if below > 0:
         parts.append(Text(f"  ↓ {below} newer  (↓ or r to follow)", style="yellow"))
     else:
-        parts.append(Text(f"  {act_status}   Messages: {total}", no_wrap=True))
+        status_line = Text.from_markup(f"  {act_status}   Messages: {total}")
+        status_line.no_wrap = True
+        parts.append(status_line)
 
-    return Panel(Group(*parts), title=title, border_style=border)
+    return Panel(Align(Group(*parts), vertical="middle"), title=title, border_style=border)
 
 
 def _build_layout() -> Layout:
+    cols, lines = _term_size()
+    stacked = cols < _NARROW_COLS       # side-by-side panels would wrap into mush below this
+    compact = cols < _COMPACT_COLS      # even one full-width panel needs to shed columns below this
+
     layout = Layout()
     layout.split_column(
-        Layout(name="header", size=4),
+        Layout(name="header", size=3),
         Layout(name="body"),
+        Layout(name="footer", size=3),
     )
-    layout["body"].split_row(
-        Layout(name="midi",  ratio=2),
-        Layout(name="mixer", ratio=3),
-    )
-    layout["header"].update(_build_header())
-    layout["midi"].update(_build_midi_panel())
-    layout["mixer"].update(_build_mixer_panel())
+    layout["header"].update(_build_header(stacked))
+    layout["footer"].update(_build_footer(stacked))
+
+    # Body content height = terminal rows minus header/footer chrome (3 each)
+    # minus the body panel's own top/bottom border — what's left for tables/logs.
+    avail_height = max(3, lines - 3 - 3 - 2)
+
+    if stacked:
+        # Side-by-side becomes unreadable below ~120 cols. Rather than split
+        # the (already short) vertical space between two tall panels — which
+        # just clips both — show one panel at a time, full width and height,
+        # and let Tab switch focus (tabs rendered in the footer).
+        focused = (_build_midi_panel(cols) if _narrow_focus == 0
+                   else _build_mixer_panel(compact, avail_height))
+        layout["body"].update(focused)
+    else:
+        midi_width  = cols * 2 // 5
+        mixer_width = cols - midi_width
+        layout["body"].split_row(
+            Layout(name="midi",  ratio=2),
+            Layout(name="mixer", ratio=3),
+        )
+        layout["midi"].update(_build_midi_panel(midi_width))
+        layout["mixer"].update(_build_mixer_panel(compact, avail_height))
     return layout
 
 
