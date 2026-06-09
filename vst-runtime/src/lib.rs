@@ -50,9 +50,11 @@ impl<P: Plugin> InitContext<P> for HarnessInitContext {
     }
 
     fn execute(&self, _task: P::BackgroundTask) {
-        // The harness does not run a background task executor; tasks scheduled
-        // here are silently dropped, mirroring "no host-side queue" rather than
-        // panicking on a code path real plugins rarely exercise during init.
+        // No background executor in the harness. If a plugin schedules a task
+        // here, it is silently dropped — which will cause silent malfunction if
+        // the task is load-bearing (e.g. spawning a network thread in initialize).
+        // Surface this loudly in debug builds so test authors can catch it early.
+        debug_assert!(false, "BackgroundTask scheduled during initialize() — Harness has no executor; task dropped silently");
     }
 
     fn set_latency_samples(&self, _samples: u32) {}
@@ -76,9 +78,13 @@ impl<P: Plugin> ProcessContext<P> for HarnessProcessContext<'_, P> {
         PluginApi::Standalone
     }
 
-    fn execute_background(&self, _task: P::BackgroundTask) {}
+    fn execute_background(&self, _task: P::BackgroundTask) {
+        debug_assert!(false, "BackgroundTask scheduled during process() — Harness has no executor; task dropped silently");
+    }
 
-    fn execute_gui(&self, _task: P::BackgroundTask) {}
+    fn execute_gui(&self, _task: P::BackgroundTask) {
+        debug_assert!(false, "GUI task scheduled during process() — Harness has no GUI; task dropped silently");
+    }
 
     fn transport(&self) -> &Transport {
         &self.transport
