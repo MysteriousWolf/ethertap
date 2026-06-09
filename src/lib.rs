@@ -36,10 +36,11 @@ pub mod network;
 pub mod osc;
 pub mod reconnect;
 mod params;
+pub use params::EtherTapParams;
 
 use editor::EditorData;
 use network::{NetworkCommand, NetworkStatus, NetworkWorker, now_ms};
-use params::{EtherTapParams, SyncMode};
+use params::SyncMode;
 
 // ─── Timing constants ────────────────────────────────────────────────────────
 
@@ -1020,6 +1021,13 @@ impl EtherTap {
                 let _ = self.cmd_tx.try_send(NetworkCommand::SyncNow { slot, bpm });
             }
         }
+    }
+
+    /// Return a clone of the plugin's `Arc<EtherTapParams>` so integration
+    /// tests can read and write param state via the shared Arc without
+    /// reaching into private fields.
+    pub fn ethertap_params(&self) -> Arc<EtherTapParams> {
+        self.params.clone()
     }
 }
 

@@ -14,8 +14,12 @@
 
 use nih_plug::prelude::{
     AudioIOLayout, AuxiliaryBuffers, Buffer, BufferConfig, InitContext, Plugin, PluginApi,
-    PluginNoteEvent, ProcessContext, ProcessMode, ProcessStatus, Transport,
+    PluginNoteEvent, ProcessContext, ProcessMode,
 };
+/// Re-exported so integration tests can import `ProcessStatus` and `Transport`
+/// from `vst_runtime` without adding a separate `nih_plug` dev-dependency.
+pub use nih_plug::prelude::ProcessStatus;
+pub use nih_plug::prelude::Transport;
 
 /// Drives a single `P: Plugin` instance through its lifecycle headlessly.
 ///
