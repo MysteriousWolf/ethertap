@@ -12,7 +12,7 @@ use std::sync::{
     Arc,
 };
 
-use nih_plug::prelude::{GuiContext, Param, ParamSetter};
+use nih_plug::prelude::{GuiContext, ParamSetter};
 use nih_plug_iced::{
     button, container, create_iced_editor, executor, pick_list, text_input,
     widget::{tooltip, Button, Column, Container, PickList, Row, Space, Text, TextInput},
@@ -123,14 +123,12 @@ struct Theme {
     inset_bg:        Color, // background for recessed elements
 
     // ── Standalone DAW-shell chrome (test harness only, never shipped) ───
-    // A separate *light* Asiimov-style (CS:GO skin) palette — white/cream
-    // base, gunmetal-gray secondary text, signature-orange accents — chosen
-    // to read as a wholly different host application surrounding the dark
-    // VST box, not a re-skin of the plugin's own dark palette.
+    // dark Asiimov palette — black base, gunmetal panels, orange accents, near-white text
     daw_chrome_bg:       Color, // transport row / DAW I/O footer background
+    daw_chrome_panel:    Color, // subsection panel backgrounds
     daw_chrome_border:   Color, // panel border + accent (Asiimov orange)
-    daw_chrome_text:     Color, // primary text on the light chrome surface
-    daw_chrome_text_dim: Color, // secondary/label text on the light chrome surface
+    daw_chrome_text:     Color, // primary text on the chrome surface
+    daw_chrome_text_dim: Color, // secondary/label text on the chrome surface
 }
 
 const fn rgb(r: u8, g: u8, b: u8) -> Color {
@@ -190,10 +188,11 @@ impl Theme {
             inset_bg:        rgb( 10,  10,  14),
 
             // ── Standalone DAW-shell chrome ─────────────────────────────────
-            daw_chrome_bg:       rgb(236, 233, 227),  // Asiimov off-white/cream base
-            daw_chrome_border:   rgb(232, 119,  34),  // Asiimov signature orange
-            daw_chrome_text:     rgb( 46,  46,  48),  // near-black charcoal body text
-            daw_chrome_text_dim: rgb(132, 128, 122),  // warm gunmetal-gray secondary text
+            daw_chrome_bg:       rgb(  0,   0,   0),  // Asiimov black base
+            daw_chrome_panel:    rgb( 71,  70,  77),  // Asiimov gunmetal panel
+            daw_chrome_border:   rgb(251, 116,  45),  // Asiimov signature orange (#fb742d)
+            daw_chrome_text:     rgb(246, 246, 246),  // Asiimov near-white (#f6f6f6)
+            daw_chrome_text_dim: rgb(165, 163, 170),  // dimmed chrome text (readable on black)
         }
     }
 }
@@ -465,7 +464,24 @@ impl container::StyleSheet for DawChrome {
     fn style(&self) -> container::Style {
         container::Style {
             background: Some(Background::Color(THEME.daw_chrome_bg)),
-            border_radius: BORDER_RADIUS,
+            border_radius: 0.0,
+            border_width: 2.0,
+            border_color: THEME.daw_chrome_border,
+            text_color: None,
+        }
+    }
+}
+
+/// Gunmetal subsection panel — used for transport row and footer interior
+/// sections to visually separate them from the black chrome base.
+#[cfg(feature = "standalone")]
+struct DawPanel;
+#[cfg(feature = "standalone")]
+impl container::StyleSheet for DawPanel {
+    fn style(&self) -> container::Style {
+        container::Style {
+            background: Some(Background::Color(THEME.daw_chrome_panel)),
+            border_radius: 0.0,
             border_width: 1.0,
             border_color: THEME.daw_chrome_border,
             text_color: None,
@@ -1869,7 +1885,7 @@ impl IcedEditor for EtherTapEditor {
                     .align_items(Alignment::Center),
             )
             .padding([4, 10])
-            .style(DawChrome);
+            .style(DawPanel);
 
             // RATE / PHASE sync mode chips: interactive (sync_btn/force_icon_btn,
             // resuming the btn_daw_* button states 2a left for this purpose).
@@ -1907,35 +1923,21 @@ impl IcedEditor for EtherTapEditor {
                 .align_items(Alignment::Center)
                 .into();
 
-            // Direct dump of the plugin's #[id] params, exactly as the host
-            // sees them (`Param::name()` / `Param::to_string()` — the same
-            // generic Display nih-plug uses for its own host-facing strings,
-            // not a bespoke label/icon/on-off scheme tailored to EtherTap).
-            // Grouped by direction so the split tracks the param list itself —
-            // add or remove a param here and the footer follows, no per-param
-            // styling code to maintain.
-            let inputs: Vec<Element<'_, Message>> = vec![
-                rate_chip,
-                phase_chip,
-                raw_param_chip(self.data.params.connect_to_last.name(),  self.data.params.connect_to_last.to_string()),
-                raw_param_chip(self.data.params.disconnect.name(),       self.data.params.disconnect.to_string()),
-                raw_param_chip(self.data.params.force_sync_rate.name(),  self.data.params.force_sync_rate.to_string()),
-                raw_param_chip(self.data.params.force_sync_phase.name(), self.data.params.force_sync_phase.to_string()),
-                raw_param_chip(self.data.params.force_sync_both.name(),  self.data.params.force_sync_both.to_string()),
-                raw_param_chip(self.data.params.force_sync.name(),       self.data.params.force_sync.to_string()),
-            ];
-            let outputs: Vec<Element<'_, Message>> = vec![
-                raw_param_chip(self.data.params.is_connected.name(), self.data.params.is_connected.to_string()),
-                raw_param_chip(self.data.params.is_matched.name(),   self.data.params.is_matched.to_string()),
-            ];
+            // Audio I/O layout chips read from the plugin's reported
+            // AudioIOLayout — generic across channel counts, not hardcoded.
+            // Rate/phase sync chips are prepended to inputs since they
+            // control the host→plugin sync mode.
+            let (mut inputs, outputs) = audio_io_chips();
+            inputs.insert(0, phase_chip);
+            inputs.insert(0, rate_chip);
 
             let footer = Container::new(
                 Column::new()
-                    .push(t!("INPUTS \u{2192} plugin").size(9).color(THEME.daw_chrome_border))
+                    .push(t!("\u{25B6} AUDIO IN").size(9).color(THEME.daw_chrome_border))
                     .push(Space::with_height(Length::Units(4)))
                     .push(wrap_rows(inputs, 4))
                     .push(Space::with_height(Length::Units(6)))
-                    .push(t!("OUTPUTS \u{2192} host").size(9).color(THEME.daw_chrome_border))
+                    .push(t!("\u{25B6} AUDIO OUT").size(9).color(THEME.daw_chrome_border))
                     .push(Space::with_height(Length::Units(4)))
                     .push(wrap_rows(outputs, 4))
                     .padding([5, 6])
@@ -1943,7 +1945,7 @@ impl IcedEditor for EtherTapEditor {
                     .width(Length::Fill),
             )
             .width(Length::Fill)
-            .style(DawChrome);
+            .style(DawPanel);
 
             // The framed 360×280 box must contain *exactly* what a real VST3
             // host renders — banner (edge-to-edge) above content, same as the
@@ -1991,18 +1993,23 @@ impl IcedEditor for EtherTapEditor {
                         .align_items(Alignment::Center),
                 );
 
-            Column::new()
-                .push(transport_row)
-                .push(
-                    Container::new(dimensioned_frame)
-                        .width(Length::Fill)
-                        .height(Length::Fill)
-                        .center_x()
-                        .center_y(),
-                )
-                .push(footer)
-                .height(Length::Fill)
-                .into()
+            Container::new(
+                Column::new()
+                    .push(transport_row)
+                    .push(
+                        Container::new(dimensioned_frame)
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                            .center_x()
+                            .center_y(),
+                    )
+                    .push(footer)
+                    .height(Length::Fill),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(DawChrome)
+            .into()
         };
 
         #[cfg(not(feature = "standalone"))]
@@ -2050,20 +2057,57 @@ fn force_icon_btn(state: &mut button::State, msg: Message) -> Button<'_, Message
     .padding([4, 8])
 }
 
-/// Footer-scoped raw param chip: `<name> <value>`, both pulled straight from
-/// `Param::name()` / `Param::to_string()` — nih-plug's own generic host-facing
-/// representation (e.g. `BoolParam::to_string()` -> "On"/"Off"). No bespoke
-/// label text, dot icon, or value-string mapping: whatever a host's generic
-/// param inspector would show, this shows — so the list tracks the param
-/// struct automatically as params are added, renamed, or removed.
+/// Build (input_chips, output_chips) from the plugin's first reported
+/// AudioIOLayout — generic across channel counts, not EtherTap-specific.
 #[cfg(feature = "standalone")]
-fn raw_param_chip<'a>(name: &str, value: String) -> Element<'a, Message> {
-    Row::new()
-        .push(t!(name.to_string()).size(9).color(THEME.daw_chrome_text_dim))
-        .push(Space::with_width(Length::Units(4)))
-        .push(t!(value).size(9).font(MONO_FONT).color(THEME.daw_chrome_text))
-        .align_items(Alignment::Center)
-        .into()
+fn audio_io_chips<'a>() -> (Vec<Element<'a, Message>>, Vec<Element<'a, Message>>) {
+    use nih_plug::prelude::Plugin;
+    let layout = crate::EtherTap::AUDIO_IO_LAYOUTS.first();
+
+    let ch_chip = |label: &str, count: u32| -> Element<'_, Message> {
+        Row::new()
+            .push(t!(label.to_string()).size(9).color(THEME.daw_chrome_text_dim))
+            .push(Space::with_width(Length::Units(3)))
+            .push(t!(format!("\u{00D7}{count}")).size(9).font(MONO_FONT).color(THEME.daw_chrome_text))
+            .align_items(Alignment::Center)
+            .into()
+    };
+    let none_chip = || -> Element<'_, Message> {
+        t!("\u{2014}").size(9).color(THEME.daw_chrome_text_dim).into()
+    };
+
+    let (mut ins, mut outs): (Vec<Element<'_, Message>>, Vec<Element<'_, Message>>) =
+        (Vec::new(), Vec::new());
+
+    if let Some(layout) = layout {
+        // Main input — name from PortNames.main_input
+        match layout.main_input_channels {
+            Some(n) => ins.push(ch_chip(layout.names.main_input.unwrap_or("Main"), n.get())),
+            None    => ins.push(none_chip()),
+        }
+        // Aux inputs — layout.aux_input_ports is &[NonZeroU32] (channel counts);
+        // names are in layout.names.aux_inputs (&[&str])
+        for (i, &port_channels) in layout.aux_input_ports.iter().enumerate() {
+            let name = layout.names.aux_inputs.get(i).copied().unwrap_or("Aux");
+            ins.push(ch_chip(name, port_channels.get()));
+        }
+
+        // Main output — name from PortNames.main_output
+        match layout.main_output_channels {
+            Some(n) => outs.push(ch_chip(layout.names.main_output.unwrap_or("Main"), n.get())),
+            None    => outs.push(none_chip()),
+        }
+        // Aux outputs
+        for (i, &port_channels) in layout.aux_output_ports.iter().enumerate() {
+            let name = layout.names.aux_outputs.get(i).copied().unwrap_or("Aux");
+            outs.push(ch_chip(name, port_channels.get()));
+        }
+    } else {
+        ins.push(none_chip());
+        outs.push(none_chip());
+    }
+
+    (ins, outs)
 }
 
 /// Footer-scoped wrap/grid: chunks `items` into a `Column` of `Row`s, `per_row`
