@@ -139,6 +139,25 @@ it out explicitly keeps the door open for a dedicated future spec.
 | EtherTap-specific assertions (CP-3) require reaching into `cmd_tx`/internal state in ways that aren't currently exposed for testing | Low–Medium | `tests/integration_tests.rs` already exercises EtherTap's network worker via `MockMixer`/`spawn_worker` (`tests/common/mod.rs`) — reuse that observation pattern rather than adding new test-only public surface to `lib.rs` |
 | Headless boundary erodes over time (someone adds an `editor()` call "just for debugging") | Low | Success criteria explicitly assert headlessness by absence (no `Plugin::editor()` / `nih_plug_iced` references); reviewer checks this on every amendment touching `vst-runtime` |
 
+## Implementation log
+
+### Shipped — 2026-06-09
+
+Built across 3 iterations of /subagent-implementation. Commits (chronological):
+
+- `7b6c3b8` — CP-1: `vst-runtime` crate, `Harness<P: Plugin>`, smoke test
+- `d82ddf5` — CP-2: `ScenarioBuilder` API, `ScenarioResult`, `Harness::plugin()`/`plugin_mut()`/`scenario()`
+- `20127ce` — CP-3: `EtherTapParams` re-export, `ethertap_params()` accessor, `tests/vst_runtime_integration.rs`
+- `11033dd` — polish: `debug_assert!` diagnostics for dropped `BackgroundTask` (F-1/F-2)
+
+**Out-of-scope work performed during this build:** none.
+
+**Unforeseens:**
+- Transport position fields (`pos_samples`, `pos_beats`) are `pub(crate)` in nih-plug — `ScenarioBuilder::step()` cannot auto-advance position. Documented; workaround (supply fresh `Transport` per step) noted in API doc comment.
+
+**Deferred items still open:**
+- `vst-runtime-transport-pos` — Transport position auto-advance: add a nih-plug patch exposing `pos_samples`/`pos_beats` as `pub`, then update `.step()` to auto-advance. Tracked in `.claude/project/followups/vst-runtime-transport-pos.md`.
+
 ## Change log
 
 <!-- Populated on first amendment after the spec is approved. Do not log drafting/refinement turns. -->
