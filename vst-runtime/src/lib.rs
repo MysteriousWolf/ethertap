@@ -99,6 +99,123 @@ impl<P: Plugin> ProcessContext<P> for HarnessProcessContext<'_, P> {
     fn set_current_voice_capacity(&self, _capacity: u32) {}
 }
 
+/// Collected observations from a [`ScenarioBuilder`] run — one entry per
+/// `.step()` call.
+pub struct ScenarioResult<P: Plugin> {
+    /// [`ProcessStatus`] returned by `process()` for each step, in order.
+    pub statuses: Vec<ProcessStatus>,
+    /// All [`PluginNoteEvent`]s emitted across every step, in emission order.
+    pub output_events: Vec<PluginNoteEvent<P>>,
+    /// Per-step snapshot of `main_io` after each `process()` call.
+    ///
+    /// `output_buffers[i][ch][sample]` — outer index is step, then channel,
+    /// then sample within that channel.
+    pub output_buffers: Vec<Vec<Vec<f32>>>,
+}
+
+/// Fluent builder for multi-step scenarios. Obtained via [`Harness::scenario`].
+///
+/// Each `.step()` drives one `process()` call with the current transport and
+/// MIDI inputs, then clears the per-step MIDI queue (matching how a real host
+/// delivers events per-period). Accumulated results are returned by `.finish()`.
+///
+/// Transport position fields on [`Transport`] are `pub(crate)` inside nih-plug
+/// and cannot be mutated by this crate. If position matters for a test, supply
+/// a fresh [`Transport`] with the desired position via `.transport()` before
+/// each `.step()`.
+pub struct ScenarioBuilder<'h, P: Plugin> {
+    harness: &'h mut Harness<P>,
+    buffer_size: usize,
+    transport: Transport,
+    /// Per-step MIDI events — cleared after each `.step()` consumes them.
+    pending_midi: Vec<PluginNoteEvent<P>>,
+    result: ScenarioResult<P>,
+}
+
+impl<'h, P: Plugin> ScenarioBuilder<'h, P> {
+    /// Create a new builder borrowing `harness`, with an initial transport at
+    /// position zero and the given `buffer_size` (samples per step).
+    pub fn new(harness: &'h mut Harness<P>, buffer_size: usize) -> Self {
+        let transport = harness.new_transport();
+        Self {
+            harness,
+            buffer_size,
+            transport,
+            pending_midi: Vec::new(),
+            result: ScenarioResult {
+                statuses: Vec::new(),
+                output_events: Vec::new(),
+                output_buffers: Vec::new(),
+            },
+        }
+    }
+
+    /// Apply a mutation directly to the plugin (param updates, flag flips,
+    /// any test-only state change).
+    pub fn modify_plugin(self, f: impl FnOnce(&mut P)) -> Self {
+        f(&mut self.harness.plugin);
+        self
+    }
+
+    /// Replace the transport used for subsequent `.step()` calls.
+    pub fn transport(mut self, t: Transport) -> Self {
+        self.transport = t;
+        self
+    }
+
+    /// Queue MIDI events to be delivered on the *next* `.step()` only.
+    /// Cleared automatically after that step consumes them.
+    pub fn midi_in(mut self, events: Vec<PluginNoteEvent<P>>) -> Self {
+        self.pending_midi = events;
+        self
+    }
+
+    /// Set the buffer length (number of samples) for subsequent `.step()` calls.
+    pub fn buffer_size(mut self, n: usize) -> Self {
+        self.buffer_size = n;
+        self
+    }
+
+    /// Drive one `process()` call with the current configuration.
+    ///
+    /// After the call:
+    /// - Pending MIDI queue is cleared (consumed for this step only).
+    /// - `main_io` snapshot is appended to `result.output_buffers`.
+    ///
+    /// The transport is consumed for this step. The builder retains a fresh
+    /// default transport (`harness.new_transport()`) — call `.transport()` before
+    /// the next `.step()` if the next step needs specific transport settings.
+    pub fn step(mut self) -> Self {
+        let num_channels = self
+            .harness
+            .audio_io_layout
+            .main_output_channels
+            .map(|n| n.get() as usize)
+            .unwrap_or(2);
+
+        let mut main_io: Vec<Vec<f32>> = vec![vec![0.0f32; self.buffer_size]; num_channels];
+
+        // Replace self.transport with a fresh default so self remains valid after the move.
+        // Must split the borrow: get the placeholder first (read-only borrow), then replace.
+        let placeholder = self.harness.new_transport();
+        let step_transport = std::mem::replace(&mut self.transport, placeholder);
+        let midi: Vec<PluginNoteEvent<P>> = std::mem::take(&mut self.pending_midi);
+        let (status, out_events) = self.harness.process(&mut main_io, step_transport, &midi);
+
+        // Snapshot output buffer (cloned so the caller owns it).
+        self.result.output_buffers.push(main_io);
+        self.result.statuses.push(status);
+        self.result.output_events.extend(out_events);
+
+        self
+    }
+
+    /// Consume the builder and return accumulated results.
+    pub fn finish(self) -> ScenarioResult<P> {
+        self.result
+    }
+}
+
 impl<P: Plugin> Harness<P> {
     /// Construct and initialize a fresh `P`, mirroring
     /// `Wrapper::new()` (`wrapper.rs:184-300`): `P::default()` → pick the
@@ -207,6 +324,22 @@ impl<P: Plugin> Harness<P> {
     pub fn audio_io_layout(&self) -> &AudioIOLayout {
         &self.audio_io_layout
     }
+
+    /// Read-only access to the plugin for test assertions.
+    pub fn plugin(&self) -> &P {
+        &self.plugin
+    }
+
+    /// Mutable access to the plugin for test-only state inspection or mutation.
+    pub fn plugin_mut(&mut self) -> &mut P {
+        &mut self.plugin
+    }
+
+    /// Shorthand for [`ScenarioBuilder::new`]: borrow this harness and begin
+    /// assembling a multi-step scenario with the given initial buffer size.
+    pub fn scenario(&mut self, buffer_size: usize) -> ScenarioBuilder<'_, P> {
+        ScenarioBuilder::new(self, buffer_size)
+    }
 }
 
 #[cfg(test)]
@@ -266,6 +399,123 @@ mod tests {
 
             ProcessStatus::Normal
         }
+    }
+
+    /// A richer mock plugin for scenario testing: counts how many times
+    /// `process()` has been called and echoes received MIDI events as output
+    /// events, so tests can assert on `output_events` and plugin state.
+    #[derive(Default)]
+    struct CountingPlugin {
+        process_count: u32,
+        /// Set by `.modify_plugin()` in tests to vary output values.
+        output_value: f32,
+    }
+
+    impl Plugin for CountingPlugin {
+        const NAME: &'static str = "Counting";
+        const VENDOR: &'static str = "EtherTap tests";
+        const URL: &'static str = "https://example.invalid";
+        const EMAIL: &'static str = "mock@example.invalid";
+        const VERSION: &'static str = "0.0.0";
+        const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = MOCK_AUDIO_IO_LAYOUTS;
+
+        type SysExMessage = ();
+        type BackgroundTask = ();
+
+        fn params(&self) -> Arc<dyn Params> {
+            Arc::new(MockParams)
+        }
+
+        fn process(
+            &mut self,
+            buffer: &mut Buffer,
+            _aux: &mut AuxiliaryBuffers,
+            context: &mut impl ProcessContext<Self>,
+        ) -> ProcessStatus {
+            self.process_count += 1;
+            let val = self.output_value;
+            for channel_samples in buffer.iter_samples() {
+                for sample in channel_samples {
+                    *sample = val;
+                }
+            }
+            // Echo received MIDI events back out.
+            while let Some(event) = context.next_event() {
+                context.send_event(event);
+            }
+            ProcessStatus::Normal
+        }
+    }
+
+    #[test]
+    fn scenario_multi_step_api() {
+        let mut harness = Harness::<CountingPlugin>::new(44_100.0, 512)
+            .expect("counting plugin should initialize");
+
+        // Confirm plugin() accessor works before the scenario.
+        assert_eq!(harness.plugin().process_count, 0);
+
+        let mut transport = harness.new_transport();
+        transport.playing = true;
+        transport.tempo = Some(120.0);
+
+        // Build a NoteOn event to send on step 1.
+        let note_on = PluginNoteEvent::<CountingPlugin>::NoteOn {
+            timing: 0,
+            voice_id: None,
+            channel: 0,
+            note: 60,
+            velocity: 1.0,
+        };
+
+        let result = harness
+            .scenario(128)
+            // Step 1: set output_value to 0.25 via modify_plugin, send a NoteOn.
+            .modify_plugin(|p| p.output_value = 0.25)
+            .transport(transport)
+            .midi_in(vec![note_on])
+            .step()
+            // Step 2: different output_value, no MIDI (auto-cleared), larger buffer.
+            .modify_plugin(|p| p.output_value = 0.75)
+            .buffer_size(256)
+            .step()
+            .finish();
+
+        // Two steps → two statuses.
+        assert_eq!(result.statuses.len(), 2);
+        assert!(result.statuses.iter().all(|&s| s == ProcessStatus::Normal));
+
+        // Two buffer snapshots.
+        assert_eq!(result.output_buffers.len(), 2);
+        // Step 1: 2 channels × 128 samples at 0.25.
+        let step1 = &result.output_buffers[0];
+        assert_eq!(step1.len(), 2);
+        assert_eq!(step1[0].len(), 128);
+        assert!(step1[0].iter().all(|&s| s == 0.25));
+        // Step 2: 2 channels × 256 samples at 0.75.
+        let step2 = &result.output_buffers[1];
+        assert_eq!(step2.len(), 2);
+        assert_eq!(step2[0].len(), 256);
+        assert!(step2[0].iter().all(|&s| s == 0.75));
+
+        // The NoteOn sent on step 1 should appear in output_events (echoed back).
+        assert_eq!(result.output_events.len(), 1);
+        match result.output_events[0] {
+            PluginNoteEvent::<CountingPlugin>::NoteOn { note, channel, .. } => {
+                assert_eq!(note, 60);
+                assert_eq!(channel, 0);
+            }
+            _ => panic!("expected NoteOn in output_events"),
+        }
+
+        // plugin() accessor: process_count should be 2 after two steps.
+        assert_eq!(harness.plugin().process_count, 2);
+
+        // plugin_mut() accessor: can reset the counter directly.
+        harness.plugin_mut().process_count = 0;
+        assert_eq!(harness.plugin().process_count, 0);
+
+        harness.deactivate();
     }
 
     #[test]
