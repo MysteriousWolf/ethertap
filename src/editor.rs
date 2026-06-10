@@ -659,42 +659,36 @@ struct EtherTapEditor {
     #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     standalone_stop_trigger: Arc<AtomicBool>,
     #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
-    btn_play_stop: button::State,
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
-    btn_stop:      button::State,
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
-    btn_tap:       button::State,
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
-    bpm_input:     text_input::State,
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
-    bpm_input_value: String,
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     tap_times:     VecDeque<std::time::Instant>,
-    // ── Footer param-mode chips (checkpoint 2b: rate/phase sync mode + force
-    // triggers, mirroring the former daw_panel's RATE/PHASE rows) ─────────
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    /// DAW-chrome widget state, grouped so `view()` can hand the whole bundle
+    /// to `daw_shell()` as ONE disjoint `&mut` field borrow alongside the
+    /// plugin content's (or a modal's) own field borrows — old-iced
+    /// stateful-widget borrow rules forbid a `&mut self` helper method here.
+    daw: DawChromeState,
+}
+
+/// Widget state for the standalone DAW shell (transport row + param footer).
+/// Exists in both builds (update() arms touch `bpm_input_value` regardless of
+/// feature); the button states are only read by standalone view code.
+#[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+struct DawChromeState {
+    btn_play_stop: button::State,
+    btn_stop:      button::State,
+    btn_tap:       button::State,
+    bpm_input:     text_input::State,
+    bpm_input_value: String,
+    // Footer param-mode chips (rate/phase sync mode + force triggers).
     btn_daw_rate_manual:  button::State,
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     btn_daw_rate_change:  button::State,
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     btn_daw_rate_cont:    button::State,
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     btn_daw_phase_manual: button::State,
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     btn_daw_phase_change: button::State,
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     btn_daw_phase_cont:   button::State,
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     btn_daw_force_rate:   button::State,
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     btn_daw_force_phase:  button::State,
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     btn_daw_connect:      button::State,
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     btn_daw_disconnect:   button::State,
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     btn_daw_audit:        button::State,
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     btn_daw_all_slots:    button::State,
 }
 
@@ -787,24 +781,26 @@ impl IcedEditor for EtherTapEditor {
                 standalone_playing,
                 standalone_pos_beats,
                 standalone_stop_trigger,
-                btn_play_stop:        Default::default(),
-                btn_stop:             Default::default(),
-                btn_tap:              Default::default(),
-                bpm_input:            Default::default(),
-                bpm_input_value,
                 tap_times:            VecDeque::new(),
-                btn_daw_rate_manual:  Default::default(),
-                btn_daw_rate_change:  Default::default(),
-                btn_daw_rate_cont:    Default::default(),
-                btn_daw_phase_manual: Default::default(),
-                btn_daw_phase_change: Default::default(),
-                btn_daw_phase_cont:   Default::default(),
-                btn_daw_force_rate:   Default::default(),
-                btn_daw_force_phase:  Default::default(),
-                btn_daw_connect:      Default::default(),
-                btn_daw_disconnect:   Default::default(),
-                btn_daw_audit:        Default::default(),
-                btn_daw_all_slots:    Default::default(),
+                daw: DawChromeState {
+                    btn_play_stop:        Default::default(),
+                    btn_stop:             Default::default(),
+                    btn_tap:              Default::default(),
+                    bpm_input:            Default::default(),
+                    bpm_input_value,
+                    btn_daw_rate_manual:  Default::default(),
+                    btn_daw_rate_change:  Default::default(),
+                    btn_daw_rate_cont:    Default::default(),
+                    btn_daw_phase_manual: Default::default(),
+                    btn_daw_phase_change: Default::default(),
+                    btn_daw_phase_cont:   Default::default(),
+                    btn_daw_force_rate:   Default::default(),
+                    btn_daw_force_phase:  Default::default(),
+                    btn_daw_connect:      Default::default(),
+                    btn_daw_disconnect:   Default::default(),
+                    btn_daw_audit:        Default::default(),
+                    btn_daw_all_slots:    Default::default(),
+                },
             },
             Command::none(),
         )
@@ -975,9 +971,9 @@ impl IcedEditor for EtherTapEditor {
                 if let Ok(v) = s.parse::<f32>() {
                     let clamped = v.clamp(20.0, 300.0);
                     self.standalone_bpm.store(clamped.to_bits(), Ordering::Relaxed);
-                    self.bpm_input_value = format!("{:.1}", clamped);
+                    self.daw.bpm_input_value = format!("{:.1}", clamped);
                 } else {
-                    self.bpm_input_value = s;
+                    self.daw.bpm_input_value = s;
                 }
             }
             Message::ToggleStandalonePlay => {
@@ -1014,7 +1010,7 @@ impl IcedEditor for EtherTapEditor {
                     if secs > 0.0 {
                         let bpm = (60.0 / secs).clamp(20.0, 300.0);
                         self.standalone_bpm.store(bpm.to_bits(), Ordering::Relaxed);
-                        self.bpm_input_value = format!("{:.1}", bpm);
+                        self.daw.bpm_input_value = format!("{:.1}", bpm);
                     }
                 }
             }
@@ -1146,12 +1142,22 @@ impl IcedEditor for EtherTapEditor {
                 .style(ModalCard)
                 .width(Length::Units(SCAN_MODAL_W));
 
-            return Container::new(card)
+            // Backdrop fills the plugin frame only — in standalone the DAW
+            // chrome (transport/footer) stays visible and interactive.
+            let backdrop = Container::new(card)
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .center_x()
                 .center_y()
-                .style(ModalBackdrop)
+                .style(ModalBackdrop);
+
+            #[cfg(feature = "standalone")]
+            return daw_shell(backdrop.into(), &mut self.daw, &self.data, connected, in_sync);
+            #[cfg(not(feature = "standalone"))]
+            return Container::new(backdrop)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(PluginFrame)
                 .into();
         }
 
@@ -1211,12 +1217,21 @@ impl IcedEditor for EtherTapEditor {
                 .style(ModalCard)
                 .width(Length::Units(MIDI_MODAL_W));
 
-            return Container::new(card)
+            // Same frame-scoped backdrop treatment as the scan modal above.
+            let backdrop = Container::new(card)
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .center_x()
                 .center_y()
-                .style(ModalBackdrop)
+                .style(ModalBackdrop);
+
+            #[cfg(feature = "standalone")]
+            return daw_shell(backdrop.into(), &mut self.daw, &self.data, connected, in_sync);
+            #[cfg(not(feature = "standalone"))]
+            return Container::new(backdrop)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(PluginFrame)
                 .into();
         }
 
@@ -1849,199 +1864,10 @@ impl IcedEditor for EtherTapEditor {
             .push(content);
 
         // ── Standalone DAW frame (compiled only with --features standalone) ──
+        // The shell is a free function over `&mut self.daw` (one field borrow)
+        // so the modal early-returns above can reuse it around their backdrop.
         #[cfg(feature = "standalone")]
-        let result = {
-            let sa_playing = self.standalone_playing.load(Ordering::Relaxed);
-            let sa_pos     = f64::from_bits(self.standalone_pos_beats.load(Ordering::Relaxed));
-
-            let transport_row = Container::new(
-                Row::new()
-                    .push(
-                        Button::new(
-                            &mut self.btn_play_stop,
-                            t!(if sa_playing { "\u{2016}" } else { "\u{25b6}" })
-                                .size(11)
-                                .color(if sa_playing { THEME.ok } else { THEME.muted }),
-                        )
-                        .on_press(Message::ToggleStandalonePlay)
-                        .style(EtherBtn(BtnKind::Idle))
-                        .padding([3, 7]),
-                    )
-                    .push(Space::with_width(Length::Units(4)))
-                    .push(
-                        Button::new(
-                            &mut self.btn_stop,
-                            t!("\u{25a0}").size(11).color(THEME.muted),
-                        )
-                        .on_press(Message::StopStandalone)
-                        .style(EtherBtn(BtnKind::Idle))
-                        .padding([3, 7]),
-                    )
-                    .push(Space::with_width(Length::Units(8)))
-                    .push(t!("BPM").size(9).color(THEME.daw_chrome_text_dim))
-                    .push(Space::with_width(Length::Units(4)))
-                    .push(
-                        TextInput::new(
-                            &mut self.bpm_input,
-                            "120.0",
-                            &self.bpm_input_value,
-                            Message::SetStandaloneBpm,
-                        )
-                        .size(11)
-                        .font(MONO_FONT)
-                        .padding([3, 5])
-                        .style(EtherInput)
-                        .width(Length::Units(52)),
-                    )
-                    .push(Space::with_width(Length::Units(6)))
-                    .push(
-                        Button::new(&mut self.btn_tap, t!("Tap").size(10).color(THEME.accent))
-                            .on_press(Message::TapTempo)
-                            .style(EtherBtn(BtnKind::Idle))
-                            .padding([3, 7]),
-                    )
-                    .push(Space::with_width(Length::Fill))
-                    .push(
-                        t!(format!("\u{25ce} {:.2}", sa_pos))
-                            .size(9)
-                            .font(MONO_FONT)
-                            .color(THEME.daw_chrome_text_dim),
-                    )
-                    .align_items(Alignment::Center),
-            )
-            .padding([4, 10])
-            .width(Length::Fill)
-            .style(DawPanel);
-
-            // RATE / PHASE sync mode chips: interactive (sync_btn/force_icon_btn,
-            // resuming the btn_daw_* button states 2a left for this purpose).
-            let rate_chip: Element<'_, Message> = Row::new()
-                .push(t!("rate_sync_mode").size(9).color(THEME.daw_chrome_text_dim))
-                .push(Space::with_width(Length::Units(4)))
-                .push(sync_btn(&mut self.btn_daw_rate_manual, "Man",
-                    rate_mode == SyncMode::Manual,
-                    Message::SetRateSyncMode(SyncMode::Manual)))
-                .push(sync_btn(&mut self.btn_daw_rate_change, "BPM",
-                    rate_mode == SyncMode::OnChange,
-                    Message::SetRateSyncMode(SyncMode::OnChange)))
-                .push(sync_btn(&mut self.btn_daw_rate_cont, "Con",
-                    rate_mode == SyncMode::Continuous,
-                    Message::SetRateSyncMode(SyncMode::Continuous)))
-                .push(force_icon_btn(&mut self.btn_daw_force_rate, Message::ForceRateSync))
-                .spacing(2)
-                .align_items(Alignment::Center)
-                .into();
-
-            let phase_chip: Element<'_, Message> = Row::new()
-                .push(t!("phase_sync_mode").size(9).color(THEME.daw_chrome_text_dim))
-                .push(Space::with_width(Length::Units(4)))
-                .push(sync_btn(&mut self.btn_daw_phase_manual, "Man",
-                    phase_mode == SyncMode::Manual,
-                    Message::SetPhaseSyncMode(SyncMode::Manual)))
-                .push(sync_btn(&mut self.btn_daw_phase_change, "BPM",
-                    phase_mode == SyncMode::OnChange,
-                    Message::SetPhaseSyncMode(SyncMode::OnChange)))
-                .push(sync_btn(&mut self.btn_daw_phase_cont, "Con",
-                    phase_mode == SyncMode::Continuous,
-                    Message::SetPhaseSyncMode(SyncMode::Continuous)))
-                .push(force_icon_btn(&mut self.btn_daw_force_phase, Message::ForcePhaseSync))
-                .spacing(2)
-                .align_items(Alignment::Center)
-                .into();
-
-            // PARAMETERS IN: automatable params the DAW can write to the plugin.
-            // Compound mode selectors (rate/phase + force) get one row each;
-            // momentary trigger buttons follow at 4 per row.
-            let params_in_compound = vec![rate_chip, phase_chip];
-            let all_slots_on = self.data.params.all_slots.value();
-            let params_in_triggers: Vec<Element<'_, Message>> = vec![
-                daw_trigger_chip(&mut self.btn_daw_connect,    "connect_to_last", Message::Connect,         false),
-                daw_trigger_chip(&mut self.btn_daw_disconnect, "disconnect",      Message::Disconnect,      false),
-                daw_trigger_chip(&mut self.btn_daw_audit,      "audit_slots",     Message::QuerySlots,      false),
-                daw_trigger_chip(&mut self.btn_daw_all_slots,  "all_slots",       Message::ToggleAutoSlots, !all_slots_on),
-            ];
-
-            // PARAMETERS OUT: read-only status the plugin writes back to the DAW.
-            let params_out: Vec<Element<'_, Message>> = vec![
-                daw_indicator_chip("is_connected", connected),
-                daw_indicator_chip("is_matched",   in_sync),
-            ];
-
-            let footer = Container::new(
-                Column::new()
-                    .push(t!("\u{25B6} PARAMETERS IN").size(9).color(THEME.daw_chrome_border))
-                    .push(Space::with_height(Length::Units(4)))
-                    .push(wrap_rows(params_in_compound, 1))
-                    .push(Space::with_height(Length::Units(3)))
-                    .push(wrap_rows(params_in_triggers, 4))
-                    .push(Space::with_height(Length::Units(6)))
-                    .push(t!("\u{25B6} PARAMETERS OUT").size(9).color(THEME.daw_chrome_border))
-                    .push(Space::with_height(Length::Units(4)))
-                    .push(wrap_rows(params_out, 4))
-                    .padding([5, 6])
-                    .spacing(2)
-                    .width(Length::Fill),
-            )
-            .width(Length::Fill)
-            .style(DawPanel);
-
-            // The framed 360×280 box contains *exactly* what a real VST3 host
-            // renders — the shared `plugin_column` — so the frame's border is
-            // the one true seam between "what the plugin draws" and "DAW
-            // chrome we built around it for standalone test".
-            let framed_plugin = Container::new(plugin_column)
-                .width(Length::Units(360))
-                .height(Length::Units(280))
-                .style(PluginFrame);
-
-            // Dimension-ruler overlay: rulers sized to the frame's exact
-            // edges (360 / 280) so they double as a visual cross-check that
-            // the box really does render at true VST3 dimensions. Blank
-            // spacers mirror the ruler gutters on the opposite edges so the
-            // framed box sits dead-center of the assembly — and therefore
-            // dead-center of the DAW shell once the assembly itself is
-            // centered below.
-            const RULER_GUTTER: u16 = 40;
-            let ruler_row_h = || Row::new()
-                .push(Space::new(Length::Units(RULER_GUTTER), Length::Units(1)))
-                .push(Space::with_width(Length::Units(4)))
-                .push(dim_ruler_h(360, "360px".to_string()))
-                .push(Space::with_width(Length::Units(4)))
-                .push(Space::new(Length::Units(RULER_GUTTER), Length::Units(1)));
-
-            let dimensioned_frame = Column::new()
-                .push(ruler_row_h())
-                .push(Space::with_height(Length::Units(4)))
-                .push(
-                    Row::new()
-                        .push(dim_ruler_v(280, "280px".to_string()))
-                        .push(Space::with_width(Length::Units(4)))
-                        .push(framed_plugin)
-                        .push(Space::with_width(Length::Units(4)))
-                        .push(dim_ruler_v(280, "280px".to_string()))
-                        .align_items(Alignment::Center),
-                )
-                .push(Space::with_height(Length::Units(4)))
-                .push(ruler_row_h());
-
-            Container::new(
-                Column::new()
-                    .push(transport_row)
-                    .push(
-                        Container::new(dimensioned_frame)
-                            .width(Length::Fill)
-                            .height(Length::Fill)
-                            .center_x()
-                            .center_y(),
-                    )
-                    .push(footer)
-                    .height(Length::Fill),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(DawChrome)
-            .into()
-        };
+        let result = daw_shell(plugin_column.into(), &mut self.daw, &self.data, connected, in_sync);
 
         #[cfg(not(feature = "standalone"))]
         let result = Container::new(plugin_column)
@@ -2066,6 +1892,213 @@ fn pulse_param(context: &dyn GuiContext, param: &BoolParam) {
     setter.begin_set_parameter(param);
     setter.set_parameter(param, true);
     setter.end_set_parameter(param);
+}
+
+/// Build the standalone DAW shell — transport row, dimension rulers, param
+/// footer — around `inner`, which gets framed at the true VST3 dimensions
+/// (360×280, `PluginFrame`).  `inner` is either the shared plugin surface
+/// column or a modal backdrop replacing it: modals cover only the plugin
+/// frame; the DAW chrome stays visible and interactive around them.
+///
+/// Free function over `&mut DawChromeState` (a single field borrow) rather
+/// than a `&mut self` method — old-iced stateful-widget borrow rules require
+/// the caller's other field borrows (modal button states, content states) to
+/// stay disjoint from the chrome's.
+#[cfg(feature = "standalone")]
+fn daw_shell<'a>(
+    inner: Element<'a, Message>,
+    daw: &'a mut DawChromeState,
+    data: &'a EditorData,
+    connected: bool,
+    in_sync: bool,
+) -> Element<'a, Message> {
+    let sa_playing = data.standalone_playing.load(Ordering::Relaxed);
+    let sa_pos     = f64::from_bits(data.standalone_pos_beats.load(Ordering::Relaxed));
+    let rate_mode  = data.params.rate_sync_mode.value();
+    let phase_mode = data.params.phase_sync_mode.value();
+
+    let transport_row = Container::new(
+        Row::new()
+            .push(
+                Button::new(
+                    &mut daw.btn_play_stop,
+                    t!(if sa_playing { "\u{2016}" } else { "\u{25b6}" })
+                        .size(11)
+                        .color(if sa_playing { THEME.ok } else { THEME.muted }),
+                )
+                .on_press(Message::ToggleStandalonePlay)
+                .style(EtherBtn(BtnKind::Idle))
+                .padding([3, 7]),
+            )
+            .push(Space::with_width(Length::Units(4)))
+            .push(
+                Button::new(
+                    &mut daw.btn_stop,
+                    t!("\u{25a0}").size(11).color(THEME.muted),
+                )
+                .on_press(Message::StopStandalone)
+                .style(EtherBtn(BtnKind::Idle))
+                .padding([3, 7]),
+            )
+            .push(Space::with_width(Length::Units(8)))
+            .push(t!("BPM").size(9).color(THEME.daw_chrome_text_dim))
+            .push(Space::with_width(Length::Units(4)))
+            .push(
+                TextInput::new(
+                    &mut daw.bpm_input,
+                    "120.0",
+                    &daw.bpm_input_value,
+                    Message::SetStandaloneBpm,
+                )
+                .size(11)
+                .font(MONO_FONT)
+                .padding([3, 5])
+                .style(EtherInput)
+                .width(Length::Units(52)),
+            )
+            .push(Space::with_width(Length::Units(6)))
+            .push(
+                Button::new(&mut daw.btn_tap, t!("Tap").size(10).color(THEME.accent))
+                    .on_press(Message::TapTempo)
+                    .style(EtherBtn(BtnKind::Idle))
+                    .padding([3, 7]),
+            )
+            .push(Space::with_width(Length::Fill))
+            .push(
+                t!(format!("\u{25ce} {:.2}", sa_pos))
+                    .size(9)
+                    .font(MONO_FONT)
+                    .color(THEME.daw_chrome_text_dim),
+            )
+            .align_items(Alignment::Center),
+    )
+    .padding([4, 10])
+    .width(Length::Fill)
+    .style(DawPanel);
+
+    // RATE / PHASE sync mode chips: interactive (sync_btn/force_icon_btn).
+    let rate_chip: Element<'_, Message> = Row::new()
+        .push(t!("rate_sync_mode").size(9).color(THEME.daw_chrome_text_dim))
+        .push(Space::with_width(Length::Units(4)))
+        .push(sync_btn(&mut daw.btn_daw_rate_manual, "Man",
+            rate_mode == SyncMode::Manual,
+            Message::SetRateSyncMode(SyncMode::Manual)))
+        .push(sync_btn(&mut daw.btn_daw_rate_change, "BPM",
+            rate_mode == SyncMode::OnChange,
+            Message::SetRateSyncMode(SyncMode::OnChange)))
+        .push(sync_btn(&mut daw.btn_daw_rate_cont, "Con",
+            rate_mode == SyncMode::Continuous,
+            Message::SetRateSyncMode(SyncMode::Continuous)))
+        .push(force_icon_btn(&mut daw.btn_daw_force_rate, Message::ForceRateSync))
+        .spacing(2)
+        .align_items(Alignment::Center)
+        .into();
+
+    let phase_chip: Element<'_, Message> = Row::new()
+        .push(t!("phase_sync_mode").size(9).color(THEME.daw_chrome_text_dim))
+        .push(Space::with_width(Length::Units(4)))
+        .push(sync_btn(&mut daw.btn_daw_phase_manual, "Man",
+            phase_mode == SyncMode::Manual,
+            Message::SetPhaseSyncMode(SyncMode::Manual)))
+        .push(sync_btn(&mut daw.btn_daw_phase_change, "BPM",
+            phase_mode == SyncMode::OnChange,
+            Message::SetPhaseSyncMode(SyncMode::OnChange)))
+        .push(sync_btn(&mut daw.btn_daw_phase_cont, "Con",
+            phase_mode == SyncMode::Continuous,
+            Message::SetPhaseSyncMode(SyncMode::Continuous)))
+        .push(force_icon_btn(&mut daw.btn_daw_force_phase, Message::ForcePhaseSync))
+        .spacing(2)
+        .align_items(Alignment::Center)
+        .into();
+
+    // PARAMETERS IN: automatable params the DAW can write to the plugin.
+    // Compound mode selectors (rate/phase + force) get one row each;
+    // momentary trigger buttons follow at 4 per row.
+    let params_in_compound = vec![rate_chip, phase_chip];
+    let all_slots_on = data.params.all_slots.value();
+    let params_in_triggers: Vec<Element<'_, Message>> = vec![
+        daw_trigger_chip(&mut daw.btn_daw_connect,    "connect_to_last", Message::Connect,         false),
+        daw_trigger_chip(&mut daw.btn_daw_disconnect, "disconnect",      Message::Disconnect,      false),
+        daw_trigger_chip(&mut daw.btn_daw_audit,      "audit_slots",     Message::QuerySlots,      false),
+        daw_trigger_chip(&mut daw.btn_daw_all_slots,  "all_slots",       Message::ToggleAutoSlots, !all_slots_on),
+    ];
+
+    // PARAMETERS OUT: read-only status the plugin writes back to the DAW.
+    let params_out: Vec<Element<'_, Message>> = vec![
+        daw_indicator_chip("is_connected", connected),
+        daw_indicator_chip("is_matched",   in_sync),
+    ];
+
+    let footer = Container::new(
+        Column::new()
+            .push(t!("\u{25B6} PARAMETERS IN").size(9).color(THEME.daw_chrome_border))
+            .push(Space::with_height(Length::Units(4)))
+            .push(wrap_rows(params_in_compound, 1))
+            .push(Space::with_height(Length::Units(3)))
+            .push(wrap_rows(params_in_triggers, 4))
+            .push(Space::with_height(Length::Units(6)))
+            .push(t!("\u{25B6} PARAMETERS OUT").size(9).color(THEME.daw_chrome_border))
+            .push(Space::with_height(Length::Units(4)))
+            .push(wrap_rows(params_out, 4))
+            .padding([5, 6])
+            .spacing(2)
+            .width(Length::Fill),
+    )
+    .width(Length::Fill)
+    .style(DawPanel);
+
+    // The framed 360×280 box contains *exactly* what a real VST3 host
+    // renders, so the frame's border is the one true seam between "what the
+    // plugin draws" and "DAW chrome we built around it for standalone test".
+    let framed_plugin = Container::new(inner)
+        .width(Length::Units(360))
+        .height(Length::Units(280))
+        .style(PluginFrame);
+
+    // Dimension-ruler overlay: rulers sized to the frame's exact edges
+    // (360 / 280) so they double as a visual cross-check that the box really
+    // does render at true VST3 dimensions.  Blank spacers mirror the ruler
+    // gutters on the opposite edges so the framed box sits dead-center.
+    const RULER_GUTTER: u16 = 40;
+    let ruler_row_h = || Row::new()
+        .push(Space::new(Length::Units(RULER_GUTTER), Length::Units(1)))
+        .push(Space::with_width(Length::Units(4)))
+        .push(dim_ruler_h(360, "360px".to_string()))
+        .push(Space::with_width(Length::Units(4)))
+        .push(Space::new(Length::Units(RULER_GUTTER), Length::Units(1)));
+
+    let dimensioned_frame = Column::new()
+        .push(ruler_row_h())
+        .push(Space::with_height(Length::Units(4)))
+        .push(
+            Row::new()
+                .push(dim_ruler_v(280, "280px".to_string()))
+                .push(Space::with_width(Length::Units(4)))
+                .push(framed_plugin)
+                .push(Space::with_width(Length::Units(4)))
+                .push(dim_ruler_v(280, "280px".to_string()))
+                .align_items(Alignment::Center),
+        )
+        .push(Space::with_height(Length::Units(4)))
+        .push(ruler_row_h());
+
+    Container::new(
+        Column::new()
+            .push(transport_row)
+            .push(
+                Container::new(dimensioned_frame)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .center_x()
+                    .center_y(),
+            )
+            .push(footer)
+            .height(Length::Fill),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style(DawChrome)
+    .into()
 }
 
 /// Toggle one FX type filter BoolParam via ParamSetter (bit 0–6).
