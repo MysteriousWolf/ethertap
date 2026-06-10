@@ -1538,7 +1538,7 @@ impl IcedEditor for EtherTapEditor {
             .push(sync_badge)
             .align_items(Alignment::Center);
 
-        // ── Output clock section (device + PPQ + enable toggle — one row) ─
+        // ── MIDI section (2 rows: device+auto+PPQ / enable+stats) ─────────
         let clock_on  = self.data.params.midi_clock_enabled.value();
         let clock_ppq = self.data.params.midi_clock_ppq.value();
 
@@ -1547,8 +1547,8 @@ impl IcedEditor for EtherTapEditor {
             Ppq::P24, Ppq::P32, Ppq::P48, Ppq::P96,
         ];
 
-        // ── MIDI bridge device + clock enable — single row ────────────────
-        // Layout: OUTPUT  PPQ [ppq]  OUT [device=Fill]  [status]  [MIDI CLK]
+        // ── Row 1: device picker (Fill) + auto-connect + PPQ ──────────────
+        // ── Row 2: clock enable toggle + jitter stats (right-aligned) ─────
         let current_out_device = self.data.params.midi_out_device.lock().clone();
         let bridge_conn = self.data.midi_bridge_connected.load(Ordering::Acquire);
         let bridge_connecting = self.data.midi_bridge_connecting.load(Ordering::Acquire);
@@ -1565,29 +1565,11 @@ impl IcedEditor for EtherTapEditor {
             BtnKind::Idle
         };
 
-        // MIDI clock status ladder — dot+label idiom (mirrors `bridge_status`/
-        // `sync_dot`/`conn_dot`), four distinct states so "is the clock on,
-        // and if so is it actually wired up" is visible at a glance:
-        //   disabled / enabled-but-disconnected / connecting / connected
-        let (bridge_dot, bridge_color, bridge_label) = if !clock_on {
-            ("○", THEME.muted,  "Off")
-        } else if bridge_conn {
-            ("●", THEME.ok,     "Connected")
-        } else if bridge_connecting {
-            ("●", THEME.warn,   "Connecting")
-        } else {
-            ("●", THEME.text_dim, "No device")
-        };
-        let bridge_status: Element<'_, Message> = Row::new()
-            .push(t!(bridge_dot).size(10).color(bridge_color))
-            .push(Space::with_width(Length::Units(3)))
-            .push(t!(bridge_label).size(9).color(THEME.text_dim))
-            .align_items(Alignment::Center)
-            .into();
+        // No separate status ladder: the device picker button already encodes
+        // connection state (SCAN/LINK_BROKEN/LINK icon + BtnKind color) and
+        // `midi_clk_btn` text encodes Enable/Enabled/Connecting/Active.
 
-        // Persisted `midi_auto_connect` toggle — mirrors `midi_clock_enabled`
-        // wiring (`fetch_xor` on an `Arc<AtomicBool>`), placed alongside the
-        // status ladder per the design doc's framing.
+        // Persisted `midi_auto_connect` toggle, placed right of the picker.
         let auto_connect_on = self.data.params.midi_auto_connect.value();
         let midi_auto_connect_btn: Element<'_, Message> = Button::new(
             &mut self.btn_midi_auto_connect,
@@ -1647,8 +1629,6 @@ impl IcedEditor for EtherTapEditor {
         };
 
         let clock_row = Row::new()
-            .push(midi_clk_btn)
-            .push(Space::with_width(Length::Units(8)))
             .push(
                 Button::new(
                     &mut self.btn_midi_picker,
@@ -1664,6 +1644,8 @@ impl IcedEditor for EtherTapEditor {
                 .width(Length::Fill),
             )
             .push(Space::with_width(Length::Units(8)))
+            .push(midi_auto_connect_btn)
+            .push(Space::with_width(Length::Units(8)))
             .push(t!("PPQ").size(9).color(THEME.text_dim))
             .push(Space::with_width(Length::Units(4)))
             .push(PickList::new(
@@ -1678,18 +1660,6 @@ impl IcedEditor for EtherTapEditor {
             .width(Length::Units(48))
             .style(PpqPickStyle))
             .spacing(0)
-            .align_items(Alignment::Center);
-
-        // ── MIDI clock status row — status ladder and the persisted ───────
-        // auto-connect toggle, grouped together so a user can see *and*
-        // control MIDI clock state without hunting (mirrors the design
-        // doc's framing: ladder placed alongside the toggle). The on/off
-        // toggle itself lives in `midi_clk_btn` (it both enables and
-        // disables — pressing it while active turns the clock off).
-        let midi_status_row = Row::new()
-            .push(bridge_status)
-            .push(Space::with_width(Length::Fill))
-            .push(midi_auto_connect_btn)
             .align_items(Alignment::Center);
 
         // ── MIDI clock timing stats (jitter percentiles) ──────────────────
@@ -1740,6 +1710,7 @@ impl IcedEditor for EtherTapEditor {
             // Every string literal here has a fixed char count; values are
             // pre-formatted above to the same width, so columns are stable.
             Row::new()
+                .push(midi_clk_btn)
                 .push(Space::with_width(Length::Fill))
                 .push(t!("avg ").size(9).color(THEME.text_dim))
                 .push(t!(avg_str).size(9).color(THEME.text_dim))
@@ -1831,8 +1802,6 @@ impl IcedEditor for EtherTapEditor {
                     Container::new(
                         Column::new()
                             .push(clock_row)
-                            .push(Space::with_height(3.into()))
-                            .push(midi_status_row)
                             .push(Space::with_height(3.into()))
                             .push(clock_stats_row),
                     )
