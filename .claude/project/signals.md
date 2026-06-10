@@ -54,7 +54,7 @@ CI gate: GitHub Actions on `v*` tag push — matrix: macos-latest (universal), w
 
 ## Cross-cutting
 
-- **Test layout:** `tests/integration_tests.rs` (network worker against `MockMixer`), `tests/osc_tests.rs` (OSC encode/decode), `tests/common/mod.rs` (shared `MockMixer`, `spawn_worker`, `SlotState` helpers). Unit tests co-located in `src/reconnect.rs`.
+- **Test layout:** `tests/integration_tests.rs` (network worker against `MockMixer`), `tests/osc_tests.rs` (OSC encode/decode), `tests/harness_e2e.rs` + `tests/sync_matrix.rs` + `tests/midi_clock_tests.rs` (vst-runtime harness driving the full plugin against `MockMixer` / virtual MIDI sink; VST3-build-gated), `tests/common/mod.rs` (NetworkWorker glue + `harness_util` helpers; `MockMixer`/`SlotState` re-exported from the `mock-suite` crate). Unit tests co-located in `src/reconnect.rs`; `vst-runtime` and `mock-suite` carry their own unit tests.
 - **RT safety contract:** `process()` in `src/lib.rs` must never allocate, block, or lock a contended mutex. Enforced by convention; no static analysis gate.
 - **Atomic bit-packing convention:** `f32` values shared across threads stored as `u32` via `f32::to_bits`/`f32::from_bits` (BPM, hardware delay float); `f64` standalone beat position stored as `u64` bits in `standalone_pos_beats`.
 - **Vendor patch workflow:** `scripts/setup.sh` clones `vendor/baseview` and `vendor/nih-plug`, applies `patches/`. Must re-run after upstream vendor updates.

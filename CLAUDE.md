@@ -42,7 +42,7 @@ EtherTap is a **Status-Aware Proxy** with a "Human-in-the-loop" approach:
 |---|---|---|---|
 | `cmd_tx` / `cmd_rx` | audio → network | `crossbeam_channel` | bounded(64), non-blocking |
 | `status_tx` / `status_rx` | network → audio | `crossbeam_channel` | bounded(64), non-blocking |
-| `force_sync_trigger` | editor → audio | `Arc<AtomicBool>` | `swap(false)` to consume |
+| trigger params (`connect_to_last`, `disconnect`, `force_sync_rate`, `force_sync_phase`, `audit_slots`) | editor/host → audio | momentary `BoolParam` | editor pulses via `ParamSetter`; `process()` consumes the rising edge then self-resets via `context.set_parameter(param, false)` |
 | `hardware_float` | network → editor | `Arc<AtomicU32>` | f32 bits via `f32::to/from_bits` |
 | `host_bpm` | audio → editor | `Arc<AtomicU32>` | f32 bits |
 | `tx/rx_activity_ts` | audio → editor | `Arc<AtomicU64>` | ms since epoch for LED pulse |
