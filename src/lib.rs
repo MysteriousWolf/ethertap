@@ -1070,6 +1070,40 @@ impl EtherTap {
     pub fn ethertap_params(&self) -> Arc<EtherTapParams> {
         self.params.clone()
     }
+
+    /// Shared-state handles for harness-driven integration tests (vst-runtime):
+    /// the same Arcs the workers and editor observe, so a test can assert on
+    /// connection status, telemetry read-back, slot audits, and MIDI clock
+    /// health without GUI or private-field access.
+    #[doc(hidden)]
+    pub fn test_handles(&self) -> TestHandles {
+        TestHandles {
+            conn_status:       self.conn_status.clone(),
+            hardware_float:    self.hardware_float.clone(),
+            compatible_slots:  self.compatible_slots.clone(),
+            occupied_slots:    self.occupied_slots.clone(),
+            slot_types:        self.slot_types.clone(),
+            connected_device:  self.connected_device.clone(),
+            midi_clock_stats:  self.midi_clock_stats.clone(),
+            midi_clock_drop_count: self.midi_clock_drop_count.clone(),
+        }
+    }
+}
+
+/// Observation surface returned by [`EtherTap::test_handles`].  Test-only by
+/// convention (`#[doc(hidden)]` accessor); fields are the live shared Arcs,
+/// not snapshots.
+#[doc(hidden)]
+pub struct TestHandles {
+    pub conn_status:       Arc<AtomicBool>,
+    /// Hardware delay float as `f32` bits (see `f32::from_bits`).
+    pub hardware_float:    Arc<AtomicU32>,
+    pub compatible_slots:  Arc<AtomicU8>,
+    pub occupied_slots:    Arc<AtomicU8>,
+    pub slot_types:        Arc<[AtomicI32; 8]>,
+    pub connected_device:  Arc<Mutex<(String, String)>>,
+    pub midi_clock_stats:  Arc<midi_clock::AtomicClockStats>,
+    pub midi_clock_drop_count: Arc<AtomicU32>,
 }
 
 // ─── VST3 export ─────────────────────────────────────────────────────────────

@@ -12,9 +12,12 @@
 //! Headless by construction: this crate never references `Plugin::editor()` or
 //! `nih_plug_iced`.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use nih_plug::prelude::{
-    AudioIOLayout, AuxiliaryBuffers, Buffer, BufferConfig, InitContext, Plugin, PluginApi,
-    PluginNoteEvent, ProcessContext, ProcessMode,
+    AudioIOLayout, AuxiliaryBuffers, Buffer, BufferConfig, InitContext, ParamPtr, Params, Plugin,
+    PluginApi, PluginNoteEvent, ProcessContext, ProcessMode,
 };
 /// Re-exported so integration tests can import `ProcessStatus` and `Transport`
 /// from `vst_runtime` without adding a separate `nih_plug` dev-dependency.
@@ -37,6 +40,13 @@ pub struct Harness<P: Plugin> {
     plugin: P,
     audio_io_layout: AudioIOLayout,
     sample_rate: f32,
+    /// Kept alive for the harness's lifetime — `param_ptrs` point into this
+    /// object, mirroring how nih-plug's wrappers hold the `Arc` to keep
+    /// [`ParamPtr`]s valid.
+    #[allow(dead_code)]
+    params: Arc<dyn Params>,
+    /// `#[id]` → type-erased pointer, from [`Params::param_map`].
+    param_ptrs: HashMap<String, ParamPtr>,
 }
 
 /// A minimal [`InitContext`] for headless driving. No background-task queue, no
@@ -129,16 +139,19 @@ pub struct ScenarioResult<P: Plugin> {
 /// MIDI inputs, then clears the per-step MIDI queue (matching how a real host
 /// delivers events per-period). Accumulated results are returned by `.finish()`.
 ///
-/// Transport position fields on [`Transport`] are `pub(crate)` inside nih-plug
-/// and cannot be mutated by this crate. If position matters for a test, supply
-/// a fresh [`Transport`] with the desired position via `.transport()` before
-/// each `.step()`.
+/// Transport position can be driven two ways: supply a fully-populated
+/// [`Transport`] via `.transport()` before a `.step()` (position fields are
+/// settable via the patched-public [`Transport::set_song_position`]), or use
+/// [`ScenarioBuilder::advance_playing`] to auto-accumulate position across
+/// consecutive playing steps the way nih-plug's standalone backend does.
 pub struct ScenarioBuilder<'h, P: Plugin> {
     harness: &'h mut Harness<P>,
     buffer_size: usize,
     transport: Transport,
     /// Per-step MIDI events — cleared after each `.step()` consumes them.
     pending_midi: Vec<PluginNoteEvent<P>>,
+    /// Sample position accumulated by [`Self::advance_playing`] across calls.
+    auto_pos_samples: i64,
     result: ScenarioResult<P>,
 }
 
@@ -152,6 +165,7 @@ impl<'h, P: Plugin> ScenarioBuilder<'h, P> {
             buffer_size,
             transport,
             pending_midi: Vec::new(),
+            auto_pos_samples: 0,
             result: ScenarioResult {
                 statuses: Vec::new(),
                 output_events: Vec::new(),
@@ -177,6 +191,56 @@ impl<'h, P: Plugin> ScenarioBuilder<'h, P> {
     /// Cleared automatically after that step consumes them.
     pub fn midi_in(mut self, events: Vec<PluginNoteEvent<P>>) -> Self {
         self.pending_midi = events;
+        self
+    }
+
+    /// Set a parameter (normalized `[0, 1]`) by `#[id]`, host-automation
+    /// style.  Panics on an unknown id — a typo'd id in a test should fail
+    /// loudly, not silently no-op.
+    pub fn set_param(self, id: &str, normalized: f32) -> Self {
+        assert!(
+            self.harness.set_param_normalized(id, normalized),
+            "unknown param id: {id}"
+        );
+        self
+    }
+
+    /// Pulse a momentary trigger param: set it to 1.0 and let the plugin's
+    /// self-reset (`context.set_parameter(param, false)` after edge
+    /// consumption) clear it during the next `.step()`.
+    pub fn pulse_param(self, id: &str) -> Self {
+        self.set_param(id, 1.0)
+    }
+
+    /// Drive `n` consecutive playing steps with an auto-advancing transport at
+    /// `tempo` BPM and `time_sig`, mirroring how nih-plug's standalone backend
+    /// accumulates `pos_samples` per period (`wrapper.rs:521-536`) and derives
+    /// beats/bar from it.  Position persists across multiple
+    /// `advance_playing` calls on the same builder.
+    pub fn advance_playing(mut self, n: usize, tempo: f64, time_sig: (i32, i32)) -> Self {
+        for _ in 0..n {
+            let mut t = self.harness.new_transport();
+            t.playing = true;
+            t.tempo = Some(tempo);
+            t.time_sig_numerator = Some(time_sig.0);
+            t.time_sig_denominator = Some(time_sig.1);
+
+            let pos_samples = self.auto_pos_samples;
+            let pos_beats = pos_samples as f64 / t.sample_rate as f64 / 60.0 * tempo;
+            let bar_len_qn = time_sig.0 as f64 * 4.0 / time_sig.1 as f64;
+            let bar_number = (pos_beats / bar_len_qn).floor() as i32;
+            let bar_start = bar_number as f64 * bar_len_qn;
+            t.set_song_position(
+                Some(pos_samples),
+                Some(pos_beats),
+                Some(bar_start),
+                Some(bar_number),
+                None,
+            );
+
+            self = self.transport(t).step();
+            self.auto_pos_samples += self.buffer_size as i64;
+        }
         self
     }
 
@@ -253,11 +317,54 @@ impl<P: Plugin> Harness<P> {
         }
         plugin.reset();
 
+        let params = plugin.params();
+        let param_ptrs = params
+            .param_map()
+            .into_iter()
+            .map(|(id, ptr, _group)| (id, ptr))
+            .collect();
+
         Some(Self {
             plugin,
             audio_io_layout,
             sample_rate,
+            params,
+            param_ptrs,
         })
+    }
+
+    /// Set a parameter to a normalized `[0, 1]` value by its `#[id]`, the way
+    /// a host automation lane would — through the param's internal atomic, not
+    /// the GUI.  Returns `false` when the id is unknown.
+    ///
+    /// Relies on the vendored-nih-plug patch widening
+    /// `ParamPtr::set_normalized_value` / `update_smoother` to `pub`
+    /// (`patches/nih-plug/params_internals_set_normalized_pub.patch`).
+    pub fn set_param_normalized(&self, id: &str, normalized: f32) -> bool {
+        match self.param_ptrs.get(id) {
+            // SAFETY: the pointer targets a field of `self.params`, which the
+            // harness keeps alive for its whole lifetime.
+            Some(ptr) => unsafe {
+                if ptr.set_normalized_value(normalized) {
+                    ptr.update_smoother(self.sample_rate, false);
+                }
+                true
+            },
+            None => false,
+        }
+    }
+
+    /// Read a parameter's current normalized value by its `#[id]`.
+    pub fn param_normalized(&self, id: &str) -> Option<f32> {
+        self.param_ptrs
+            .get(id)
+            // SAFETY: see `set_param_normalized`.
+            .map(|ptr| unsafe { ptr.modulated_normalized_value() })
+    }
+
+    /// All known param ids, for sweep-style tests.
+    pub fn param_ids(&self) -> impl Iterator<Item = &str> {
+        self.param_ptrs.keys().map(String::as_str)
     }
 
     /// Drive one `process()` call, mirroring the standalone backend's per-period
@@ -524,6 +631,129 @@ mod tests {
         // plugin_mut() accessor: can reset the counter directly.
         harness.plugin_mut().process_count = 0;
         assert_eq!(harness.plugin().process_count, 0);
+
+        harness.deactivate();
+    }
+
+    /// Plugin with real `#[id]` params for host-style automation tests, plus a
+    /// transport probe recording `pos_beats()`/`bar_number()` per process call.
+    struct ParamProbePlugin {
+        params: Arc<ProbeParams>,
+        seen_beats: Vec<f64>,
+        seen_bars: Vec<i32>,
+    }
+
+    impl Default for ParamProbePlugin {
+        fn default() -> Self {
+            Self {
+                params: Arc::new(ProbeParams {
+                    gain: FloatParam::new("Gain", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 }),
+                    trigger: BoolParam::new("Trigger", false),
+                }),
+                seen_beats: Vec::new(),
+                seen_bars: Vec::new(),
+            }
+        }
+    }
+
+    #[derive(Params)]
+    struct ProbeParams {
+        #[id = "gain"]
+        gain: FloatParam,
+        #[id = "trigger"]
+        trigger: BoolParam,
+    }
+
+    impl Plugin for ParamProbePlugin {
+        const NAME: &'static str = "ParamProbe";
+        const VENDOR: &'static str = "EtherTap tests";
+        const URL: &'static str = "https://example.invalid";
+        const EMAIL: &'static str = "mock@example.invalid";
+        const VERSION: &'static str = "0.0.0";
+        const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = MOCK_AUDIO_IO_LAYOUTS;
+
+        type SysExMessage = ();
+        type BackgroundTask = ();
+
+        fn params(&self) -> Arc<dyn Params> {
+            self.params.clone()
+        }
+
+        fn process(
+            &mut self,
+            buffer: &mut Buffer,
+            _aux: &mut AuxiliaryBuffers,
+            context: &mut impl ProcessContext<Self>,
+        ) -> ProcessStatus {
+            let transport = context.transport();
+            self.seen_beats.push(transport.pos_beats().unwrap_or(-1.0));
+            self.seen_bars.push(transport.bar_number().unwrap_or(-1));
+
+            // Write the current gain param into the buffer so the test can
+            // observe that the host-style set reached the plugin's read path.
+            let val = self.params.gain.value();
+            for channel_samples in buffer.iter_samples() {
+                for sample in channel_samples {
+                    *sample = val;
+                }
+            }
+            ProcessStatus::Normal
+        }
+    }
+
+    #[test]
+    fn set_param_normalized_reaches_plugin_read_path() {
+        let mut harness = Harness::<ParamProbePlugin>::new(44_100.0, 256)
+            .expect("probe plugin should initialize");
+
+        // Unknown id is rejected, known ids resolve.
+        assert!(!harness.set_param_normalized("nonexistent", 1.0));
+        assert_eq!(harness.param_normalized("gain"), Some(0.0));
+
+        // Host-style write → plugin's .value() read in process().
+        assert!(harness.set_param_normalized("gain", 0.25));
+        let result = harness.scenario(64).step().finish();
+        assert!(result.output_buffers[0][0].iter().all(|&s| s == 0.25));
+
+        // Builder sugar: set_param + pulse_param.
+        let result = harness
+            .scenario(64)
+            .set_param("gain", 0.75)
+            .pulse_param("trigger")
+            .step()
+            .finish();
+        assert!(result.output_buffers[0][0].iter().all(|&s| s == 0.75));
+        assert_eq!(harness.param_normalized("trigger"), Some(1.0));
+
+        // param_ids covers both declared params.
+        let mut ids: Vec<&str> = harness.param_ids().collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["gain", "trigger"]);
+
+        harness.deactivate();
+    }
+
+    #[test]
+    fn advance_playing_accumulates_song_position() {
+        let mut harness = Harness::<ParamProbePlugin>::new(44_100.0, 22_050)
+            .expect("probe plugin should initialize");
+
+        // 120 BPM at 44.1 kHz → one beat = 22 050 samples = exactly one step.
+        // 4/4 bars → bar number increments every 4 steps.
+        harness
+            .scenario(22_050)
+            .advance_playing(6, 120.0, (4, 4))
+            .finish();
+
+        let plugin = harness.plugin();
+        assert_eq!(plugin.seen_beats.len(), 6);
+        for (i, &beats) in plugin.seen_beats.iter().enumerate() {
+            assert!(
+                (beats - i as f64).abs() < 1e-9,
+                "step {i}: expected pos_beats {i}, got {beats}"
+            );
+        }
+        assert_eq!(plugin.seen_bars, vec![0, 0, 0, 0, 1, 1]);
 
         harness.deactivate();
     }

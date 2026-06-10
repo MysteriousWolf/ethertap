@@ -1,0 +1,28 @@
+--- a/src/context/process.rs
++++ b/src/context/process.rs
+@@ -342,5 +342,25 @@
+             )),
+             (_, _, _, _) => None,
+         }
++    }
++
++    /// EtherTap patch (context_process_set_song_position.patch): set the
++    /// song-position fields directly. These fields are `pub(crate)`, so an
++    /// out-of-crate test host (the `vst-runtime` harness) cannot otherwise
++    /// drive position-dependent plugin logic (beat crossings, bar-quantized
++    /// resets). Mirrors what a real wrapper writes per process call.
++    pub fn set_song_position(
++        &mut self,
++        pos_samples: Option<i64>,
++        pos_beats: Option<f64>,
++        bar_start_pos_beats: Option<f64>,
++        bar_number: Option<i32>,
++        loop_range_beats: Option<(f64, f64)>,
++    ) {
++        self.pos_samples = pos_samples;
++        self.pos_beats = pos_beats;
++        self.bar_start_pos_beats = bar_start_pos_beats;
++        self.bar_number = bar_number;
++        self.loop_range_beats = loop_range_beats;
+     }
+ }
