@@ -7,6 +7,11 @@
 # ]
 # ///
 """
+DEPRECATED — ported to Rust: `cargo run -p mock-suite` (TUI parity, plus
+headless test modes via `--no-tui --jsonl --expect ...` and library reuse in
+`cargo test`). This script is kept until the Rust TUI is visually confirmed;
+delete it after.
+
 Combined EtherTap mock suite — MIDI clock sink + X32/M32 mixer in one TUI.
 
 Both services start automatically.  Toggle each independently at runtime:

@@ -1,0 +1,19 @@
+[package]
+name = "mock-suite"
+version = "0.1.0"
+edition = "2021"
+description = "EtherTap mock suite — X32/M32 mixer simulator + MIDI clock sink. TUI by default, headless test modes via flags, reusable as a library."
+publish = false
+
+[dependencies]
+rosc = "0.10"
+parking_lot = "0.12"
+midir = "0.9"
+clap = { version = "4", features = ["derive"] }
+ratatui = "0.29"
+crossterm = "0.28"
+serde_json = "1"
+
+[[bin]]
+name = "mock-suite"
+path = "src/main.rs"

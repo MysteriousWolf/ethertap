@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "xtask", "vst-runtime"]
+members = [".", "xtask", "vst-runtime", "mock-suite"]
 resolver = "2"
 
 [package]
@@ -35,6 +35,7 @@ midir = "0.9"
 criterion = { version = "0.5", features = ["html_reports"] }
 serde_json = "1"
 vst-runtime = { path = "vst-runtime" }
+mock-suite = { path = "mock-suite" }
 
 [[bench]]
 name = "core"
