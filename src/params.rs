@@ -33,17 +33,72 @@ pub enum SyncMode {
     Continuous,
 }
 
+// ─── MIDI clock PPQ enum ─────────────────────────────────────────────────────
+
+/// Pulses-per-quarter-note options for MIDI clock output.
+#[derive(Enum, Debug, PartialEq, Eq, Clone, Copy)]
+pub enum Ppq {
+    #[id = "ppq3"]  P3,
+    #[id = "ppq4"]  P4,
+    #[id = "ppq6"]  P6,
+    #[id = "ppq8"]  P8,
+    #[id = "ppq12"] P12,
+    #[id = "ppq16"] P16,
+    #[id = "ppq24"] P24,
+    #[id = "ppq32"] P32,
+    #[id = "ppq48"] P48,
+    #[id = "ppq96"] P96,
+}
+
+impl Ppq {
+    pub fn to_u8(self) -> u8 {
+        match self {
+            Ppq::P3  => 3,
+            Ppq::P4  => 4,
+            Ppq::P6  => 6,
+            Ppq::P8  => 8,
+            Ppq::P12 => 12,
+            Ppq::P16 => 16,
+            Ppq::P24 => 24,
+            Ppq::P32 => 32,
+            Ppq::P48 => 48,
+            Ppq::P96 => 96,
+        }
+    }
+
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            3  => Ppq::P3,
+            4  => Ppq::P4,
+            6  => Ppq::P6,
+            8  => Ppq::P8,
+            12 => Ppq::P12,
+            16 => Ppq::P16,
+            32 => Ppq::P32,
+            48 => Ppq::P48,
+            96 => Ppq::P96,
+            _  => Ppq::P24, // default
+        }
+    }
+}
+
+impl std::fmt::Display for Ppq {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_u8())
+    }
+}
+
 // ─── Parameter block ─────────────────────────────────────────────────────────
 
 /// All VST3-visible and persisted state for EtherTap.
 ///
-/// Fields marked `#[id]`     are exposed to the host for automation.
-/// Fields marked `#[persist]` survive DAW session reloads.
+/// Fields marked `#[id]`      are exposed to the host for automation.
+/// Fields marked `#[persist]` survive DAW session reloads (non-param data).
+/// Fields with `_atom` suffix are worker-thread-facing backing stores, mirrored
+/// from their corresponding `#[id]` params at the top of each `process()` call.
 #[derive(Params)]
 pub struct EtherTapParams {
     // ── Editor window state ──────────────────────────────────────────────
-    // Not persisted: window is fixed-size and non-resizable, so any saved
-    // size would only cause drift if we change the target dimensions.
     pub editor_state: Arc<IcedState>,
 
     // ── Network configuration (persisted, not automatable) ───────────────
@@ -53,56 +108,65 @@ pub struct EtherTapParams {
     #[persist = "target-port"]
     pub target_port: Arc<Mutex<u16>>,
 
-    #[persist = "fx-slot"]
-    pub fx_slot: Arc<AtomicU8>,
+    // ── FX slot (automatable + worker-facing atom) ───────────────────────
+    /// Selected FX slot (1–8).  Exposed as an automatable parameter so a DAW
+    /// preset or automation lane can switch the active delay slot.
+    #[id = "fx_slot"]
+    pub fx_slot: IntParam,
 
-    /// Bitmask controlling which delay effect types are included when Auto mode
-    /// broadcasts to all compatible slots.
+    /// Backing store polled by the network worker (mirrored from `fx_slot`
+    /// at the top of each `process()` call — not persisted independently).
+    pub fx_slot_atom: Arc<AtomicU8>,
+
+    // ── FX type filter bitmask (worker-facing atom, driven by 7 BoolParams) ─
+    /// Hot-path bitmask: bit n set ↔ fx type n is enabled for Auto broadcast.
     /// Bit→type: 0=DLY, 1=3TAP, 2=4TAP, 3=D/RV, 4=D/CR, 5=D/FL, 6=MODD.
-    /// Default 0x7F = all enabled.
-    #[persist = "fx-type-filter"]
+    /// Written atomically in `process()` from the 7 `fx_filter_*` params.
     pub fx_type_filter: Arc<AtomicU32>,
 
-    /// When true (default), the plugin emits MIDI clock on its MIDI output
-    /// while the host transport is playing.
-    #[persist = "midi-clock-enabled"]
-    pub midi_clock_enabled: Arc<AtomicBool>,
+    // ── FX type filter params (automatable, drive fx_type_filter atom) ───
+    #[id = "fx_filter_dly"]   pub fx_filter_dly:  BoolParam,
+    #[id = "fx_filter_3tap"]  pub fx_filter_3tap: BoolParam,
+    #[id = "fx_filter_4tap"]  pub fx_filter_4tap: BoolParam,
+    #[id = "fx_filter_drv"]   pub fx_filter_drv:  BoolParam,
+    #[id = "fx_filter_dcr"]   pub fx_filter_dcr:  BoolParam,
+    #[id = "fx_filter_dfl"]   pub fx_filter_dfl:  BoolParam,
+    #[id = "fx_filter_modd"]  pub fx_filter_modd: BoolParam,
 
-    /// MIDI clock pulses per quarter note.
-    /// Options: 3, 4, 6, 8, 12, 16, 24, 32, 48, 96.  Default: 24 (MIDI spec).
-    #[persist = "midi-clock-ppq"]
-    pub midi_clock_ppq: Arc<AtomicU8>,
+    // ── MIDI clock enabled (automatable + worker-facing atom) ────────────
+    #[id = "midi_clock_enabled"]
+    pub midi_clock_enabled: BoolParam,
 
-    /// Physical MIDI output device to send clock to and bridge MIDI from.
-    /// `None` = virtual port only (legacy behaviour).
+    pub midi_clock_enabled_atom: Arc<AtomicBool>,
+
+    // ── MIDI clock PPQ (automatable + worker-facing atom) ────────────────
+    #[id = "midi_clock_ppq"]
+    pub midi_clock_ppq: EnumParam<Ppq>,
+
+    pub midi_clock_ppq_atom: Arc<AtomicU8>,
+
+    // ── MIDI output device (persisted, not automatable — string type) ────
     #[persist = "midi-out-device"]
     pub midi_out_device: Arc<Mutex<Option<String>>>,
 
-    /// When true, auto-pick and connect the first available physical MIDI
-    /// device when none is currently selected (mirrors `connect_to_last`'s
-    /// reconnect posture for the mixer). Default **false** — "no surprise
-    /// automation" (CLAUDE.md): connection stays fully manual until opted in.
-    #[persist = "midi-auto-connect"]
-    pub midi_auto_connect: Arc<AtomicBool>,
+    // ── MIDI auto-connect (automatable + worker-facing atom) ─────────────
+    #[id = "midi_auto_connect"]
+    pub midi_auto_connect: BoolParam,
+
+    pub midi_auto_connect_atom: Arc<AtomicBool>,
 
     // ── Rate Sync mode ───────────────────────────────────────────────────
-    /// Controls when a plain delay-time (rate) sync fires.
-    /// Default: **OnChange** — sync fires when BPM settles.
     #[id = "rate_sync_mode"]
     pub rate_sync_mode: EnumParam<SyncMode>,
 
     // ── Phase Sync mode ──────────────────────────────────────────────────
-    /// Controls when a Hard Reset (phase) fires.
-    /// Default: **Manual** — only via the Force Sync button.
     #[id = "phase_sync_mode"]
     pub phase_sync_mode: EnumParam<SyncMode>,
 
     // ── Automation triggers (rising edge = fire once) ────────────────────
-    /// Connect to the last-used target (host → plugin).
     #[id = "connect_to_last"]
     pub connect_to_last: BoolParam,
 
-    /// Disconnect from the current target (host → plugin).
     #[id = "disconnect"]
     pub disconnect: BoolParam,
 
@@ -114,22 +178,14 @@ pub struct EtherTapParams {
     #[id = "force_sync_phase"]
     pub force_sync_phase: BoolParam,
 
-    /// Momentary: fire a Hard Reset (same as force_sync_phase).
-    #[id = "force_sync_both"]
-    pub force_sync_both: BoolParam,
-
     /// Legacy momentary trigger kept for existing automation lanes.
     #[id = "force_sync"]
     pub force_sync: BoolParam,
 
     // ── Read-only status (plugin → host) ─────────────────────────────────
-    /// True while the plugin has an active UDP connection to the mixer.
-    /// Updated by the audio thread via context.set_parameter(); read-only from GUI.
     #[id = "is_connected"]
     pub is_connected: BoolParam,
 
-    /// True when host BPM and hardware delay float are within tolerance.
-    /// Updated by the audio thread via context.set_parameter(); read-only from GUI.
     #[id = "is_matched"]
     pub is_matched: BoolParam,
 }
@@ -139,35 +195,40 @@ impl Default for EtherTapParams {
         Self {
             #[cfg(not(feature = "standalone"))]
             editor_state: IcedState::from_size(360, 280),
-            // Standalone window must fit the pinned 360×280 plugin-content
-            // frame (matching VST3's true `from_size(360, 280)` above) PLUS
-            // the standalone-only transport_row + banner + footer chrome
-            // around it — 340 left the frame clipped/overflowing; 480 gives
-            // that chrome room without the window feeling oversized.
             #[cfg(feature = "standalone")]
-            editor_state: IcedState::from_size(500, 480),
+            editor_state: IcedState::from_size(500, 620),
             target_ip: Arc::new(Mutex::new(if cfg!(feature = "standalone") {
                 "127.0.0.1".to_owned()
             } else {
                 "192.168.1.100".to_owned()
             })),
             target_port: Arc::new(Mutex::new(10023)),
-            fx_slot: Arc::new(AtomicU8::new(1)),
+            fx_slot:      IntParam::new("FX Slot", 1, IntRange::Linear { min: 1, max: 8 }),
+            fx_slot_atom: Arc::new(AtomicU8::new(1)),
             fx_type_filter: Arc::new(AtomicU32::new(0x7F)),
-            midi_clock_enabled: Arc::new(AtomicBool::new(true)),
-            midi_clock_ppq: Arc::new(AtomicU8::new(24_u8)),
+            fx_filter_dly:  BoolParam::new("FX Filter: Delay",       true),
+            fx_filter_3tap: BoolParam::new("FX Filter: 3 Tap",       true),
+            fx_filter_4tap: BoolParam::new("FX Filter: 4 Tap",       true),
+            fx_filter_drv:  BoolParam::new("FX Filter: Delay+Reverb", true),
+            fx_filter_dcr:  BoolParam::new("FX Filter: Delay+Chorus", true),
+            fx_filter_dfl:  BoolParam::new("FX Filter: Delay+Flanger", true),
+            fx_filter_modd: BoolParam::new("FX Filter: Mod Delay",   true),
+            midi_clock_enabled:      BoolParam::new("MIDI Clock Enabled", true),
+            midi_clock_enabled_atom: Arc::new(AtomicBool::new(true)),
+            midi_clock_ppq:          EnumParam::new("MIDI Clock PPQ", Ppq::P24),
+            midi_clock_ppq_atom:     Arc::new(AtomicU8::new(24)),
             midi_out_device: Arc::new(Mutex::new(None)),
-            midi_auto_connect: Arc::new(AtomicBool::new(false)),
-            rate_sync_mode: EnumParam::new("Rate Sync Mode", SyncMode::OnChange),
+            midi_auto_connect:      BoolParam::new("MIDI Auto-Connect", false),
+            midi_auto_connect_atom: Arc::new(AtomicBool::new(false)),
+            rate_sync_mode:  EnumParam::new("Rate Sync Mode",  SyncMode::OnChange),
             phase_sync_mode: EnumParam::new("Phase Sync Mode", SyncMode::Manual),
             connect_to_last: BoolParam::new("Connect to Last", false),
-            disconnect: BoolParam::new("Disconnect", false),
-            force_sync_rate: BoolParam::new("Force Sync Rate", false),
+            disconnect:      BoolParam::new("Disconnect",      false),
+            force_sync_rate:  BoolParam::new("Force Sync Rate",  false),
             force_sync_phase: BoolParam::new("Force Sync Phase", false),
-            force_sync_both: BoolParam::new("Force Sync Both", false),
-            force_sync: BoolParam::new("Force Sync", false),
+            force_sync: BoolParam::new("Force Sync", false).non_automatable(),
             is_connected: BoolParam::new("Is Connected", false),
-            is_matched: BoolParam::new("Is Matched", false),
+            is_matched:   BoolParam::new("Is Matched",   false),
         }
     }
 }

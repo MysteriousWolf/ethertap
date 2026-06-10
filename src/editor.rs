@@ -24,7 +24,7 @@ use parking_lot::Mutex;
 use crate::{
     network::{now_ms, DeviceInfo, NetworkCommand},
     osc,
-    params::{EtherTapParams, SyncMode, MONO_FONT},
+    params::{EtherTapParams, Ppq, SyncMode, MONO_FONT},
 };
 
 // ─── Solar Icons Bold font ───────────────────────────────────────────────────
@@ -189,7 +189,7 @@ impl Theme {
 
             // ── Standalone DAW-shell chrome ─────────────────────────────────
             daw_chrome_bg:       rgb(  0,   0,   0),  // Asiimov black base
-            daw_chrome_panel:    rgb( 71,  70,  77),  // Asiimov gunmetal panel
+            daw_chrome_panel:    rgb( 18,  18,  22),  // Asiimov near-black panel
             daw_chrome_border:   rgb(251, 116,  45),  // Asiimov signature orange (#fb742d)
             daw_chrome_text:     rgb(246, 246, 246),  // Asiimov near-white (#f6f6f6)
             daw_chrome_text_dim: rgb(165, 163, 170),  // dimmed chrome text (readable on black)
@@ -207,7 +207,7 @@ const PULSE_MS: u64 = 100;
 
 const BORDER_RADIUS: f32 = 4.0;
 const SPACING_BTN_BASELINE: u16 = 10;
-const SPACING_FX_ROW_GAP: u16 = 14;
+const SPACING_FX_ROW_GAP: u16 = 12;
 const SCAN_MODAL_W: u16 = 290;
 const MIDI_MODAL_W: u16 = 240;
 
@@ -620,7 +620,7 @@ struct EtherTapEditor {
     // Output clock section — toggle button + PPQ pick list + MIDI out device
     btn_clock_toggle:    button::State,
     btn_midi_auto_connect: button::State,
-    pick_ppq:            pick_list::State<u8>,
+    pick_ppq:            pick_list::State<Ppq>,
     /// Available MIDI output port names — first entry is always the sentinel.
     midi_out_ports:      Vec<String>,
     // MIDI device picker modal
@@ -675,6 +675,12 @@ struct EtherTapEditor {
     btn_daw_force_rate:   button::State,
     #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     btn_daw_force_phase:  button::State,
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    btn_daw_connect:      button::State,
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    btn_daw_disconnect:   button::State,
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    btn_daw_force_legacy: button::State,
 }
 
 // ─── Messages ────────────────────────────────────────────────────────────────
@@ -697,7 +703,7 @@ enum Message {
     /// Toggle the persisted `midi_auto_connect` param.
     ToggleMidiAutoConnect,
     /// Set MIDI clock pulses per quarter note.
-    SetClockPpq(u8),
+    SetClockPpq(Ppq),
     /// Open/close the MIDI device picker modal dialog.
     ToggleMidiPicker,
     /// Select a MIDI output device from the picker modal.
@@ -780,6 +786,9 @@ impl IcedEditor for EtherTapEditor {
                 btn_daw_phase_cont:   Default::default(),
                 btn_daw_force_rate:   Default::default(),
                 btn_daw_force_phase:  Default::default(),
+                btn_daw_connect:      Default::default(),
+                btn_daw_disconnect:   Default::default(),
+                btn_daw_force_legacy: Default::default(),
             },
             Command::none(),
         )
@@ -815,7 +824,10 @@ impl IcedEditor for EtherTapEditor {
                 }
             }
             Message::SlotSelected(slot) => {
-                self.data.params.fx_slot.store(slot, Ordering::Relaxed);
+                let setter = ParamSetter::new(self.context.as_ref());
+                setter.begin_set_parameter(&self.data.params.fx_slot);
+                setter.set_parameter(&self.data.params.fx_slot, slot as i32);
+                setter.end_set_parameter(&self.data.params.fx_slot);
             }
             Message::SetRateSyncMode(mode) => {
                 let setter = ParamSetter::new(self.context.as_ref());
@@ -844,16 +856,28 @@ impl IcedEditor for EtherTapEditor {
                 self.data.all_slots_mode.fetch_xor(true, Ordering::Release);
             }
             Message::ToggleFxType(bit) => {
-                self.data.params.fx_type_filter.fetch_xor(1_u32 << bit, Ordering::Relaxed);
+                let setter = ParamSetter::new(self.context.as_ref());
+                toggle_fx_filter_param(&setter, &self.data.params, bit);
             }
             Message::ToggleMidiClock => {
-                self.data.params.midi_clock_enabled.fetch_xor(true, Ordering::Relaxed);
+                let setter = ParamSetter::new(self.context.as_ref());
+                let next = !self.data.params.midi_clock_enabled.value();
+                setter.begin_set_parameter(&self.data.params.midi_clock_enabled);
+                setter.set_parameter(&self.data.params.midi_clock_enabled, next);
+                setter.end_set_parameter(&self.data.params.midi_clock_enabled);
             }
             Message::ToggleMidiAutoConnect => {
-                self.data.params.midi_auto_connect.fetch_xor(true, Ordering::Relaxed);
+                let setter = ParamSetter::new(self.context.as_ref());
+                let next = !self.data.params.midi_auto_connect.value();
+                setter.begin_set_parameter(&self.data.params.midi_auto_connect);
+                setter.set_parameter(&self.data.params.midi_auto_connect, next);
+                setter.end_set_parameter(&self.data.params.midi_auto_connect);
             }
             Message::SetClockPpq(ppq) => {
-                self.data.params.midi_clock_ppq.store(ppq, Ordering::Relaxed);
+                let setter = ParamSetter::new(self.context.as_ref());
+                setter.begin_set_parameter(&self.data.params.midi_clock_ppq);
+                setter.set_parameter(&self.data.params.midi_clock_ppq, ppq);
+                setter.end_set_parameter(&self.data.params.midi_clock_ppq);
             }
             Message::ToggleMidiPicker => {
                 self.show_midi_picker = !self.show_midi_picker;
@@ -1003,7 +1027,7 @@ impl IcedEditor for EtherTapEditor {
 
         let rate_mode  = self.data.params.rate_sync_mode.value();
         let phase_mode = self.data.params.phase_sync_mode.value();
-        let cur_slot    = self.data.params.fx_slot.load(Ordering::Relaxed);
+        let cur_slot    = self.data.params.fx_slot.value() as u8;
         let compat_mask = self.data.compatible_slots.load(Ordering::Acquire);
         let occup_mask  = self.data.occupied_slots.load(Ordering::Acquire);
         // Snapshot slot_types from atomics (i32::MIN = not yet queried → None).
@@ -1286,7 +1310,7 @@ impl IcedEditor for EtherTapEditor {
             .push(ip_input)
             .push(t!("  :  ").size(11).color(THEME.text_dim))
             .push(port_input)
-            .push(Space::with_width(Length::Units(6)))
+            .push(Space::with_width(Length::Units(8)))
             .push(scan_btn)
             .push(Space::with_width(Length::Units(4)))
             .push(conn_btn)
@@ -1395,7 +1419,7 @@ impl IcedEditor for EtherTapEditor {
                     Row::new()
                         .push(t!(icon::SCAN).size(11).font(SOLAR_BOLD).color(THEME.text_dim))
                         .push(Space::with_width(Length::Units(4)))
-                        .push(t!("Query").size(10).color(THEME.text_dim))
+                        .push(t!("Scan").size(10).color(THEME.text_dim))
                         .align_items(Alignment::Center),
                 )
                 .on_press(Message::QuerySlots)
@@ -1410,11 +1434,18 @@ impl IcedEditor for EtherTapEditor {
             .push(slot_cols)
             .align_items(Alignment::Start);
 
-        // ── FX type filter toggles (line 2, with Auto button prepended) ────
+        // ── FX type filter toggles (line 2, with All button prepended) ────
         //
-        // The Auto button uses BtnKind::Force (orange) when enabled to match
-        // the lightning icon style in the sync frame.
-        let filter = self.data.params.fx_type_filter.load(Ordering::Relaxed);
+        // The All button uses BtnKind::Enabled (green) when active.
+        let filter_on: [bool; 7] = [
+            self.data.params.fx_filter_dly.value(),
+            self.data.params.fx_filter_3tap.value(),
+            self.data.params.fx_filter_4tap.value(),
+            self.data.params.fx_filter_drv.value(),
+            self.data.params.fx_filter_dcr.value(),
+            self.data.params.fx_filter_dfl.value(),
+            self.data.params.fx_filter_modd.value(),
+        ];
         const TYPE_BITS: &[(&str, u8, &str)] = &[
             ("Delay", 0, "Stereo Delay"),
             ("3 Tap", 1, "3-Tap Delay — three echoes, delay time at par/01"),
@@ -1428,7 +1459,7 @@ impl IcedEditor for EtherTapEditor {
             .width(Length::Fill)
             .align_items(Alignment::Center);
         for (state, &(name, bit, tip)) in self.btn_fx_type.iter_mut().zip(TYPE_BITS.iter()) {
-            let on = (filter >> bit) & 1 == 1;
+            let on = filter_on[bit as usize];
             let btn = Button::new(
                 state,
                 t!(name).size(9)
@@ -1450,7 +1481,7 @@ impl IcedEditor for EtherTapEditor {
             .push(
                 Button::new(
                     &mut self.btn_auto,
-                    t!("Auto").size(11).color(
+                    t!("All").size(11).color(
                         if all_mode { THEME.ok } else { THEME.muted },
                     ),
                 )
@@ -1510,11 +1541,14 @@ impl IcedEditor for EtherTapEditor {
             .push(sync_badge)
             .align_items(Alignment::Center);
 
-        // ── Output clock section (PPQ + MIDI OUT device + toggle — one row) ─
-        let clock_on  = self.data.params.midi_clock_enabled.load(Ordering::Relaxed);
-        let clock_ppq = self.data.params.midi_clock_ppq.load(Ordering::Relaxed);
+        // ── Output clock section (device + PPQ + enable toggle — one row) ─
+        let clock_on  = self.data.params.midi_clock_enabled.value();
+        let clock_ppq = self.data.params.midi_clock_ppq.value();
 
-        const PPQ_OPTIONS: &[u8] = &[3, 4, 6, 8, 12, 16, 24, 32, 48, 96];
+        const PPQ_OPTIONS: &[Ppq] = &[
+            Ppq::P3, Ppq::P4, Ppq::P6, Ppq::P8, Ppq::P12, Ppq::P16,
+            Ppq::P24, Ppq::P32, Ppq::P48, Ppq::P96,
+        ];
 
         // ── MIDI bridge device + clock enable — single row ────────────────
         // Layout: OUTPUT  PPQ [ppq]  OUT [device=Fill]  [status]  [MIDI CLK]
@@ -1557,7 +1591,7 @@ impl IcedEditor for EtherTapEditor {
         // Persisted `midi_auto_connect` toggle — mirrors `midi_clock_enabled`
         // wiring (`fetch_xor` on an `Arc<AtomicBool>`), placed alongside the
         // status ladder per the design doc's framing.
-        let auto_connect_on = self.data.params.midi_auto_connect.load(Ordering::Relaxed);
+        let auto_connect_on = self.data.params.midi_auto_connect.value();
         let midi_auto_connect_btn: Element<'_, Message> = Button::new(
             &mut self.btn_midi_auto_connect,
             Row::new()
@@ -1616,6 +1650,8 @@ impl IcedEditor for EtherTapEditor {
         };
 
         let clock_row = Row::new()
+            .push(midi_clk_btn)
+            .push(Space::with_width(Length::Units(8)))
             .push(
                 Button::new(
                     &mut self.btn_midi_picker,
@@ -1707,8 +1743,6 @@ impl IcedEditor for EtherTapEditor {
             // Every string literal here has a fixed char count; values are
             // pre-formatted above to the same width, so columns are stable.
             Row::new()
-                .push(midi_clk_btn)
-                .push(Space::with_width(Length::Units(6)))
                 .push(Space::with_width(Length::Fill))
                 .push(t!("avg ").size(9).color(THEME.text_dim))
                 .push(t!(avg_str).size(9).color(THEME.text_dim))
@@ -1730,29 +1764,29 @@ impl IcedEditor for EtherTapEditor {
         // ── Rate Sync row ─────────────────────────────────────────────────
         let rate_row = Row::new()
             .push(t!("RATE").size(9).color(THEME.text_dim))
-            .push(Space::with_width(Length::Units(5)))
+            .push(Space::with_width(Length::Units(4)))
             .push(sync_btn(&mut self.btn_rate_manual,  "Man",  rate_mode == SyncMode::Manual,
                 Message::SetRateSyncMode(SyncMode::Manual)))
-            .push(Space::with_width(Length::Units(3)))
+            .push(Space::with_width(Length::Units(4)))
             .push(sync_btn(&mut self.btn_rate_change,  "BPM",  rate_mode == SyncMode::OnChange,
                 Message::SetRateSyncMode(SyncMode::OnChange)))
-            .push(Space::with_width(Length::Units(3)))
+            .push(Space::with_width(Length::Units(4)))
             .push(sync_btn(&mut self.btn_rate_cont,    "Cont", rate_mode == SyncMode::Continuous,
                 Message::SetRateSyncMode(SyncMode::Continuous)))
-            .push(Space::with_width(Length::Units(5)))
+            .push(Space::with_width(Length::Units(4)))
             .push(force_icon_btn(&mut self.btn_rate_force, Message::ForceRateSync))
             .push(Space::with_width(Length::Fill))
             .push(t!("PHASE").size(9).color(THEME.text_dim))
-            .push(Space::with_width(Length::Units(5)))
+            .push(Space::with_width(Length::Units(4)))
             .push(sync_btn(&mut self.btn_phase_manual, "Man",  phase_mode == SyncMode::Manual,
                 Message::SetPhaseSyncMode(SyncMode::Manual)))
-            .push(Space::with_width(Length::Units(3)))
+            .push(Space::with_width(Length::Units(4)))
             .push(sync_btn(&mut self.btn_phase_change, "BPM",  phase_mode == SyncMode::OnChange,
                 Message::SetPhaseSyncMode(SyncMode::OnChange)))
-            .push(Space::with_width(Length::Units(3)))
+            .push(Space::with_width(Length::Units(4)))
             .push(sync_btn(&mut self.btn_phase_cont,   "Cont", phase_mode == SyncMode::Continuous,
                 Message::SetPhaseSyncMode(SyncMode::Continuous)))
-            .push(Space::with_width(Length::Units(5)))
+            .push(Space::with_width(Length::Units(4)))
             .push(force_icon_btn(&mut self.btn_phase_force, Message::ForcePhaseSync))
             .align_items(Alignment::Center);
 
@@ -1885,6 +1919,7 @@ impl IcedEditor for EtherTapEditor {
                     .align_items(Alignment::Center),
             )
             .padding([4, 10])
+            .width(Length::Fill)
             .style(DawPanel);
 
             // RATE / PHASE sync mode chips: interactive (sync_btn/force_icon_btn,
@@ -1923,23 +1958,33 @@ impl IcedEditor for EtherTapEditor {
                 .align_items(Alignment::Center)
                 .into();
 
-            // Audio I/O layout chips read from the plugin's reported
-            // AudioIOLayout — generic across channel counts, not hardcoded.
-            // Rate/phase sync chips are prepended to inputs since they
-            // control the host→plugin sync mode.
-            let (mut inputs, outputs) = audio_io_chips();
-            inputs.insert(0, phase_chip);
-            inputs.insert(0, rate_chip);
+            // PARAMETERS IN: automatable params the DAW can write to the plugin.
+            // Compound mode selectors (rate/phase + force) get one row each;
+            // momentary trigger buttons follow at 4 per row.
+            let params_in_compound = vec![rate_chip, phase_chip];
+            let params_in_triggers: Vec<Element<'_, Message>> = vec![
+                daw_trigger_chip(&mut self.btn_daw_connect,      "connect_to_last", Message::Connect,       false),
+                daw_trigger_chip(&mut self.btn_daw_disconnect,   "disconnect",      Message::Disconnect,    false),
+                daw_trigger_chip(&mut self.btn_daw_force_legacy, "force_sync",      Message::ForcePhaseSync, true),
+            ];
+
+            // PARAMETERS OUT: read-only status the plugin writes back to the DAW.
+            let params_out: Vec<Element<'_, Message>> = vec![
+                daw_indicator_chip("is_connected", connected),
+                daw_indicator_chip("is_matched",   in_sync),
+            ];
 
             let footer = Container::new(
                 Column::new()
-                    .push(t!("\u{25B6} AUDIO IN").size(9).color(THEME.daw_chrome_border))
+                    .push(t!("\u{25B6} PARAMETERS IN").size(9).color(THEME.daw_chrome_border))
                     .push(Space::with_height(Length::Units(4)))
-                    .push(wrap_rows(inputs, 4))
+                    .push(wrap_rows(params_in_compound, 1))
+                    .push(Space::with_height(Length::Units(3)))
+                    .push(wrap_rows(params_in_triggers, 4))
                     .push(Space::with_height(Length::Units(6)))
-                    .push(t!("\u{25B6} AUDIO OUT").size(9).color(THEME.daw_chrome_border))
+                    .push(t!("\u{25B6} PARAMETERS OUT").size(9).color(THEME.daw_chrome_border))
                     .push(Space::with_height(Length::Units(4)))
-                    .push(wrap_rows(outputs, 4))
+                    .push(wrap_rows(params_out, 4))
                     .padding([5, 6])
                     .spacing(2)
                     .width(Length::Fill),
@@ -1973,15 +2018,15 @@ impl IcedEditor for EtherTapEditor {
             // dead-center of the DAW shell once the assembly itself is
             // centered below.
             const RULER_GUTTER: u16 = 40;
+            let ruler_row_h = || Row::new()
+                .push(Space::new(Length::Units(RULER_GUTTER), Length::Units(1)))
+                .push(Space::with_width(Length::Units(4)))
+                .push(dim_ruler_h(360, "360px".to_string()))
+                .push(Space::with_width(Length::Units(4)))
+                .push(Space::new(Length::Units(RULER_GUTTER), Length::Units(1)));
+
             let dimensioned_frame = Column::new()
-                .push(
-                    Row::new()
-                        .push(Space::new(Length::Units(RULER_GUTTER), Length::Units(1)))
-                        .push(Space::with_width(Length::Units(4)))
-                        .push(dim_ruler_h(360, "360px".to_string()))
-                        .push(Space::with_width(Length::Units(4)))
-                        .push(Space::new(Length::Units(RULER_GUTTER), Length::Units(1))),
-                )
+                .push(ruler_row_h())
                 .push(Space::with_height(Length::Units(4)))
                 .push(
                     Row::new()
@@ -1989,9 +2034,11 @@ impl IcedEditor for EtherTapEditor {
                         .push(Space::with_width(Length::Units(4)))
                         .push(framed_plugin)
                         .push(Space::with_width(Length::Units(4)))
-                        .push(Space::new(Length::Units(RULER_GUTTER), Length::Units(280)))
+                        .push(dim_ruler_v(280, "280px".to_string()))
                         .align_items(Alignment::Center),
-                );
+                )
+                .push(Space::with_height(Length::Units(4)))
+                .push(ruler_row_h());
 
             Container::new(
                 Column::new()
@@ -2027,6 +2074,28 @@ impl IcedEditor for EtherTapEditor {
 
 // ─── View helpers ─────────────────────────────────────────────────────────────
 
+/// Toggle one FX type filter BoolParam via ParamSetter (bit 0–6).
+fn toggle_fx_filter_param(setter: &ParamSetter, params: &EtherTapParams, bit: u8) {
+    macro_rules! toggle {
+        ($field:ident) => {{
+            let next = !params.$field.value();
+            setter.begin_set_parameter(&params.$field);
+            setter.set_parameter(&params.$field, next);
+            setter.end_set_parameter(&params.$field);
+        }};
+    }
+    match bit {
+        0 => toggle!(fx_filter_dly),
+        1 => toggle!(fx_filter_3tap),
+        2 => toggle!(fx_filter_4tap),
+        3 => toggle!(fx_filter_drv),
+        4 => toggle!(fx_filter_dcr),
+        5 => toggle!(fx_filter_dfl),
+        6 => toggle!(fx_filter_modd),
+        _ => {}
+    }
+}
+
 /// Compact radio-style sync mode button (Man / BPM / Cont).
 fn sync_btn<'a>(
     state: &'a mut button::State,
@@ -2057,57 +2126,33 @@ fn force_icon_btn(state: &mut button::State, msg: Message) -> Button<'_, Message
     .padding([4, 8])
 }
 
-/// Build (input_chips, output_chips) from the plugin's first reported
-/// AudioIOLayout — generic across channel counts, not EtherTap-specific.
+/// Momentary trigger button for the DAW parameters-in footer.
+/// `dimmed` = legacy/secondary params rendered in dim chrome text.
 #[cfg(feature = "standalone")]
-fn audio_io_chips<'a>() -> (Vec<Element<'a, Message>>, Vec<Element<'a, Message>>) {
-    use nih_plug::prelude::Plugin;
-    let layout = crate::EtherTap::AUDIO_IO_LAYOUTS.first();
+fn daw_trigger_chip<'a>(
+    state: &'a mut button::State,
+    label: &'static str,
+    msg: Message,
+    dimmed: bool,
+) -> Element<'a, Message> {
+    let color = if dimmed { THEME.daw_chrome_text_dim } else { THEME.daw_chrome_text };
+    Button::new(state, t!(label).size(9).color(color))
+        .on_press(msg)
+        .style(EtherBtn(BtnKind::Idle))
+        .padding([3, 6])
+        .into()
+}
 
-    let ch_chip = |label: &str, count: u32| -> Element<'_, Message> {
-        Row::new()
-            .push(t!(label.to_string()).size(9).color(THEME.daw_chrome_text_dim))
-            .push(Space::with_width(Length::Units(3)))
-            .push(t!(format!("\u{00D7}{count}")).size(9).font(MONO_FONT).color(THEME.daw_chrome_text))
-            .align_items(Alignment::Center)
-            .into()
-    };
-    let none_chip = || -> Element<'_, Message> {
-        t!("\u{2014}").size(9).color(THEME.daw_chrome_text_dim).into()
-    };
-
-    let (mut ins, mut outs): (Vec<Element<'_, Message>>, Vec<Element<'_, Message>>) =
-        (Vec::new(), Vec::new());
-
-    if let Some(layout) = layout {
-        // Main input — name from PortNames.main_input
-        match layout.main_input_channels {
-            Some(n) => ins.push(ch_chip(layout.names.main_input.unwrap_or("Main"), n.get())),
-            None    => ins.push(none_chip()),
-        }
-        // Aux inputs — layout.aux_input_ports is &[NonZeroU32] (channel counts);
-        // names are in layout.names.aux_inputs (&[&str])
-        for (i, &port_channels) in layout.aux_input_ports.iter().enumerate() {
-            let name = layout.names.aux_inputs.get(i).copied().unwrap_or("Aux");
-            ins.push(ch_chip(name, port_channels.get()));
-        }
-
-        // Main output — name from PortNames.main_output
-        match layout.main_output_channels {
-            Some(n) => outs.push(ch_chip(layout.names.main_output.unwrap_or("Main"), n.get())),
-            None    => outs.push(none_chip()),
-        }
-        // Aux outputs
-        for (i, &port_channels) in layout.aux_output_ports.iter().enumerate() {
-            let name = layout.names.aux_outputs.get(i).copied().unwrap_or("Aux");
-            outs.push(ch_chip(name, port_channels.get()));
-        }
-    } else {
-        ins.push(none_chip());
-        outs.push(none_chip());
-    }
-
-    (ins, outs)
+/// Read-only indicator LED for the DAW parameters-out footer.
+#[cfg(feature = "standalone")]
+fn daw_indicator_chip<'a>(label: &'static str, on: bool) -> Element<'a, Message> {
+    let (dot, color) = if on { ("●", THEME.ok) } else { ("○", THEME.err) };
+    Row::new()
+        .push(t!(dot).size(9).color(color))
+        .push(Space::with_width(Length::Units(3)))
+        .push(t!(label).size(9).color(THEME.daw_chrome_text_dim))
+        .align_items(Alignment::Center)
+        .into()
 }
 
 /// Footer-scoped wrap/grid: chunks `items` into a `Column` of `Row`s, `per_row`

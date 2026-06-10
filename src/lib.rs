@@ -176,7 +176,6 @@ pub struct EtherTap {
     prev_disconnect_param: bool,
     prev_force_sync_rate:  bool,
     prev_force_sync_phase: bool,
-    prev_force_sync_both:  bool,
 
     // ── Host param shadow (avoids redundant set_parameter calls) ─────────
     /// Last value written to `params.is_connected` from the audio thread.
@@ -260,7 +259,7 @@ impl Default for EtherTap {
             status_tx,
             params.target_ip.clone(),
             params.target_port.clone(),
-            params.fx_slot.clone(),
+            params.fx_slot_atom.clone(),
             network::WorkerShared {
                 hardware_float_out: hardware_float.clone(),
                 compatible_slots:   compatible_slots.clone(),
@@ -277,10 +276,10 @@ impl Default for EtherTap {
             .expect("failed to spawn network worker thread");
 
         let initial_device = params.midi_out_device.lock().clone();
-        let initial_ppq = params.midi_clock_ppq.load(std::sync::atomic::Ordering::Relaxed);
+        let initial_ppq = params.midi_clock_ppq_atom.load(std::sync::atomic::Ordering::Relaxed);
         let midi_worker = midi_clock::MidiClockWorker::new(
-            params.midi_clock_enabled.clone(),
-            params.midi_auto_connect.clone(),
+            params.midi_clock_enabled_atom.clone(),
+            params.midi_auto_connect_atom.clone(),
             midi_clock_rx,
             device_change_rx,
             midi_watch.worker_rx,
@@ -345,7 +344,6 @@ impl Default for EtherTap {
             prev_disconnect_param: false,
             prev_force_sync_rate:  false,
             prev_force_sync_phase: false,
-            prev_force_sync_both:  false,
             on_change_retry_pending:    false,
             on_change_retry_bpm:        0.0,
             on_change_retry_hard_reset: false,
@@ -435,6 +433,36 @@ impl Plugin for EtherTap {
         // Cache the current timestamp once — avoids repeated syscalls throughout
         // this function.  A single call is accurate enough for all timing checks.
         let now = now_ms();
+
+        // Mirror automatable params → worker-facing atomics (once per buffer).
+        self.params.fx_slot_atom.store(
+            self.params.fx_slot.value() as u8,
+            Ordering::Relaxed,
+        );
+        self.params.midi_clock_enabled_atom.store(
+            self.params.midi_clock_enabled.value(),
+            Ordering::Relaxed,
+        );
+        self.params.midi_auto_connect_atom.store(
+            self.params.midi_auto_connect.value(),
+            Ordering::Relaxed,
+        );
+        self.params.midi_clock_ppq_atom.store(
+            self.params.midi_clock_ppq.value().to_u8(),
+            Ordering::Relaxed,
+        );
+        {
+            let p = &self.params;
+            let bits: u32 =
+                (p.fx_filter_dly.value()  as u32)       |
+                ((p.fx_filter_3tap.value() as u32) << 1) |
+                ((p.fx_filter_4tap.value() as u32) << 2) |
+                ((p.fx_filter_drv.value()  as u32) << 3) |
+                ((p.fx_filter_dcr.value()  as u32) << 4) |
+                ((p.fx_filter_dfl.value()  as u32) << 5) |
+                ((p.fx_filter_modd.value() as u32) << 6);
+            p.fx_type_filter.store(bits, Ordering::Relaxed);
+        }
 
         // ── 1. Drain network status (lock-free, allocation-free) ─────────
         // All NetworkStatus variants are Copy/allocation-free.  Payload data
@@ -702,7 +730,7 @@ impl Plugin for EtherTap {
             }
         }
         // Read PPQ once per buffer — drives LED blink cadence and tick generation.
-        let midi_ppq = self.params.midi_clock_ppq.load(Ordering::Relaxed);
+        let midi_ppq = self.params.midi_clock_ppq_atom.load(Ordering::Relaxed);
 
         if playing {
             self.last_pos_beats  = pos_beats;
@@ -719,7 +747,7 @@ impl Plugin for EtherTap {
         }
 
         // ── 7. MIDI clock output via CoreMIDI virtual source ─────────────────
-        if self.params.midi_clock_enabled.load(Ordering::Relaxed) {
+        if self.params.midi_clock_enabled_atom.load(Ordering::Relaxed) {
             // Standalone builds always take the tick-accumulator path below —
             // pos_beats_raw is forced to None so transport-derived beat_start
             // (computed by the dummy backend from pos_samples + fixed tempo,
@@ -889,20 +917,17 @@ impl Plugin for EtherTap {
         }
         self.prev_force_sync_rate = force_rate_param;
 
-        // Phase (hard reset) sync: new automation params + legacy params + UI atomic.
-        let force_phase_param = self.params.force_sync_phase.value();
-        let force_both_param  = self.params.force_sync_both.value();
+        // Phase (hard reset) sync: automation params + legacy param + UI atomic.
+        let force_phase_param  = self.params.force_sync_phase.value();
         let force_legacy_param = self.params.force_sync.value();
         let force_trigger = self.force_sync_trigger.swap(false, Ordering::AcqRel);
-        if (force_phase_param && !self.prev_force_sync_phase)
-            || (force_both_param  && !self.prev_force_sync_both)
+        if (force_phase_param  && !self.prev_force_sync_phase)
             || (force_legacy_param && !self.prev_force_sync)
             || force_trigger
         {
             self.dispatch(bpm, true);
         }
         self.prev_force_sync_phase = force_phase_param;
-        self.prev_force_sync_both  = force_both_param;
         self.prev_force_sync       = force_legacy_param;
 
         self.last_bpm = bpm;
@@ -982,7 +1007,7 @@ impl EtherTap {
 
         if self.all_slots_mode.load(Ordering::Acquire) {
             // All four reads are lock-free atomic loads — no mutex on the audio thread.
-            let fallback_slot = self.params.fx_slot.load(Ordering::Relaxed);
+            let fallback_slot = self.params.fx_slot_atom.load(Ordering::Relaxed);
             let filter        = self.params.fx_type_filter.load(Ordering::Relaxed);
             // Decode compatible_slots bitmask: bit n → slot (n+1).
             let compat_mask   = self.compatible_slots.load(Ordering::Relaxed);
@@ -1010,7 +1035,7 @@ impl EtherTap {
                 }
             }
         } else {
-            slots[0] = Some(self.params.fx_slot.load(Ordering::Relaxed));
+            slots[0] = Some(self.params.fx_slot_atom.load(Ordering::Relaxed));
             n = 1;
         }
 
@@ -1246,21 +1271,19 @@ mod tests {
         let json = serde_json::to_string(&*params.target_port.lock()).unwrap();
         assert_eq!(serde_json::from_str::<u16>(&json).unwrap(), 10024);
 
-        params.fx_slot.store(4u8, Ordering::Relaxed);
-        let json = serde_json::to_string(&params.fx_slot.load(Ordering::Relaxed)).unwrap();
-        assert_eq!(serde_json::from_str::<u8>(&json).unwrap(), 4);
+        // fx_slot, fx_type_filter, midi_clock_enabled, midi_clock_ppq are now
+        // #[id] params — persisted by the host; no JSON round-trip test needed.
+        params.fx_slot_atom.store(4u8, Ordering::Relaxed);
+        assert_eq!(params.fx_slot_atom.load(Ordering::Relaxed), 4);
 
         params.fx_type_filter.store(0b000_0011u32, Ordering::Relaxed);
-        let json = serde_json::to_string(&params.fx_type_filter.load(Ordering::Relaxed)).unwrap();
-        assert_eq!(serde_json::from_str::<u32>(&json).unwrap(), 0b000_0011u32);
+        assert_eq!(params.fx_type_filter.load(Ordering::Relaxed), 0b000_0011u32);
 
-        params.midi_clock_enabled.store(false, Ordering::Relaxed);
-        let json = serde_json::to_string(&params.midi_clock_enabled.load(Ordering::Relaxed)).unwrap();
-        assert_eq!(serde_json::from_str::<bool>(&json).unwrap(), false);
+        params.midi_clock_enabled_atom.store(false, Ordering::Relaxed);
+        assert!(!params.midi_clock_enabled_atom.load(Ordering::Relaxed));
 
-        params.midi_clock_ppq.store(48u8, Ordering::Relaxed);
-        let json = serde_json::to_string(&params.midi_clock_ppq.load(Ordering::Relaxed)).unwrap();
-        assert_eq!(serde_json::from_str::<u8>(&json).unwrap(), 48);
+        params.midi_clock_ppq_atom.store(48u8, Ordering::Relaxed);
+        assert_eq!(params.midi_clock_ppq_atom.load(Ordering::Relaxed), 48);
 
         let device = Some("Midi Through Port-0".to_owned());
         *params.midi_out_device.lock() = device;
