@@ -453,6 +453,22 @@ impl container::StyleSheet for ModSection {
     }
 }
 
+/// Single coherent outer frame around the whole plugin surface (banner +
+/// MIXER/EFFECTS/MIDI/SYNC sections).  Used in both modes: VST3 fills the
+/// window with it; standalone pins it at the true 360×280 VST3 dimensions.
+struct PluginFrame;
+impl container::StyleSheet for PluginFrame {
+    fn style(&self) -> container::Style {
+        container::Style {
+            background: Some(Background::Color(THEME.bg)),
+            border_radius: BORDER_RADIUS,
+            border_width: 1.0,
+            border_color: THEME.section_border,
+            text_color: None,
+        }
+    }
+}
+
 /// Standalone DAW-shell chrome — transport row + "DAW I/O" footer panel.
 /// Deliberately cool-toned against `ModSection`/`BannerBg`'s warm neutrals so
 /// the framed 360×280 box reads at a glance as "real plugin content" vs.
@@ -1823,6 +1839,15 @@ impl IcedEditor for EtherTapEditor {
             .padding([0, 4, 3, 4])
             .spacing(0);
 
+        // One coherent plugin surface: banner (edge-to-edge) + all four
+        // sections inside a single outer frame.  Identical column in both
+        // modes; each cfg block below wraps it in a `PluginFrame` container
+        // at its mode's dimensions.
+        let plugin_column = Column::new()
+            .push(banner)
+            .push(Space::with_height(Length::Units(4)))
+            .push(content);
+
         // ── Standalone DAW frame (compiled only with --features standalone) ──
         #[cfg(feature = "standalone")]
         let result = {
@@ -1960,23 +1985,14 @@ impl IcedEditor for EtherTapEditor {
             .width(Length::Fill)
             .style(DawPanel);
 
-            // The framed 360×280 box must contain *exactly* what a real VST3
-            // host renders — banner (edge-to-edge) above content, same as the
-            // `#[cfg(not(feature = "standalone"))]` assembly below — so the
-            // frame's border is the one true seam between "what the plugin
-            // draws" and "DAW chrome we built around it for standalone test".
-            // Previously the banner rendered *outside* the frame, sandwiched
-            // between transport_row and the box, making the plugin's own
-            // header look like part of the DAW shell instead of its content.
-            let plugin_view = Column::new()
-                .push(banner)
-                .push(Space::with_height(Length::Units(4)))
-                .push(content);
-
-            let framed_plugin = Container::new(plugin_view)
+            // The framed 360×280 box contains *exactly* what a real VST3 host
+            // renders — the shared `plugin_column` — so the frame's border is
+            // the one true seam between "what the plugin draws" and "DAW
+            // chrome we built around it for standalone test".
+            let framed_plugin = Container::new(plugin_column)
                 .width(Length::Units(360))
                 .height(Length::Units(280))
-                .style(ModSection);
+                .style(PluginFrame);
 
             // Dimension-ruler overlay: rulers sized to the frame's exact
             // edges (360 / 280) so they double as a visual cross-check that
@@ -2028,10 +2044,10 @@ impl IcedEditor for EtherTapEditor {
         };
 
         #[cfg(not(feature = "standalone"))]
-        let result = Column::new()
-            .push(banner)
-            .push(Space::with_height(Length::Units(6)))
-            .push(Container::new(content).width(Length::Fill).height(Length::Fill))
+        let result = Container::new(plugin_column)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(PluginFrame)
             .into();
 
         result
