@@ -74,6 +74,7 @@ impl Ppq {
             8  => Ppq::P8,
             12 => Ppq::P12,
             16 => Ppq::P16,
+            24 => Ppq::P24,
             32 => Ppq::P32,
             48 => Ppq::P48,
             96 => Ppq::P96,
@@ -178,9 +179,18 @@ pub struct EtherTapParams {
     #[id = "force_sync_phase"]
     pub force_sync_phase: BoolParam,
 
-    /// Legacy momentary trigger kept for existing automation lanes.
-    #[id = "force_sync"]
-    pub force_sync: BoolParam,
+    /// Momentary: re-query the mixer's FX slots (effect type + BPM audit).
+    #[id = "audit_slots"]
+    pub audit_slots: BoolParam,
+
+    /// Dispatch target: all compatible slots (true) vs. the selected
+    /// `fx_slot` only (false).  Worker reads the mirrored atom.
+    #[id = "all_slots"]
+    pub all_slots: BoolParam,
+
+    /// Backing store read by `dispatch()` (mirrored from `all_slots` at the
+    /// top of each `process()` call).
+    pub all_slots_atom: Arc<AtomicBool>,
 
     // ── Read-only status (plugin → host) ─────────────────────────────────
     #[id = "is_connected"]
@@ -226,7 +236,9 @@ impl Default for EtherTapParams {
             disconnect:      BoolParam::new("Disconnect",      false),
             force_sync_rate:  BoolParam::new("Force Sync Rate",  false),
             force_sync_phase: BoolParam::new("Force Sync Phase", false),
-            force_sync: BoolParam::new("Force Sync", false).non_automatable(),
+            audit_slots:      BoolParam::new("Audit Slots",      false),
+            all_slots:        BoolParam::new("All Slots",        true),
+            all_slots_atom:   Arc::new(AtomicBool::new(true)),
             is_connected: BoolParam::new("Is Connected", false),
             is_matched:   BoolParam::new("Is Matched",   false),
         }

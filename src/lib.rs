@@ -92,18 +92,12 @@ pub struct EtherTap {
     host_bpm: Arc<AtomicU32>,
     /// Receiver for MIDI device list changes (from midi_watcher).
     midi_device_rx: Arc<crossbeam_channel::Receiver<Vec<String>>>,
-    /// Set by the UI button; swap()-cleared by the audio thread to trigger an
-    /// immediate Hard Reset without relying on the unimplemented param setter.
-    force_sync_trigger: Arc<AtomicBool>,
-    /// Set by the Rate Sync "Force" button — fires an immediate rate-only sync.
-    force_rate_trigger: Arc<AtomicBool>,
     /// Bitmask: bit n set ↔ slot (n+1) is BPM-compatible. Written by network worker.
     compatible_slots:  Arc<AtomicU8>,
     /// Bitmask: bit n set ↔ slot (n+1) is occupied. Written by network worker.
     occupied_slots:    Arc<AtomicU8>,
     /// Raw effect type ID for each slot (index = slot-1). i32::MIN = not yet queried.
     slot_types:        Arc<[AtomicI32; 8]>,
-    all_slots_mode:    Arc<AtomicBool>,
     scan_targets:      Arc<Mutex<Vec<network::DeviceInfo>>>,
     /// Millisecond timestamp of the last completed TargetsFound scan result.
     scan_completed_ts: Arc<AtomicU64>,
@@ -170,12 +164,16 @@ pub struct EtherTap {
     /// we dispatch the current BPM to all newly-detected compatible slots.
     reconnect_sync_pending: bool,
 
-    // ── Force-sync rising-edge detection (for VST automation) ─────────────
-    prev_force_sync:       bool,
+    // ── Trigger-param rising-edge detection (for VST automation) ──────────
+    // Momentary params self-reset: process() consumes the rising edge, then
+    // writes the param back to false via context.set_parameter().  A host
+    // automation lane that *holds* true therefore retriggers on every host
+    // re-send — intended trigger semantics.
     prev_connect_to_last:  bool,
     prev_disconnect_param: bool,
     prev_force_sync_rate:  bool,
     prev_force_sync_phase: bool,
+    prev_audit_slots:      bool,
 
     // ── Host param shadow (avoids redundant set_parameter calls) ─────────
     /// Last value written to `params.is_connected` from the audio thread.
@@ -217,8 +215,6 @@ impl Default for EtherTap {
 
         let hardware_float = Arc::new(AtomicU32::new(0u32));
         let host_bpm = Arc::new(AtomicU32::new(0u32));
-        let force_sync_trigger = Arc::new(AtomicBool::new(false));
-        let force_rate_trigger = Arc::new(AtomicBool::new(false));
         let conn_status = Arc::new(AtomicBool::new(false));
         let tx_activity_ts = Arc::new(AtomicU64::new(0));
         let rx_activity_ts = Arc::new(AtomicU64::new(0));
@@ -227,7 +223,6 @@ impl Default for EtherTap {
         let occupied_slots   = Arc::new(AtomicU8::new(0));
         let slot_types: Arc<[AtomicI32; 8]> =
             Arc::new(std::array::from_fn(|_| AtomicI32::new(i32::MIN)));
-        let all_slots_mode   = Arc::new(AtomicBool::new(true));
         let scan_targets      = Arc::new(Mutex::new(Vec::<network::DeviceInfo>::new()));
         let scan_completed_ts = Arc::new(AtomicU64::new(0));
         let connected_device  = Arc::new(Mutex::new((String::new(), String::new())));
@@ -309,14 +304,11 @@ impl Default for EtherTap {
             midi_clock_stats,
             hardware_float,
             host_bpm,
-            force_sync_trigger,
-            force_rate_trigger,
             midi_device_rx,
             midi_watcher_shutdown,
             compatible_slots,
             occupied_slots,
             slot_types,
-            all_slots_mode,
             scan_targets,
             scan_completed_ts,
             connected_device,
@@ -339,11 +331,11 @@ impl Default for EtherTap {
             last_clock_bpm: 0.0,
             last_bpm_changed_at: None,
             prev_playing:   false,
-            prev_force_sync:       false,
             prev_connect_to_last:  false,
             prev_disconnect_param: false,
             prev_force_sync_rate:  false,
             prev_force_sync_phase: false,
+            prev_audit_slots:      false,
             on_change_retry_pending:    false,
             on_change_retry_bpm:        0.0,
             on_change_retry_hard_reset: false,
@@ -449,6 +441,10 @@ impl Plugin for EtherTap {
         );
         self.params.midi_clock_ppq_atom.store(
             self.params.midi_clock_ppq.value().to_u8(),
+            Ordering::Relaxed,
+        );
+        self.params.all_slots_atom.store(
+            self.params.all_slots.value(),
             Ordering::Relaxed,
         );
         {
@@ -570,7 +566,11 @@ impl Plugin for EtherTap {
             if connected {
                 // Just (re)connected: scan slots and arm the auto-sync.
                 // This mirrors the manual "Query → All" flow in the editor.
-                self.all_slots_mode.store(true, Ordering::Release);
+                // all_slots is a host param now — write it through the same
+                // set_parameter path as is_connected so the host stays in sync;
+                // the atom mirror picks it up at the top of the next buffer,
+                // well before the SlotScanDone-gated dispatch fires.
+                context.set_parameter(&self.params.all_slots, true);
                 self.reconnect_sync_pending = true;
                 let _ = self.cmd_tx.try_send(NetworkCommand::AuditSlots);
             } else {
@@ -891,44 +891,63 @@ impl Plugin for EtherTap {
             }
         }
 
-        // ── 8. Force triggers — param automation edges + UI atomics ─────────
+        // ── 8. Momentary trigger params — rising edge fires, then self-reset ─
+        // Both the editor (via ParamSetter) and host automation lanes drive
+        // these.  After consuming a rising edge, process() writes the param
+        // back to false through context.set_parameter() — same proven
+        // audio-thread path as is_connected/is_matched.  A host lane holding
+        // true retriggers on each host re-send (intended trigger semantics).
 
-        // Connection control via automation: send ConnectToLast so the network
-        // worker reads ip/port itself — no String allocation on the audio thread.
+        // Connection control: send ConnectToLast so the network worker reads
+        // ip/port itself — no String allocation on the audio thread.
         let connect_param = self.params.connect_to_last.value();
-        if connect_param && !self.prev_connect_to_last {
-            let _ = self.cmd_tx.try_send(NetworkCommand::ConnectToLast);
-            let _ = self.cmd_tx.try_send(NetworkCommand::AuditSlots);
-            self.all_slots_mode.store(true, Ordering::Release);
+        if connect_param {
+            if !self.prev_connect_to_last {
+                let _ = self.cmd_tx.try_send(NetworkCommand::ConnectToLast);
+                let _ = self.cmd_tx.try_send(NetworkCommand::AuditSlots);
+                context.set_parameter(&self.params.all_slots, true);
+            }
+            context.set_parameter(&self.params.connect_to_last, false);
         }
         self.prev_connect_to_last = connect_param;
 
         let disconnect_param = self.params.disconnect.value();
-        if disconnect_param && !self.prev_disconnect_param {
-            let _ = self.cmd_tx.try_send(NetworkCommand::Disconnect);
+        if disconnect_param {
+            if !self.prev_disconnect_param {
+                let _ = self.cmd_tx.try_send(NetworkCommand::Disconnect);
+            }
+            context.set_parameter(&self.params.disconnect, false);
         }
         self.prev_disconnect_param = disconnect_param;
 
-        // Rate-only sync: new automation param + legacy UI atomic.
+        let audit_param = self.params.audit_slots.value();
+        if audit_param {
+            if !self.prev_audit_slots {
+                let _ = self.cmd_tx.try_send(NetworkCommand::AuditSlots);
+            }
+            context.set_parameter(&self.params.audit_slots, false);
+        }
+        self.prev_audit_slots = audit_param;
+
+        // Rate-only sync (delay time, no phase reset).
         let force_rate_param = self.params.force_sync_rate.value();
-        let force_rate_trigger = self.force_rate_trigger.swap(false, Ordering::AcqRel);
-        if (force_rate_param && !self.prev_force_sync_rate) || force_rate_trigger {
-            self.dispatch(bpm, false);
+        if force_rate_param {
+            if !self.prev_force_sync_rate {
+                self.dispatch(bpm, false);
+            }
+            context.set_parameter(&self.params.force_sync_rate, false);
         }
         self.prev_force_sync_rate = force_rate_param;
 
-        // Phase (hard reset) sync: automation params + legacy param + UI atomic.
-        let force_phase_param  = self.params.force_sync_phase.value();
-        let force_legacy_param = self.params.force_sync.value();
-        let force_trigger = self.force_sync_trigger.swap(false, Ordering::AcqRel);
-        if (force_phase_param  && !self.prev_force_sync_phase)
-            || (force_legacy_param && !self.prev_force_sync)
-            || force_trigger
-        {
-            self.dispatch(bpm, true);
+        // Phase (hard reset) sync.
+        let force_phase_param = self.params.force_sync_phase.value();
+        if force_phase_param {
+            if !self.prev_force_sync_phase {
+                self.dispatch(bpm, true);
+            }
+            context.set_parameter(&self.params.force_sync_phase, false);
         }
         self.prev_force_sync_phase = force_phase_param;
-        self.prev_force_sync       = force_legacy_param;
 
         self.last_bpm = bpm;
         self.prev_playing = playing;
@@ -945,13 +964,10 @@ impl Plugin for EtherTap {
             midi_clock_activity_ts: self.midi_clock_activity_ts.clone(),
             hardware_float: self.hardware_float.clone(),
             host_bpm: self.host_bpm.clone(),
-            force_sync_trigger: self.force_sync_trigger.clone(),
-            force_rate_trigger: self.force_rate_trigger.clone(),
             midi_device_rx:    self.midi_device_rx.clone(),
             compatible_slots:  self.compatible_slots.clone(),
             occupied_slots:    self.occupied_slots.clone(),
             slot_types:        self.slot_types.clone(),
-            all_slots_mode:    self.all_slots_mode.clone(),
             scan_targets:      self.scan_targets.clone(),
             scan_completed_ts: self.scan_completed_ts.clone(),
             connected_device:  self.connected_device.clone(),
@@ -1005,7 +1021,7 @@ impl EtherTap {
         let mut slots = [None::<u8>; 8];
         let mut n = 0usize;
 
-        if self.all_slots_mode.load(Ordering::Acquire) {
+        if self.params.all_slots_atom.load(Ordering::Acquire) {
             // All four reads are lock-free atomic loads — no mutex on the audio thread.
             let fallback_slot = self.params.fx_slot_atom.load(Ordering::Relaxed);
             let filter        = self.params.fx_type_filter.load(Ordering::Relaxed);

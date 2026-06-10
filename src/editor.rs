@@ -12,7 +12,7 @@ use std::sync::{
     Arc,
 };
 
-use nih_plug::prelude::{GuiContext, ParamSetter};
+use nih_plug::prelude::{BoolParam, GuiContext, ParamSetter};
 use nih_plug_iced::{
     button, container, create_iced_editor, executor, pick_list, text_input,
     widget::{tooltip, Button, Column, Container, PickList, Row, Space, Text, TextInput},
@@ -547,15 +547,12 @@ pub struct EditorData {
     pub midi_clock_activity_ts:  Arc<AtomicU64>,
     pub hardware_float:     Arc<AtomicU32>,
     pub host_bpm:           Arc<AtomicU32>,
-    pub force_sync_trigger: Arc<AtomicBool>,
-    pub force_rate_trigger: Arc<AtomicBool>,
     /// Bitmask: bit n set ↔ slot (n+1) compatible. Written by network worker.
     pub compatible_slots:   Arc<AtomicU8>,
     /// Bitmask: bit n set ↔ slot (n+1) occupied. Written by network worker.
     pub occupied_slots:     Arc<AtomicU8>,
     /// Raw effect type ID per slot (index = slot-1). i32::MIN = not yet queried.
     pub slot_types:         Arc<[AtomicI32; 8]>,
-    pub all_slots_mode:     Arc<AtomicBool>,
     pub scan_targets:       Arc<Mutex<Vec<DeviceInfo>>>,
     /// Millisecond timestamp of the last completed scan (0 = never scanned).
     pub scan_completed_ts:  Arc<AtomicU64>,
@@ -680,7 +677,9 @@ struct EtherTapEditor {
     #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     btn_daw_disconnect:   button::State,
     #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
-    btn_daw_force_legacy: button::State,
+    btn_daw_audit:        button::State,
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    btn_daw_all_slots:    button::State,
 }
 
 // ─── Messages ────────────────────────────────────────────────────────────────
@@ -788,7 +787,8 @@ impl IcedEditor for EtherTapEditor {
                 btn_daw_force_phase:  Default::default(),
                 btn_daw_connect:      Default::default(),
                 btn_daw_disconnect:   Default::default(),
-                btn_daw_force_legacy: Default::default(),
+                btn_daw_audit:        Default::default(),
+                btn_daw_all_slots:    Default::default(),
             },
             Command::none(),
         )
@@ -842,18 +842,20 @@ impl IcedEditor for EtherTapEditor {
                 setter.end_set_parameter(&self.data.params.phase_sync_mode);
             }
             Message::ForceRateSync  => {
-                self.data.force_rate_trigger.store(true, Ordering::Release);
+                pulse_param(self.context.as_ref(), &self.data.params.force_sync_rate);
             }
             Message::ForcePhaseSync => {
-                self.data.force_sync_trigger.store(true, Ordering::Release);
+                pulse_param(self.context.as_ref(), &self.data.params.force_sync_phase);
             }
             Message::QuerySlots => {
-                if self.data.cmd_tx.try_send(NetworkCommand::AuditSlots).is_err() {
-                    log::warn!("[EtherTap] editor: AuditSlots dropped (worker channel full)");
-                }
+                pulse_param(self.context.as_ref(), &self.data.params.audit_slots);
             }
             Message::ToggleAutoSlots => {
-                self.data.all_slots_mode.fetch_xor(true, Ordering::Release);
+                let setter = ParamSetter::new(self.context.as_ref());
+                let next = !self.data.params.all_slots.value();
+                setter.begin_set_parameter(&self.data.params.all_slots);
+                setter.set_parameter(&self.data.params.all_slots, next);
+                setter.end_set_parameter(&self.data.params.all_slots);
             }
             Message::ToggleFxType(bit) => {
                 let setter = ParamSetter::new(self.context.as_ref());
@@ -943,19 +945,14 @@ impl IcedEditor for EtherTapEditor {
                 self.show_scan_results = false;
             }
             Message::Connect => {
-                let ip   = self.data.params.target_ip.lock().clone();
-                let port = *self.data.params.target_port.lock();
-                if self.data.cmd_tx.try_send(NetworkCommand::UpdateTarget { ip, port }).is_err()
-                    || self.data.cmd_tx.try_send(NetworkCommand::AuditSlots).is_err()
-                {
-                    log::warn!("[EtherTap] editor: Connect command(s) dropped (worker channel full)");
-                }
-                self.data.all_slots_mode.store(true, Ordering::Release);
+                // Pulse the connect_to_last trigger param: process() detects the
+                // rising edge, sends ConnectToLast (worker reads the persisted
+                // ip/port mutexes itself) + AuditSlots, and sets all_slots true —
+                // so a host recording automation sees the gesture too.
+                pulse_param(self.context.as_ref(), &self.data.params.connect_to_last);
             }
             Message::Disconnect => {
-                if self.data.cmd_tx.try_send(NetworkCommand::Disconnect).is_err() {
-                    log::warn!("[EtherTap] editor: Disconnect dropped (worker channel full)");
-                }
+                pulse_param(self.context.as_ref(), &self.data.params.disconnect);
                 // Keep connected_device so the header shows the last known name.
             }
             Message::SetStandaloneBpm(s) => {
@@ -1035,7 +1032,7 @@ impl IcedEditor for EtherTapEditor {
             let raw = self.data.slot_types[i].load(Ordering::Relaxed);
             if raw == i32::MIN { None } else { Some(raw) }
         });
-        let all_mode   = self.data.all_slots_mode.load(Ordering::Acquire);
+        let all_mode   = self.data.params.all_slots.value();
         let post_audit = compat_mask != 0 || occup_mask != 0;
 
         // ── Scan popup modal ──────────────────────────────────────────────
@@ -1962,10 +1959,12 @@ impl IcedEditor for EtherTapEditor {
             // Compound mode selectors (rate/phase + force) get one row each;
             // momentary trigger buttons follow at 4 per row.
             let params_in_compound = vec![rate_chip, phase_chip];
+            let all_slots_on = self.data.params.all_slots.value();
             let params_in_triggers: Vec<Element<'_, Message>> = vec![
-                daw_trigger_chip(&mut self.btn_daw_connect,      "connect_to_last", Message::Connect,       false),
-                daw_trigger_chip(&mut self.btn_daw_disconnect,   "disconnect",      Message::Disconnect,    false),
-                daw_trigger_chip(&mut self.btn_daw_force_legacy, "force_sync",      Message::ForcePhaseSync, true),
+                daw_trigger_chip(&mut self.btn_daw_connect,    "connect_to_last", Message::Connect,         false),
+                daw_trigger_chip(&mut self.btn_daw_disconnect, "disconnect",      Message::Disconnect,      false),
+                daw_trigger_chip(&mut self.btn_daw_audit,      "audit_slots",     Message::QuerySlots,      false),
+                daw_trigger_chip(&mut self.btn_daw_all_slots,  "all_slots",       Message::ToggleAutoSlots, !all_slots_on),
             ];
 
             // PARAMETERS OUT: read-only status the plugin writes back to the DAW.
@@ -2073,6 +2072,16 @@ impl IcedEditor for EtherTapEditor {
 }
 
 // ─── View helpers ─────────────────────────────────────────────────────────────
+
+/// Pulse a momentary trigger BoolParam: set true via ParamSetter so the host
+/// records the gesture; process() consumes the rising edge and self-resets the
+/// param to false through context.set_parameter().
+fn pulse_param(context: &dyn GuiContext, param: &BoolParam) {
+    let setter = ParamSetter::new(context);
+    setter.begin_set_parameter(param);
+    setter.set_parameter(param, true);
+    setter.end_set_parameter(param);
+}
 
 /// Toggle one FX type filter BoolParam via ParamSetter (bit 0–6).
 fn toggle_fx_filter_param(setter: &ParamSetter, params: &EtherTapParams, bit: u8) {
