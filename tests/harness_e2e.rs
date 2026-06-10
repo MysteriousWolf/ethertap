@@ -8,72 +8,21 @@
 //! Each `EtherTap::default()` spawns real network + MIDI worker threads (and,
 //! on macOS, a CoreMIDI watcher). Tests serialize on `E2E_LOCK` so multiple
 //! plugin instances never construct concurrently.
+//!
+//! Exercises the VST3 (host-transport) build: standalone builds source BPM
+//! and play state from UI atomics instead of the transport these tests drive.
+#![cfg(not(feature = "standalone"))]
 
 mod common;
 
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use common::harness_util::{connect, step_until, E2E_LOCK};
 use common::MockMixer;
-use ethertap::EtherTap;
-use vst_runtime::Harness;
-
-static E2E_LOCK: Mutex<()> = Mutex::new(());
-
-/// Drive one playing `process()` call at `tempo` BPM, 4/4.
-fn step(harness: &mut Harness<EtherTap>, tempo: f64) {
-    let mut t = harness.new_transport();
-    t.playing = true;
-    t.tempo = Some(tempo);
-    t.time_sig_numerator = Some(4);
-    t.time_sig_denominator = Some(4);
-    let mut io = vec![vec![0.0f32; 256]; 2];
-    let _ = harness.process(&mut io, t, &[]);
-}
-
-/// Step the plugin until `pred` holds or `timeout` elapses. Returns whether
-/// the predicate was satisfied. Sleeps between steps so the worker threads
-/// get scheduled (their UDP round trips are real).
-fn step_until(
-    harness: &mut Harness<EtherTap>,
-    tempo: f64,
-    timeout: Duration,
-    mut pred: impl FnMut(&Harness<EtherTap>) -> bool,
-) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        step(harness, tempo);
-        if pred(harness) {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
-/// Build a harness pointed at `mock` and connect via the `connect_to_last`
-/// trigger param. Panics if the connection doesn't establish.
-fn connect(mock: &MockMixer) -> Harness<EtherTap> {
-    let mut harness =
-        Harness::<EtherTap>::new(44_100.0, 256).expect("EtherTap should initialize");
-
-    let params = harness.plugin().ethertap_params();
-    *params.target_ip.lock() = "127.0.0.1".to_string();
-    *params.target_port.lock() = mock.port();
-
-    assert!(harness.set_param_normalized("connect_to_last", 1.0));
-    let connected = step_until(&mut harness, 120.0, Duration::from_secs(5), |h| {
-        h.param_normalized("is_connected") == Some(1.0)
-    });
-    assert!(connected, "is_connected never became true against MockMixer");
-    harness
-}
 
 #[test]
 fn connect_disconnect_lifecycle_via_trigger_params() {
-    let _guard = E2E_LOCK.lock().unwrap();
+    let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mock = MockMixer::start();
     let mut harness = connect(&mock);
 
@@ -103,7 +52,7 @@ fn connect_disconnect_lifecycle_via_trigger_params() {
 
 #[test]
 fn force_sync_rate_dispatches_osc_to_compatible_slots() {
-    let _guard = E2E_LOCK.lock().unwrap();
+    let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mock = MockMixer::start();
     let mut harness = connect(&mock);
     let handles = harness.plugin().test_handles();

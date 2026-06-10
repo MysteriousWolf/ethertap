@@ -68,12 +68,22 @@ pub struct SinkStats {
 pub struct MidiClockSink {
     state: Arc<Mutex<SinkState>>,
     conn: Option<MidiInputConnection<()>>,
+    port_name: String,
 }
 
 impl MidiClockSink {
-    /// Open the virtual input port and start counting.
+    /// Open the virtual input port under the canonical name and start
+    /// counting.
     pub fn start() -> Result<Self, String> {
-        let mut input = MidiInput::new(SINK_PORT_NAME).map_err(|e| e.to_string())?;
+        Self::start_named(SINK_PORT_NAME)
+    }
+
+    /// Open under a caller-chosen name. Tests use a per-process unique name:
+    /// CoreMIDI can surface phantom (stale, unowned) virtual destinations
+    /// under a previously used name, and EtherTap's worker connects to the
+    /// *first* name match — a unique name guarantees exactly one live match.
+    pub fn start_named(port_name: &str) -> Result<Self, String> {
+        let mut input = MidiInput::new(port_name).map_err(|e| e.to_string())?;
         // Timing bytes (0xF8) are exactly what we want — ignore nothing but
         // active sense.
         input.ignore(Ignore::ActiveSense);
@@ -82,7 +92,7 @@ impl MidiClockSink {
         let cb_state = state.clone();
         let conn = input
             .create_virtual(
-                SINK_PORT_NAME,
+                port_name,
                 move |_timestamp_us, message, _| {
                     let now = Instant::now();
                     let mut s = cb_state.lock();
@@ -124,7 +134,12 @@ impl MidiClockSink {
             )
             .map_err(|e| e.to_string())?;
 
-        Ok(Self { state, conn: Some(conn) })
+        Ok(Self { state, conn: Some(conn), port_name: port_name.to_string() })
+    }
+
+    /// The virtual port's name (what shows up in device pickers / port scans).
+    pub fn port_name(&self) -> &str {
+        &self.port_name
     }
 
     /// Close the port and stop counting. Idempotent.

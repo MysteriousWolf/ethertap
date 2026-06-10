@@ -1086,6 +1086,8 @@ impl EtherTap {
             connected_device:  self.connected_device.clone(),
             midi_clock_stats:  self.midi_clock_stats.clone(),
             midi_clock_drop_count: self.midi_clock_drop_count.clone(),
+            device_change_tx:  self.device_change_tx.clone(),
+            midi_bridge_connected: self.midi_bridge_connected.clone(),
         }
     }
 }
@@ -1104,6 +1106,11 @@ pub struct TestHandles {
     pub connected_device:  Arc<Mutex<(String, String)>>,
     pub midi_clock_stats:  Arc<midi_clock::AtomicClockStats>,
     pub midi_clock_drop_count: Arc<AtomicU32>,
+    /// Notifies the MIDI clock worker of an output-device change (same channel
+    /// the editor's device picker uses).
+    pub device_change_tx:  crossbeam_channel::Sender<Option<String>>,
+    /// True while the worker holds an open connection to the selected output.
+    pub midi_bridge_connected: Arc<AtomicBool>,
 }
 
 // ─── VST3 export ─────────────────────────────────────────────────────────────

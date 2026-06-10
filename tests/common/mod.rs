@@ -120,6 +120,113 @@ pub fn spawn_worker(
     (cmd_tx, status_rx, handle, shared)
 }
 
+// ─── vst-runtime harness helpers (shared by harness_e2e / sync_matrix /
+// midi_clock_tests) ──────────────────────────────────────────────────────────
+
+pub mod harness_util {
+    use std::time::{Duration, Instant};
+
+    use ethertap::EtherTap;
+    use vst_runtime::Harness;
+
+    use super::MockMixer;
+
+    /// Serializes harness-based tests *within one test binary*: each
+    /// `EtherTap::default()` spawns real network + MIDI worker threads (and,
+    /// on macOS, a CoreMIDI watcher) — never construct two concurrently.
+    pub static E2E_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Drive one playing `process()` call at `tempo` BPM, 4/4, with the song
+    /// position set from `pos_samples` (beat/bar fields derived).
+    pub fn step_at(harness: &mut Harness<EtherTap>, tempo: f64, pos_samples: i64) {
+        let mut t = harness.new_transport();
+        t.playing = true;
+        t.tempo = Some(tempo);
+        t.time_sig_numerator = Some(4);
+        t.time_sig_denominator = Some(4);
+        let pos_beats = pos_samples as f64 / 44_100.0 / 60.0 * tempo;
+        let bar_number = (pos_beats / 4.0).floor() as i32;
+        t.set_song_position(
+            Some(pos_samples),
+            Some(pos_beats),
+            Some(bar_number as f64 * 4.0),
+            Some(bar_number),
+            None,
+        );
+        let mut io = vec![vec![0.0f32; 256]; 2];
+        let _ = harness.process(&mut io, t, &[]);
+    }
+
+    /// Drive one playing `process()` call at `tempo` BPM, 4/4, position zero.
+    pub fn step(harness: &mut Harness<EtherTap>, tempo: f64) {
+        step_at(harness, tempo, 0);
+    }
+
+    /// Step the plugin until `pred` holds or `timeout` elapses. Sleeps between
+    /// steps so the worker threads get scheduled (their UDP round trips are
+    /// real).
+    pub fn step_until(
+        harness: &mut Harness<EtherTap>,
+        tempo: f64,
+        timeout: Duration,
+        mut pred: impl FnMut(&Harness<EtherTap>) -> bool,
+    ) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            step(harness, tempo);
+            if pred(harness) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Build a harness pointed at `mock` and connect via the
+    /// `connect_to_last` trigger param. Panics if the connection doesn't
+    /// establish.
+    pub fn connect(mock: &MockMixer) -> Harness<EtherTap> {
+        let mut harness =
+            Harness::<EtherTap>::new(44_100.0, 256).expect("EtherTap should initialize");
+
+        let params = harness.plugin().ethertap_params();
+        *params.target_ip.lock() = "127.0.0.1".to_string();
+        *params.target_port.lock() = mock.port();
+
+        assert!(harness.set_param_normalized("connect_to_last", 1.0));
+        let connected = step_until(&mut harness, 120.0, Duration::from_secs(5), |h| {
+            h.param_normalized("is_connected") == Some(1.0)
+        });
+        assert!(connected, "is_connected never became true against MockMixer");
+        harness
+    }
+
+    /// Wait for the post-connect slot audit to land (compatible_slots != 0).
+    pub fn wait_for_audit(harness: &mut Harness<EtherTap>) {
+        let handles = harness.plugin().test_handles();
+        let audited = step_until(harness, 120.0, Duration::from_secs(5), |_| {
+            handles
+                .compatible_slots
+                .load(std::sync::atomic::Ordering::Relaxed)
+                != 0
+        });
+        assert!(audited, "slot audit never completed");
+    }
+
+    /// Let the reconnect auto-sync fire and drain: on connect the plugin arms
+    /// `reconnect_sync_pending` and dispatches once to all compatible slots
+    /// after the slot scan lands. Tests that assert on per-slot sync counts
+    /// must snapshot *after* this, or the auto-sync races their baselines.
+    pub fn drain_auto_sync(harness: &mut Harness<EtherTap>, mock: &MockMixer) {
+        let _ = step_until(harness, 120.0, Duration::from_secs(2), |_| {
+            (1..=8u8).any(|s| mock.sync_count(s) > 0)
+        });
+        std::thread::sleep(Duration::from_millis(300));
+    }
+}
+
 pub fn wait_for_status(
     status_rx: &Receiver<NetworkStatus>,
     timeout: Duration,
