@@ -1,3 +1,7 @@
+// Shared by multiple test binaries — each compiles this module separately and
+// uses a different subset, so per-binary dead-code warnings are expected noise.
+#![allow(dead_code)]
+
 use std::net::UdpSocket;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 use std::sync::Arc;
