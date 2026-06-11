@@ -1,0 +1,16 @@
+index b2a61b4..242170e 100644
+--- a/nih_plug_iced/src/lib.rs
++++ b/nih_plug_iced/src/lib.rs
+@@ -279,6 +279,12 @@ impl IcedState {
+     pub fn is_open(&self) -> bool {
+         self.open.load(Ordering::Acquire)
+     }
++
++    /// Update the stored window size. Called by the resize event handler so the
++    /// persisted size stays in sync with the actual window dimensions.
++    pub fn set_size(&self, width: u32, height: u32) {
++        self.size.store((width, height));
++    }
+ }
+ 
+ /// A marker struct to indicate that a parameter update has happened.

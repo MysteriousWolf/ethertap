@@ -19,6 +19,7 @@
 
 # Claude Code working memory
 /.claude/.scratchpad/
+/.claude/project/.deterministic-signals.prev.md
 
 # Isolated worktrees
 /.worktrees/
