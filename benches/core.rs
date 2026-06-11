@@ -13,7 +13,7 @@ fn bench_float_to_bpm(c: &mut Criterion) {
 }
 
 fn bench_heartbeat(c: &mut Criterion) {
-    c.bench_function("osc_heartbeat", |b| b.iter(|| ethertap::osc::heartbeat()));
+    c.bench_function("osc_heartbeat", |b| b.iter(ethertap::osc::heartbeat));
 }
 
 fn bench_set_fx_delay(c: &mut Criterion) {

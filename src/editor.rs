@@ -126,10 +126,16 @@ struct Theme {
 
     // ── Standalone DAW-shell chrome (test harness only, never shipped) ───
     // dark Asiimov palette — black base, gunmetal panels, orange accents, near-white text
-    daw_chrome_bg: Color,       // transport row / DAW I/O footer background
-    daw_chrome_panel: Color,    // subsection panel backgrounds
-    daw_chrome_border: Color,   // panel border + accent (Asiimov orange)
-    daw_chrome_text: Color,     // primary text on the chrome surface
+    // Only read from #[cfg(feature = "standalone")] view code.
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    daw_chrome_bg: Color, // transport row / DAW I/O footer background
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    daw_chrome_panel: Color, // subsection panel backgrounds
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    daw_chrome_border: Color, // panel border + accent (Asiimov orange)
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    daw_chrome_text: Color, // primary text on the chrome surface
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     daw_chrome_text_dim: Color, // secondary/label text on the chrome surface
 }
 
@@ -637,6 +643,8 @@ pub struct EditorData {
     /// Play/stop state for standalone mode.
     pub standalone_playing: Arc<AtomicBool>,
     /// Cumulative beat position in standalone mode (f64 bits), written by process().
+    /// Only read by the #[cfg(feature = "standalone")] DAW-shell view.
+    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     pub standalone_pos_beats: Arc<AtomicU64>,
     /// One-shot Stop trigger: editor sets, process() swap(false)-consumes.
     pub standalone_stop_trigger: Arc<AtomicBool>,
@@ -695,8 +703,6 @@ struct EtherTapEditor {
     standalone_bpm: Arc<AtomicU32>,
     #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     standalone_playing: Arc<AtomicBool>,
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
-    standalone_pos_beats: Arc<AtomicU64>,
     #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
     standalone_stop_trigger: Arc<AtomicBool>,
     #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
@@ -787,7 +793,6 @@ impl IcedEditor for EtherTapEditor {
         let bpm_input_value = format!("{:.1}", init_bpm);
         let standalone_bpm = data.standalone_bpm.clone();
         let standalone_playing = data.standalone_playing.clone();
-        let standalone_pos_beats = data.standalone_pos_beats.clone();
         let standalone_stop_trigger = data.standalone_stop_trigger.clone();
         (
             Self {
@@ -821,7 +826,6 @@ impl IcedEditor for EtherTapEditor {
                 last_scan_trigger_ms: 0,
                 standalone_bpm,
                 standalone_playing,
-                standalone_pos_beats,
                 standalone_stop_trigger,
                 tap_times: VecDeque::new(),
                 daw: DawChromeState {

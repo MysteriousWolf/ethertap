@@ -748,10 +748,8 @@ fn try_connect_in(
         &port,
         "EtherTap-PhysIn",
         move |_ts, msg, _| {
-            if msg.first().copied() != Some(0xF8) {
-                if pass_tx.try_send(msg.to_vec()).is_err() {
-                    drop_count.fetch_add(1, Ordering::Relaxed);
-                }
+            if msg.first().copied() != Some(0xF8) && pass_tx.try_send(msg.to_vec()).is_err() {
+                drop_count.fetch_add(1, Ordering::Relaxed);
             }
         },
         (),
