@@ -1,8 +1,11 @@
 [
   {
-    "label": "Check / Lint",
-    "command": "cargo",
-    "args": ["clippy", "--all-targets", "--", "-D", "warnings"],
+    "label": "Check + Lint + Format",
+    "command": "bash",
+    "args": [
+      "-c",
+      "cargo clippy --workspace --all-targets -- -D warnings && cargo clippy -p ethertap --all-targets --features standalone -- -D warnings && cargo fmt --all --check"
+    ],
     "cwd": "$ZED_WORKTREE_ROOT",
   },
   {
@@ -18,15 +21,27 @@
     "cwd": "$ZED_WORKTREE_ROOT",
   },
   {
-    "label": "Test",
+    "label": "Test: full",
     "command": "cargo",
-    "args": ["test", "--all"],
+    "args": ["test", "--workspace"],
+    "cwd": "$ZED_WORKTREE_ROOT",
+  },
+  {
+    "label": "Test: unit (lib only)",
+    "command": "cargo",
+    "args": ["test", "-p", "ethertap", "--lib"],
+    "cwd": "$ZED_WORKTREE_ROOT",
+  },
+  {
+    "label": "Bench",
+    "command": "cargo",
+    "args": ["bench"],
     "cwd": "$ZED_WORKTREE_ROOT",
   },
   {
     "label": "Run: Mock suite (mixer + MIDI)",
-    "command": "uv",
-    "args": ["run", "scripts/mock_ethertap.py"],
+    "command": "cargo",
+    "args": ["run", "-p", "mock-suite"],
     "cwd": "$ZED_WORKTREE_ROOT",
   },
   {

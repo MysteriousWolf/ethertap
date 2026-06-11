@@ -1,7 +1,7 @@
 /// Standalone GUI runner — opens the EtherTap window without a DAW.
 ///
 /// The default target is `127.0.0.1:10023`.  To test with a mock mixer, run
-/// `scripts/mock_ethertap.py` in a separate terminal before connecting (press
+/// `cargo run -p mock-suite` in a separate terminal before connecting (press
 /// `m` to toggle the mixer panel).
 ///
 /// Build and run:

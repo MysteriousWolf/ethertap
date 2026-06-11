@@ -249,6 +249,7 @@ Built across 6 iterations of `/subagent-implementation`. Commits (chronological)
 - Recurring reviewer false-positive (5 occurrences across CP-1, CP-3, CP-4 ×2,
   and a near-miss in CP-5): fresh-context `atomic-reviewer` agents repeatedly
   saw `src/lib.rs` (`AUDIO_IO_LAYOUTS` cfg-split) and `scripts/mock_ethertap.py`
+  (the Python mock tool, since replaced by the `mock-suite` crate)
   dirty in `git status`/`git diff` and attributed them to the current
   implementer's scope — when both are pre-existing uncommitted WIP that
   predates this entire session (confirmed byte-identical to the `4a6dec4`

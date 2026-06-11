@@ -9,9 +9,8 @@ Produces a cross-platform VST3 bundle via `cargo nih-plug bundle` (wrapped by xt
 - `scripts/setup.sh` — clone vendor deps (baseview, nih-plug), apply patches in `patches/`
 - `scripts/build.sh` — build + package to `dist/`; `--universal` flag for macOS lipo
 - `scripts/clean.sh` — remove build artifacts
-- `scripts/gui_test.sh`, `scripts/gui_test_no_mixer.sh`, `scripts/gui_test_with_mock.sh` — run standalone binary with/without mock mixer
-- `scripts/mock_ethertap.py`, `scripts/mock_mixer.py`, `scripts/mock_midi_sink.py` — Python mock servers for integration testing
-- `scripts/run_mock_midi_sink.sh` — launches mock MIDI sink
+- `scripts/gui_test.sh` — run the standalone binary (`cargo run --bin ethertap-gui --features standalone`)
+- `mock-suite` crate — mock mixer + MIDI clock sink (library for tests, `cargo run -p mock-suite` for the TUI); replaced the retired Python mock scripts
 
 ## CLI code
 
