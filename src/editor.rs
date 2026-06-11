@@ -682,6 +682,7 @@ struct EtherTapEditor {
     // Output clock section — toggle button + PPQ pick list + MIDI out device
     btn_clock_toggle: button::State,
     btn_midi_auto_connect: button::State,
+    btn_auto_reconnect: button::State,
     pick_ppq: pick_list::State<Ppq>,
     /// Available MIDI output port names — first entry is always the sentinel.
     midi_out_ports: Vec<String>,
@@ -733,10 +734,10 @@ struct DawChromeState {
     btn_daw_phase_cont: button::State,
     btn_daw_force_rate: button::State,
     btn_daw_force_phase: button::State,
-    btn_daw_connect: button::State,
-    btn_daw_disconnect: button::State,
-    btn_daw_audit: button::State,
-    btn_daw_all_slots: button::State,
+    /// One state per trigger chip in the PARAMETERS IN footer, indexed in
+    /// table order — resized in `daw_shell()` so adding a chip to the table
+    /// there is the only change needed for a new param.
+    btn_daw_triggers: Vec<button::State>,
 }
 
 // ─── Messages ────────────────────────────────────────────────────────────────
@@ -752,6 +753,7 @@ enum Message {
     ForcePhaseSync,
     QuerySlots,
     ToggleAutoSlots,
+    ToggleAutoReconnect,
     /// Flip one bit in the fx_type_filter bitmask (bit = 0..6).
     ToggleFxType(u8),
     /// Toggle MIDI clock output on/off.
@@ -813,6 +815,7 @@ impl IcedEditor for EtherTapEditor {
                 btn_fx_type: Default::default(),
                 btn_clock_toggle: Default::default(),
                 btn_midi_auto_connect: Default::default(),
+                btn_auto_reconnect: Default::default(),
                 pick_ppq: Default::default(),
                 midi_out_ports: vec![MIDI_OUT_NONE.to_string()],
                 show_midi_picker: false,
@@ -842,10 +845,7 @@ impl IcedEditor for EtherTapEditor {
                     btn_daw_phase_cont: Default::default(),
                     btn_daw_force_rate: Default::default(),
                     btn_daw_force_phase: Default::default(),
-                    btn_daw_connect: Default::default(),
-                    btn_daw_disconnect: Default::default(),
-                    btn_daw_audit: Default::default(),
-                    btn_daw_all_slots: Default::default(),
+                    btn_daw_triggers: Vec::new(),
                 },
             },
             Command::none(),
@@ -931,6 +931,13 @@ impl IcedEditor for EtherTapEditor {
                 setter.begin_set_parameter(&self.data.params.midi_auto_connect);
                 setter.set_parameter(&self.data.params.midi_auto_connect, next);
                 setter.end_set_parameter(&self.data.params.midi_auto_connect);
+            }
+            Message::ToggleAutoReconnect => {
+                let setter = ParamSetter::new(self.context.as_ref());
+                let next = !self.data.params.auto_reconnect.value();
+                setter.begin_set_parameter(&self.data.params.auto_reconnect);
+                setter.set_parameter(&self.data.params.auto_reconnect, next);
+                setter.end_set_parameter(&self.data.params.auto_reconnect);
             }
             Message::SetClockPpq(ppq) => {
                 let setter = ParamSetter::new(self.context.as_ref());
@@ -1456,6 +1463,32 @@ impl IcedEditor for EtherTapEditor {
                 .padding([4, 6])
         };
 
+        // Persisted `auto_reconnect` toggle — same visual pattern as the MIDI
+        // auto-connect toggle. ON: reconnect to the last mixer at load and
+        // retarget by device identity when the address moves.
+        let auto_reconnect_on = self.data.params.auto_reconnect.value();
+        let auto_reconnect_btn = Button::new(
+            &mut self.btn_auto_reconnect,
+            Row::new()
+                .push(t!(if auto_reconnect_on { "●" } else { "○" }).size(9).color(
+                    if auto_reconnect_on {
+                        THEME.ok
+                    } else {
+                        THEME.muted
+                    },
+                ))
+                .push(Space::with_width(Length::Units(4)))
+                .push(t!("Auto").size(10))
+                .align_items(Alignment::Center),
+        )
+        .on_press(Message::ToggleAutoReconnect)
+        .style(EtherBtn(if auto_reconnect_on {
+            BtnKind::Enabled
+        } else {
+            BtnKind::Idle
+        }))
+        .padding([4, 8]);
+
         let net_row = Row::new()
             .push(ip_input)
             .push(t!("  :  ").size(11).color(THEME.text_dim))
@@ -1464,6 +1497,8 @@ impl IcedEditor for EtherTapEditor {
             .push(scan_btn)
             .push(Space::with_width(Length::Units(4)))
             .push(conn_btn)
+            .push(Space::with_width(Length::Units(4)))
+            .push(auto_reconnect_btn)
             .align_items(Alignment::Center);
 
         // ── Slot selector ─────────────────────────────────────────────────
@@ -2318,35 +2353,31 @@ fn daw_shell<'a>(
 
     // PARAMETERS IN: automatable params the DAW can write to the plugin.
     // Compound mode selectors (rate/phase + force) get one row each;
-    // momentary trigger buttons follow at 4 per row.
+    // momentary trigger / toggle chips follow at 4 per row, built from this
+    // table — adding a param here is the only change a new chip needs
+    // (button states resize to match).
     let params_in_compound = vec![rate_chip, phase_chip];
     let all_slots_on = data.params.all_slots.value();
-    let params_in_triggers: Vec<Element<'_, Message>> = vec![
-        daw_trigger_chip(
-            &mut daw.btn_daw_connect,
-            "connect_to_last",
-            Message::Connect,
-            false,
-        ),
-        daw_trigger_chip(
-            &mut daw.btn_daw_disconnect,
-            "disconnect",
-            Message::Disconnect,
-            false,
-        ),
-        daw_trigger_chip(
-            &mut daw.btn_daw_audit,
-            "audit_slots",
-            Message::QuerySlots,
-            false,
-        ),
-        daw_trigger_chip(
-            &mut daw.btn_daw_all_slots,
-            "all_slots",
-            Message::ToggleAutoSlots,
-            !all_slots_on,
+    let auto_reconnect_on = data.params.auto_reconnect.value();
+    let trigger_specs: [(&'static str, Message, bool); 5] = [
+        ("connect_to_last", Message::Connect, false),
+        ("disconnect", Message::Disconnect, false),
+        ("audit_slots", Message::QuerySlots, false),
+        ("all_slots", Message::ToggleAutoSlots, !all_slots_on),
+        (
+            "auto_reconnect",
+            Message::ToggleAutoReconnect,
+            !auto_reconnect_on,
         ),
     ];
+    daw.btn_daw_triggers
+        .resize_with(trigger_specs.len(), Default::default);
+    let params_in_triggers: Vec<Element<'_, Message>> = daw
+        .btn_daw_triggers
+        .iter_mut()
+        .zip(trigger_specs)
+        .map(|(state, (label, msg, dimmed))| daw_trigger_chip(state, label, msg, dimmed))
+        .collect();
 
     // PARAMETERS OUT: read-only status the plugin writes back to the DAW.
     let params_out: Vec<Element<'_, Message>> = vec![

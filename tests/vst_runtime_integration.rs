@@ -74,3 +74,47 @@ fn ethertap_harness_drives_process_and_exposes_params() {
     // Cleanly deactivate the plugin (Drop handles thread cleanup).
     harness.deactivate();
 }
+
+/// Coverage guard: the host-visible param id set. Fails when a param is
+/// added or renamed without updating this list — the reminder to also wire
+/// it into the standalone DAW shell's PARAMETERS IN/OUT footer (editor.rs
+/// `daw_shell`) and any host-facing docs.
+#[test]
+fn param_id_set_is_accounted_for() {
+    let harness = Harness::<EtherTap>::new(44_100.0, 256).expect("EtherTap should initialize");
+
+    let mut actual: Vec<String> = harness.param_ids().map(str::to_owned).collect();
+    actual.sort();
+
+    let mut expected = vec![
+        "fx_slot",
+        "fx_filter_dly",
+        "fx_filter_3tap",
+        "fx_filter_4tap",
+        "fx_filter_drv",
+        "fx_filter_dcr",
+        "fx_filter_dfl",
+        "fx_filter_modd",
+        "midi_clock_enabled",
+        "midi_clock_ppq",
+        "midi_auto_connect",
+        "auto_reconnect",
+        "rate_sync_mode",
+        "phase_sync_mode",
+        "connect_to_last",
+        "disconnect",
+        "force_sync_rate",
+        "force_sync_phase",
+        "audit_slots",
+        "all_slots",
+        "is_connected",
+        "is_matched",
+    ];
+    expected.sort_unstable();
+
+    assert_eq!(
+        actual, expected,
+        "host param set changed — update the DAW shell footer (editor.rs \
+         daw_shell) and this list together"
+    );
+}
