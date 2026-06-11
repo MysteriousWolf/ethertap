@@ -1,3 +1,12 @@
+#[cfg(not(target_os = "macos"))]
+use crossbeam_channel::tick;
+use crossbeam_channel::{bounded, Receiver, Sender};
+use std::sync::atomic::AtomicBool;
+#[cfg(not(target_os = "macos"))]
+use std::sync::atomic::Ordering;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::Arc;
 /// MIDI device hot-plug watcher.
 ///
 /// On macOS this uses native CoreMIDI notification callbacks via
@@ -6,17 +15,8 @@
 /// periodic polling via `midir::MidiOutput`.
 #[cfg(target_os = "macos")]
 use std::sync::OnceLock;
-#[cfg(target_os = "macos")]
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
-use crossbeam_channel::{Receiver, Sender, bounded};
-#[cfg(not(target_os = "macos"))]
-use crossbeam_channel::tick;
 #[cfg(not(target_os = "macos"))]
 use std::time::Duration;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-#[cfg(not(target_os = "macos"))]
-use std::sync::atomic::Ordering;
 
 /// Minimum interval between device-list broadcasts — rate-limits flurries of
 /// CoreMIDI notifications during USB hub plug/unplug.
@@ -57,7 +57,11 @@ pub fn spawn() -> MidiWatcherChannels {
     #[cfg(not(target_os = "macos"))]
     spawn_polling(ed_tx, wk_tx, shutdown.clone());
 
-    MidiWatcherChannels { editor_rx: ed_rx, worker_rx: wk_rx, shutdown }
+    MidiWatcherChannels {
+        editor_rx: ed_rx,
+        worker_rx: wk_rx,
+        shutdown,
+    }
 }
 
 // ─── macOS: CoreMIDI notification watcher ──────────────────────────────────────
@@ -144,21 +148,28 @@ fn spawn_macos(ed_tx: Sender<Vec<String>>, wk_tx: Sender<Vec<String>>) {
 #[cfg(not(target_os = "macos"))]
 fn scan_ports() -> Vec<String> {
     match midir::MidiOutput::new("EtherTap-Scan") {
-        Ok(out) => out.ports()
+        Ok(out) => out
+            .ports()
             .iter()
             .filter_map(|p| out.port_name(p).ok())
             .filter(|n| n != "EtherTap MIDI Clock")
             .collect(),
         Err(e) => {
-            log::warn!("[EtherTap] MIDI port scan failed: {e} \
-                        (is ALSA/JACK available?)");
+            log::warn!(
+                "[EtherTap] MIDI port scan failed: {e} \
+                        (is ALSA/JACK available?)"
+            );
             Vec::new()
         }
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn spawn_polling(ed_tx: Sender<Vec<String>>, wk_tx: Sender<Vec<String>>, shutdown: Arc<AtomicBool>) {
+fn spawn_polling(
+    ed_tx: Sender<Vec<String>>,
+    wk_tx: Sender<Vec<String>>,
+    shutdown: Arc<AtomicBool>,
+) {
     if let Err(e) = std::thread::Builder::new()
         .name("ethertap-midi-watch".into())
         .spawn(move || {

@@ -27,10 +27,10 @@ pub struct WorkerShared {
     /// Bitmask: bit n set ↔ slot (n+1) compatible. Written by network worker after audit.
     pub compatible_slots: Arc<AtomicU8>,
     /// Bitmask: bit n set ↔ slot (n+1) occupied. Written by network worker after audit.
-    pub occupied_slots:   Arc<AtomicU8>,
+    pub occupied_slots: Arc<AtomicU8>,
     /// Per-slot type IDs (index = slot-1). i32::MIN = not yet queried.
-    pub slot_types:       Arc<[AtomicI32; 8]>,
-    pub scan_targets:     Arc<Mutex<Vec<ethertap::network::DeviceInfo>>>,
+    pub slot_types: Arc<[AtomicI32; 8]>,
+    pub scan_targets: Arc<Mutex<Vec<ethertap::network::DeviceInfo>>>,
     pub connected_device: Arc<Mutex<(String, String)>>,
 }
 
@@ -38,18 +38,28 @@ impl WorkerShared {
     /// Decode the compatible_slots bitmask into a sorted Vec<u8>.
     pub fn compatible_vec(&self) -> Vec<u8> {
         let mask = self.compatible_slots.load(Ordering::Relaxed);
-        (0..8u8).filter(|&b| mask & (1 << b) != 0).map(|b| b + 1).collect()
+        (0..8u8)
+            .filter(|&b| mask & (1 << b) != 0)
+            .map(|b| b + 1)
+            .collect()
     }
     /// Decode the occupied_slots bitmask into a sorted Vec<u8>.
     pub fn occupied_vec(&self) -> Vec<u8> {
         let mask = self.occupied_slots.load(Ordering::Relaxed);
-        (0..8u8).filter(|&b| mask & (1 << b) != 0).map(|b| b + 1).collect()
+        (0..8u8)
+            .filter(|&b| mask & (1 << b) != 0)
+            .map(|b| b + 1)
+            .collect()
     }
     /// Snapshot slot_types as [Option<i32>; 8] (i32::MIN → None).
     pub fn slot_types_snapshot(&self) -> [Option<i32>; 8] {
         std::array::from_fn(|i| {
             let raw = self.slot_types[i].load(Ordering::Relaxed);
-            if raw == i32::MIN { None } else { Some(raw) }
+            if raw == i32::MIN {
+                None
+            } else {
+                Some(raw)
+            }
         })
     }
 }
@@ -58,24 +68,30 @@ pub fn create_worker(
     fx_slot: u8,
     slot_types_init: [Option<i32>; 8],
     hardware_float_out: Arc<std::sync::atomic::AtomicU32>,
-) -> (NetworkWorker, Sender<NetworkCommand>, Receiver<NetworkStatus>, WorkerShared) {
+) -> (
+    NetworkWorker,
+    Sender<NetworkCommand>,
+    Receiver<NetworkStatus>,
+    WorkerShared,
+) {
     let (cmd_tx, cmd_rx) = crossbeam_channel::bounded::<NetworkCommand>(64);
     let (status_tx, status_rx) = crossbeam_channel::bounded::<NetworkStatus>(64);
 
     let compatible_slots: Arc<AtomicU8> = Arc::new(AtomicU8::new(0));
-    let occupied_slots: Arc<AtomicU8>   = Arc::new(AtomicU8::new(0));
+    let occupied_slots: Arc<AtomicU8> = Arc::new(AtomicU8::new(0));
     // Encode slot_types_init into atomic array (i32::MIN = None).
-    let slot_types_shared: Arc<[AtomicI32; 8]> =
-        Arc::new(std::array::from_fn(|i| AtomicI32::new(slot_types_init[i].unwrap_or(i32::MIN))));
-    let scan_targets      = Arc::new(Mutex::new(Vec::new()));
-    let connected_device  = Arc::new(Mutex::new((String::new(), String::new())));
+    let slot_types_shared: Arc<[AtomicI32; 8]> = Arc::new(std::array::from_fn(|i| {
+        AtomicI32::new(slot_types_init[i].unwrap_or(i32::MIN))
+    }));
+    let scan_targets = Arc::new(Mutex::new(Vec::new()));
+    let connected_device = Arc::new(Mutex::new((String::new(), String::new())));
 
     let test_shared = WorkerShared {
-        compatible_slots:  compatible_slots.clone(),
-        occupied_slots:    occupied_slots.clone(),
-        slot_types:        slot_types_shared.clone(),
-        scan_targets:      scan_targets.clone(),
-        connected_device:  connected_device.clone(),
+        compatible_slots: compatible_slots.clone(),
+        occupied_slots: occupied_slots.clone(),
+        slot_types: slot_types_shared.clone(),
+        scan_targets: scan_targets.clone(),
+        connected_device: connected_device.clone(),
     };
 
     let worker = NetworkWorker::new(
@@ -100,11 +116,22 @@ pub fn create_worker(
 
 pub fn spawn_worker(
     port: u16,
-) -> (Sender<NetworkCommand>, Receiver<NetworkStatus>, thread::JoinHandle<()>, WorkerShared) {
+) -> (
+    Sender<NetworkCommand>,
+    Receiver<NetworkStatus>,
+    thread::JoinHandle<()>,
+    WorkerShared,
+) {
     let hardware_float = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let slot_types: [Option<i32>; 8] = [
-        Some(10), Some(1), Some(10), Some(3),
-        None, Some(10), None, Some(2),
+        Some(10),
+        Some(1),
+        Some(10),
+        Some(3),
+        None,
+        Some(10),
+        None,
+        Some(2),
     ];
     let (worker, cmd_tx, status_rx, shared) = create_worker(1, slot_types, hardware_float);
 
@@ -113,9 +140,12 @@ pub fn spawn_worker(
         .spawn(move || worker.run())
         .expect("spawn worker");
 
-    cmd_tx.send(NetworkCommand::UpdateTarget {
-        ip: "127.0.0.1".to_string(), port,
-    }).expect("send UpdateTarget");
+    cmd_tx
+        .send(NetworkCommand::UpdateTarget {
+            ip: "127.0.0.1".to_string(),
+            port,
+        })
+        .expect("send UpdateTarget");
 
     (cmd_tx, status_rx, handle, shared)
 }
@@ -199,7 +229,10 @@ pub mod harness_util {
         let connected = step_until(&mut harness, 120.0, Duration::from_secs(5), |h| {
             h.param_normalized("is_connected") == Some(1.0)
         });
-        assert!(connected, "is_connected never became true against MockMixer");
+        assert!(
+            connected,
+            "is_connected never became true against MockMixer"
+        );
         harness
     }
 

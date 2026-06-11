@@ -15,14 +15,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use nih_plug::prelude::{
-    AudioIOLayout, AuxiliaryBuffers, Buffer, BufferConfig, InitContext, ParamPtr, Params, Plugin,
-    PluginApi, PluginNoteEvent, ProcessContext, ProcessMode,
-};
 /// Re-exported so integration tests can import `ProcessStatus` and `Transport`
 /// from `vst_runtime` without adding a separate `nih_plug` dev-dependency.
 pub use nih_plug::prelude::ProcessStatus;
 pub use nih_plug::prelude::Transport;
+use nih_plug::prelude::{
+    AudioIOLayout, AuxiliaryBuffers, Buffer, BufferConfig, InitContext, ParamPtr, Params, Plugin,
+    PluginApi, PluginNoteEvent, ProcessContext, ProcessMode,
+};
 
 /// Drives a single `P: Plugin` instance through its lifecycle headlessly.
 ///
@@ -93,7 +93,10 @@ impl<P: Plugin> ProcessContext<P> for HarnessProcessContext<'_, P> {
     }
 
     fn execute_gui(&self, _task: P::BackgroundTask) {
-        debug_assert!(false, "GUI task scheduled during process() — Harness has no GUI; task dropped silently");
+        debug_assert!(
+            false,
+            "GUI task scheduled during process() — Harness has no GUI; task dropped silently"
+        );
     }
 
     fn transport(&self) -> &Transport {
@@ -772,7 +775,10 @@ mod tests {
         assert!(output_events.is_empty());
         for channel in &main_io {
             for &sample in channel {
-                assert_eq!(sample, 0.5, "process() should have written through to the buffer");
+                assert_eq!(
+                    sample, 0.5,
+                    "process() should have written through to the buffer"
+                );
             }
         }
 

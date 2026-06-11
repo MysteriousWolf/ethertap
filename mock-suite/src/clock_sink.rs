@@ -102,7 +102,9 @@ impl MidiClockSink {
                         .collect::<Vec<_>>()
                         .join(" ");
                     s.last_ts_ms = now_ms();
-                    let Some(&first) = message.first() else { return };
+                    let Some(&first) = message.first() else {
+                        return;
+                    };
                     if first == CLOCK_BYTE {
                         s.total_clocks += 1;
                         s.last_clock_ts_ms = s.last_ts_ms;
@@ -111,14 +113,12 @@ impl MidiClockSink {
                             s.clock_times.pop_front();
                         }
                         // Sample BPM once per beat from the last CPB+1 stamps.
-                        if s.total_clocks % MIDI_CPB as u64 == 0
-                            && s.clock_times.len() > MIDI_CPB
-                        {
+                        if s.total_clocks % MIDI_CPB as u64 == 0 && s.clock_times.len() > MIDI_CPB {
                             let n = s.clock_times.len();
                             let first_t = s.clock_times[n - 1 - MIDI_CPB];
                             let last_t = s.clock_times[n - 1];
-                            let mean_iv = last_t.duration_since(first_t).as_secs_f64()
-                                / MIDI_CPB as f64;
+                            let mean_iv =
+                                last_t.duration_since(first_t).as_secs_f64() / MIDI_CPB as f64;
                             if mean_iv > 0.0 {
                                 s.bpm_history.push_back(60.0 / (mean_iv * MIDI_CPB as f64));
                                 while s.bpm_history.len() > BPM_HIST {
@@ -134,7 +134,11 @@ impl MidiClockSink {
             )
             .map_err(|e| e.to_string())?;
 
-        Ok(Self { state, conn: Some(conn), port_name: port_name.to_string() })
+        Ok(Self {
+            state,
+            conn: Some(conn),
+            port_name: port_name.to_string(),
+        })
     }
 
     /// The virtual port's name (what shows up in device pickers / port scans).
@@ -171,12 +175,21 @@ impl MidiClockSink {
             .map(|w| w[1].duration_since(w[0]).as_secs_f64())
             .collect();
         let mean_iv = intervals.iter().sum::<f64>() / intervals.len() as f64;
-        let bpm = if mean_iv > 0.0 { 60.0 / (mean_iv * MIDI_CPB as f64) } else { 0.0 };
-        let var = intervals.iter().map(|iv| (iv - mean_iv).powi(2)).sum::<f64>()
+        let bpm = if mean_iv > 0.0 {
+            60.0 / (mean_iv * MIDI_CPB as f64)
+        } else {
+            0.0
+        };
+        let var = intervals
+            .iter()
+            .map(|iv| (iv - mean_iv).powi(2))
+            .sum::<f64>()
             / (intervals.len().max(2) - 1) as f64;
 
-        let mut abs_jitter_us: Vec<f64> =
-            intervals.iter().map(|iv| (iv - mean_iv).abs() * 1e6).collect();
+        let mut abs_jitter_us: Vec<f64> = intervals
+            .iter()
+            .map(|iv| (iv - mean_iv).abs() * 1e6)
+            .collect();
         abs_jitter_us.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let pct = |p: f64| -> f64 {
             let idx = (p / 100.0) * (abs_jitter_us.len() - 1) as f64;

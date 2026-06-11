@@ -1,5 +1,5 @@
 use std::sync::{
-    atomic::{AtomicBool, AtomicU8, AtomicU32},
+    atomic::{AtomicBool, AtomicU32, AtomicU8},
     Arc,
 };
 
@@ -13,7 +13,7 @@ use parking_lot::Mutex;
 /// fixed-width text).  Swap the `bytes` path to change the font family;
 /// the file must be a valid TTF/OTF at compile time.
 pub const MONO_FONT: Font = Font::External {
-    name:  "JetBrains Mono",
+    name: "JetBrains Mono",
     bytes: include_bytes!("../assets/JetBrainsMono-Regular.ttf"),
 };
 
@@ -38,25 +38,35 @@ pub enum SyncMode {
 /// Pulses-per-quarter-note options for MIDI clock output.
 #[derive(Enum, Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Ppq {
-    #[id = "ppq3"]  P3,
-    #[id = "ppq4"]  P4,
-    #[id = "ppq6"]  P6,
-    #[id = "ppq8"]  P8,
-    #[id = "ppq12"] P12,
-    #[id = "ppq16"] P16,
-    #[id = "ppq24"] P24,
-    #[id = "ppq32"] P32,
-    #[id = "ppq48"] P48,
-    #[id = "ppq96"] P96,
+    #[id = "ppq3"]
+    P3,
+    #[id = "ppq4"]
+    P4,
+    #[id = "ppq6"]
+    P6,
+    #[id = "ppq8"]
+    P8,
+    #[id = "ppq12"]
+    P12,
+    #[id = "ppq16"]
+    P16,
+    #[id = "ppq24"]
+    P24,
+    #[id = "ppq32"]
+    P32,
+    #[id = "ppq48"]
+    P48,
+    #[id = "ppq96"]
+    P96,
 }
 
 impl Ppq {
     pub fn to_u8(self) -> u8 {
         match self {
-            Ppq::P3  => 3,
-            Ppq::P4  => 4,
-            Ppq::P6  => 6,
-            Ppq::P8  => 8,
+            Ppq::P3 => 3,
+            Ppq::P4 => 4,
+            Ppq::P6 => 6,
+            Ppq::P8 => 8,
             Ppq::P12 => 12,
             Ppq::P16 => 16,
             Ppq::P24 => 24,
@@ -68,17 +78,17 @@ impl Ppq {
 
     pub fn from_u8(v: u8) -> Self {
         match v {
-            3  => Ppq::P3,
-            4  => Ppq::P4,
-            6  => Ppq::P6,
-            8  => Ppq::P8,
+            3 => Ppq::P3,
+            4 => Ppq::P4,
+            6 => Ppq::P6,
+            8 => Ppq::P8,
             12 => Ppq::P12,
             16 => Ppq::P16,
             24 => Ppq::P24,
             32 => Ppq::P32,
             48 => Ppq::P48,
             96 => Ppq::P96,
-            _  => Ppq::P24, // default
+            _ => Ppq::P24, // default
         }
     }
 }
@@ -126,13 +136,20 @@ pub struct EtherTapParams {
     pub fx_type_filter: Arc<AtomicU32>,
 
     // ── FX type filter params (automatable, drive fx_type_filter atom) ───
-    #[id = "fx_filter_dly"]   pub fx_filter_dly:  BoolParam,
-    #[id = "fx_filter_3tap"]  pub fx_filter_3tap: BoolParam,
-    #[id = "fx_filter_4tap"]  pub fx_filter_4tap: BoolParam,
-    #[id = "fx_filter_drv"]   pub fx_filter_drv:  BoolParam,
-    #[id = "fx_filter_dcr"]   pub fx_filter_dcr:  BoolParam,
-    #[id = "fx_filter_dfl"]   pub fx_filter_dfl:  BoolParam,
-    #[id = "fx_filter_modd"]  pub fx_filter_modd: BoolParam,
+    #[id = "fx_filter_dly"]
+    pub fx_filter_dly: BoolParam,
+    #[id = "fx_filter_3tap"]
+    pub fx_filter_3tap: BoolParam,
+    #[id = "fx_filter_4tap"]
+    pub fx_filter_4tap: BoolParam,
+    #[id = "fx_filter_drv"]
+    pub fx_filter_drv: BoolParam,
+    #[id = "fx_filter_dcr"]
+    pub fx_filter_dcr: BoolParam,
+    #[id = "fx_filter_dfl"]
+    pub fx_filter_dfl: BoolParam,
+    #[id = "fx_filter_modd"]
+    pub fx_filter_modd: BoolParam,
 
     // ── MIDI clock enabled (automatable + worker-facing atom) ────────────
     #[id = "midi_clock_enabled"]
@@ -213,34 +230,34 @@ impl Default for EtherTapParams {
                 "192.168.1.100".to_owned()
             })),
             target_port: Arc::new(Mutex::new(10023)),
-            fx_slot:      IntParam::new("FX Slot", 1, IntRange::Linear { min: 1, max: 8 }),
+            fx_slot: IntParam::new("FX Slot", 1, IntRange::Linear { min: 1, max: 8 }),
             fx_slot_atom: Arc::new(AtomicU8::new(1)),
             fx_type_filter: Arc::new(AtomicU32::new(0x7F)),
-            fx_filter_dly:  BoolParam::new("FX Filter: Delay",       true),
-            fx_filter_3tap: BoolParam::new("FX Filter: 3 Tap",       true),
-            fx_filter_4tap: BoolParam::new("FX Filter: 4 Tap",       true),
-            fx_filter_drv:  BoolParam::new("FX Filter: Delay+Reverb", true),
-            fx_filter_dcr:  BoolParam::new("FX Filter: Delay+Chorus", true),
-            fx_filter_dfl:  BoolParam::new("FX Filter: Delay+Flanger", true),
-            fx_filter_modd: BoolParam::new("FX Filter: Mod Delay",   true),
-            midi_clock_enabled:      BoolParam::new("MIDI Clock Enabled", true),
+            fx_filter_dly: BoolParam::new("FX Filter: Delay", true),
+            fx_filter_3tap: BoolParam::new("FX Filter: 3 Tap", true),
+            fx_filter_4tap: BoolParam::new("FX Filter: 4 Tap", true),
+            fx_filter_drv: BoolParam::new("FX Filter: Delay+Reverb", true),
+            fx_filter_dcr: BoolParam::new("FX Filter: Delay+Chorus", true),
+            fx_filter_dfl: BoolParam::new("FX Filter: Delay+Flanger", true),
+            fx_filter_modd: BoolParam::new("FX Filter: Mod Delay", true),
+            midi_clock_enabled: BoolParam::new("MIDI Clock Enabled", true),
             midi_clock_enabled_atom: Arc::new(AtomicBool::new(true)),
-            midi_clock_ppq:          EnumParam::new("MIDI Clock PPQ", Ppq::P24),
-            midi_clock_ppq_atom:     Arc::new(AtomicU8::new(24)),
+            midi_clock_ppq: EnumParam::new("MIDI Clock PPQ", Ppq::P24),
+            midi_clock_ppq_atom: Arc::new(AtomicU8::new(24)),
             midi_out_device: Arc::new(Mutex::new(None)),
-            midi_auto_connect:      BoolParam::new("MIDI Auto-Connect", false),
+            midi_auto_connect: BoolParam::new("MIDI Auto-Connect", false),
             midi_auto_connect_atom: Arc::new(AtomicBool::new(false)),
-            rate_sync_mode:  EnumParam::new("Rate Sync Mode",  SyncMode::OnChange),
+            rate_sync_mode: EnumParam::new("Rate Sync Mode", SyncMode::OnChange),
             phase_sync_mode: EnumParam::new("Phase Sync Mode", SyncMode::Manual),
             connect_to_last: BoolParam::new("Connect to Last", false),
-            disconnect:      BoolParam::new("Disconnect",      false),
-            force_sync_rate:  BoolParam::new("Force Sync Rate",  false),
+            disconnect: BoolParam::new("Disconnect", false),
+            force_sync_rate: BoolParam::new("Force Sync Rate", false),
             force_sync_phase: BoolParam::new("Force Sync Phase", false),
-            audit_slots:      BoolParam::new("Audit Slots",      false),
-            all_slots:        BoolParam::new("All Slots",        true),
-            all_slots_atom:   Arc::new(AtomicBool::new(true)),
+            audit_slots: BoolParam::new("Audit Slots", false),
+            all_slots: BoolParam::new("All Slots", true),
+            all_slots_atom: Arc::new(AtomicBool::new(true)),
             is_connected: BoolParam::new("Is Connected", false),
-            is_matched:   BoolParam::new("Is Matched",   false),
+            is_matched: BoolParam::new("Is Matched", false),
         }
     }
 }

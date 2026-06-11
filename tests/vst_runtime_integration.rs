@@ -13,8 +13,7 @@ use vst_runtime::{Harness, ProcessStatus, Transport};
 #[test]
 fn ethertap_harness_drives_process_and_exposes_params() {
     // 1. Construct and initialize EtherTap through the harness.
-    let mut harness =
-        Harness::<EtherTap>::new(44_100.0, 256).expect("EtherTap should initialize");
+    let mut harness = Harness::<EtherTap>::new(44_100.0, 256).expect("EtherTap should initialize");
 
     // 2. Access the plugin's params via the shared Arc.
     let params = harness.plugin().ethertap_params();
@@ -27,7 +26,9 @@ fn ethertap_harness_drives_process_and_exposes_params() {
     );
 
     // 4. Disable via the backing atom (direct worker-facing path, same as before).
-    params.midi_clock_enabled_atom.store(false, Ordering::Relaxed);
+    params
+        .midi_clock_enabled_atom
+        .store(false, Ordering::Relaxed);
 
     // 5. Build a playing transport at 120 BPM, 4/4.
     let mut t = Transport::new(44_100.0);
@@ -56,7 +57,11 @@ fn ethertap_harness_drives_process_and_exposes_params() {
     );
 
     // 9. Four output buffer snapshots (one per step).
-    assert_eq!(result.output_buffers.len(), 4, "expected one output buffer snapshot per step");
+    assert_eq!(
+        result.output_buffers.len(),
+        4,
+        "expected one output buffer snapshot per step"
+    );
 
     // 10. The backing atom is shared — our store(false) above persists; note
     //     that process() mirrors the BoolParam → atom each buffer, so after

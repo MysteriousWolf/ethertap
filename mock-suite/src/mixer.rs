@@ -55,13 +55,31 @@ pub struct SlotState {
 
 impl SlotState {
     pub fn dly(init_bpm: f64) -> Self {
-        Self { type_id: DLY, init_bpm: Some(init_bpm), rx_bpm: None, sync_count: 0, rx_ts_ms: 0 }
+        Self {
+            type_id: DLY,
+            init_bpm: Some(init_bpm),
+            rx_bpm: None,
+            sync_count: 0,
+            rx_ts_ms: 0,
+        }
     }
     pub fn empty() -> Self {
-        Self { type_id: EMPTY, init_bpm: None, rx_bpm: None, sync_count: 0, rx_ts_ms: 0 }
+        Self {
+            type_id: EMPTY,
+            init_bpm: None,
+            rx_bpm: None,
+            sync_count: 0,
+            rx_ts_ms: 0,
+        }
     }
     pub fn other(type_id: i32) -> Self {
-        Self { type_id, init_bpm: None, rx_bpm: None, sync_count: 0, rx_ts_ms: 0 }
+        Self {
+            type_id,
+            init_bpm: None,
+            rx_bpm: None,
+            sync_count: 0,
+            rx_ts_ms: 0,
+        }
     }
     pub fn delay_float(self) -> f32 {
         self.init_bpm.map_or(0.0, |bpm| {
@@ -97,7 +115,10 @@ impl ReceivedMsg {
             let rest = self.addr.strip_prefix("/fxrtn/")?;
             let slot_str = rest.split('/').next()?;
             let slot: u8 = slot_str.parse().ok()?;
-            let muted = self.args.first().is_some_and(|a| matches!(a, OscType::Int(0)));
+            let muted = self
+                .args
+                .first()
+                .is_some_and(|a| matches!(a, OscType::Int(0)));
             return Some((slot, muted));
         }
         None
@@ -168,16 +189,29 @@ impl MockMixer {
     }
 
     pub fn received_addrs(&self) -> Vec<String> {
-        self.received_msgs.lock().iter().map(|m| m.addr.clone()).collect()
+        self.received_msgs
+            .lock()
+            .iter()
+            .map(|m| m.addr.clone())
+            .collect()
     }
 
     pub fn received_filtered(&self, pred: impl Fn(&ReceivedMsg) -> bool) -> Vec<ReceivedMsg> {
-        self.received_msgs.lock().iter().filter(|m| pred(m)).cloned().collect()
+        self.received_msgs
+            .lock()
+            .iter()
+            .filter(|m| pred(m))
+            .cloned()
+            .collect()
     }
 
     /// How many received messages match `addr` exactly.
     pub fn count_addr(&self, addr: &str) -> usize {
-        self.received_msgs.lock().iter().filter(|m| m.addr == addr).count()
+        self.received_msgs
+            .lock()
+            .iter()
+            .filter(|m| m.addr == addr)
+            .count()
     }
 
     pub fn sync_count(&self, slot: u8) -> u64 {
@@ -270,12 +304,15 @@ fn run_mock_mixer(
 
 fn handle_request(msg: &OscMessage, slots: &Arc<Mutex<[SlotState; 8]>>) -> Option<Vec<u8>> {
     if msg.addr == "/info" {
-        return Some(encode_msg("/info", vec![
-            OscType::String("V2.12".to_string()),
-            OscType::String("Mock Console".to_string()),
-            OscType::String("X32".to_string()),
-            OscType::String("4.06".to_string()),
-        ]));
+        return Some(encode_msg(
+            "/info",
+            vec![
+                OscType::String("V2.12".to_string()),
+                OscType::String("Mock Console".to_string()),
+                OscType::String("X32".to_string()),
+                OscType::String("4.06".to_string()),
+            ],
+        ));
     }
 
     let parts: Vec<&str> = msg.addr.split('/').collect();
@@ -325,7 +362,10 @@ fn handle_request(msg: &OscMessage, slots: &Arc<Mutex<[SlotState; 8]>>) -> Optio
 }
 
 fn encode_msg(addr: &str, args: Vec<OscType>) -> Vec<u8> {
-    let packet = OscPacket::Message(OscMessage { addr: addr.to_string(), args });
+    let packet = OscPacket::Message(OscMessage {
+        addr: addr.to_string(),
+        args,
+    });
     encoder::encode(&packet).expect("OSC encode")
 }
 
@@ -355,7 +395,11 @@ pub fn all_empty_slots() -> [SlotState; 8] {
 /// Fewer than 8 entries pad with `empty`; more than 8 is an error.
 pub fn parse_slots_spec(spec: &str) -> Result<[SlotState; 8], String> {
     let mut slots = [SlotState::empty(); 8];
-    let entries: Vec<&str> = spec.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    let entries: Vec<&str> = spec
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
     if entries.len() > 8 {
         return Err(format!("--slots: {} entries given, max 8", entries.len()));
     }
@@ -363,14 +407,22 @@ pub fn parse_slots_spec(spec: &str) -> Result<[SlotState; 8], String> {
         slots[i] = match entry.split_once(':') {
             None if *entry == "empty" => SlotState::empty(),
             Some(("dly", bpm)) => {
-                let bpm: f64 = bpm.parse().map_err(|_| format!("--slots: bad BPM in {entry:?}"))?;
+                let bpm: f64 = bpm
+                    .parse()
+                    .map_err(|_| format!("--slots: bad BPM in {entry:?}"))?;
                 SlotState::dly(bpm)
             }
             Some(("other", ty)) => {
-                let ty: i32 = ty.parse().map_err(|_| format!("--slots: bad type in {entry:?}"))?;
+                let ty: i32 = ty
+                    .parse()
+                    .map_err(|_| format!("--slots: bad type in {entry:?}"))?;
                 SlotState::other(ty)
             }
-            _ => return Err(format!("--slots: unrecognized entry {entry:?} (want dly:BPM, other:TYPE, or empty)")),
+            _ => {
+                return Err(format!(
+                    "--slots: unrecognized entry {entry:?} (want dly:BPM, other:TYPE, or empty)"
+                ))
+            }
         };
     }
     Ok(slots)

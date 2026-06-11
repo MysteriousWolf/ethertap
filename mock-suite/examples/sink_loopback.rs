@@ -11,7 +11,11 @@ fn main() {
     let matching: Vec<_> = out
         .ports()
         .into_iter()
-        .filter(|p| out.port_name(p).map(|n| n == mock_suite::SINK_PORT_NAME).unwrap_or(false))
+        .filter(|p| {
+            out.port_name(p)
+                .map(|n| n == mock_suite::SINK_PORT_NAME)
+                .unwrap_or(false)
+        })
         .collect();
     println!("matching ports: {}", matching.len());
 
@@ -24,7 +28,11 @@ fn main() {
             std::thread::sleep(Duration::from_millis(2));
         }
         std::thread::sleep(Duration::from_millis(300));
-        println!("port {i}: sink counted {} (delta {})", sink.total_clocks(), sink.total_clocks() - before);
+        println!(
+            "port {i}: sink counted {} (delta {})",
+            sink.total_clocks(),
+            sink.total_clocks() - before
+        );
         conn.close();
     }
 }

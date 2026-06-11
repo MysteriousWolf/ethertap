@@ -96,8 +96,14 @@ fn encode_edge_case_delay_float_very_small() {
     // Test that it roundtrips without panicking and preserves value
     let bytes = osc::set_fx_delay(1, 10, f32::MIN_POSITIVE);
     let msg = decode_msg(&bytes).expect("must decode");
-    let [OscType::Float(f)] = msg.args.as_slice() else { panic!("expected Float") };
-    assert_eq!(*f, f32::MIN_POSITIVE, "MIN_POSITIVE should roundtrip exactly");
+    let [OscType::Float(f)] = msg.args.as_slice() else {
+        panic!("expected Float")
+    };
+    assert_eq!(
+        *f,
+        f32::MIN_POSITIVE,
+        "MIN_POSITIVE should roundtrip exactly"
+    );
 }
 
 #[test]
@@ -105,7 +111,9 @@ fn encode_edge_case_delay_float_very_large() {
     // Near-max f32 should still encode without panicking
     let bytes = osc::set_fx_delay(1, 10, f32::MAX);
     let msg = decode_msg(&bytes).expect("must decode");
-    let [OscType::Float(f)] = msg.args.as_slice() else { panic!("expected Float") };
+    let [OscType::Float(f)] = msg.args.as_slice() else {
+        panic!("expected Float")
+    };
     assert!(*f == f32::MAX);
 }
 
@@ -137,11 +145,13 @@ fn decode_totally_wrong_address() {
 fn decode_wrong_type_tag_float_received_as_int() {
     // Craft a packet that looks like it has a float but has wrong type tag
     // rosc is lenient - just verify no panic
-    let result = rosc::decoder::decode_udp(&[0x2f, 0x66, 0x78, 0x00, // "/fx\0"
-                                             0x2f, 0x31, 0x00, 0x00, // "/1\0\0"
-                                             0x2c, 0x69, 0x00, 0x00, // ",i\0\0"  (int type tag)
-                                             0x00, 0x00, 0x00, 0x2a]); // int 42
-    // Just verify no panic - rosc may succeed or fail
+    let result = rosc::decoder::decode_udp(&[
+        0x2f, 0x66, 0x78, 0x00, // "/fx\0"
+        0x2f, 0x31, 0x00, 0x00, // "/1\0\0"
+        0x2c, 0x69, 0x00, 0x00, // ",i\0\0"  (int type tag)
+        0x00, 0x00, 0x00, 0x2a,
+    ]); // int 42
+        // Just verify no panic - rosc may succeed or fail
     let _ = result;
 }
 
@@ -175,7 +185,7 @@ fn malformed_packet_truncated_type_tag() {
     let result = rosc::decoder::decode_udp(&[
         0x2f, 0x66, 0x78, 0x00, // "/fx\0"
         0x00, 0x00, 0x00, 0x00, // padding
-        0x2c, 0x66, 0x00,        // ",f\0" incomplete
+        0x2c, 0x66, 0x00, // ",f\0" incomplete
     ]);
     // rosc may succeed or fail, but must not panic
     let _ = result;
@@ -246,16 +256,22 @@ fn roundtrip_query_fx_delay_all_effects() {
 fn float_to_bpm_edge_cases() {
     // Zero (no data) returns sentinel 0.0
     assert_eq!(float_to_bpm(0.0), 0.0);
-    
+
     // Very small positive values – should give very large BPM
     let small = 0.0001_f32;
     let bpm = float_to_bpm(small);
-    assert!(bpm > 200_000.0, "small float should give large BPM, got {bpm}");
-    
+    assert!(
+        bpm > 200_000.0,
+        "small float should give large BPM, got {bpm}"
+    );
+
     // f32::MAX produces a tiny but still positive BPM (not zero)
     let bpm_max = float_to_bpm(f32::MAX);
-    assert!(bpm_max > 0.0 && bpm_max < 1.0e-37, "f32::MAX should produce tiny positive BPM");
-    
+    assert!(
+        bpm_max > 0.0 && bpm_max < 1.0e-37,
+        "f32::MAX should produce tiny positive BPM"
+    );
+
     // Sub-normal
     let subnormal = f32::MIN_POSITIVE / 2.0;
     let bpm = float_to_bpm(subnormal);
@@ -266,8 +282,11 @@ fn float_to_bpm_edge_cases() {
 fn bpm_to_float_edge_cases() {
     // Very high BPM should clamp to ~0
     let f = bpm_to_float(10_000.0);
-    assert!((0.0..=0.01).contains(&f), "extremely high BPM should be near-zero");
-    
+    assert!(
+        (0.0..=0.01).contains(&f),
+        "extremely high BPM should be near-zero"
+    );
+
     // Very low BPM should clamp to 1.0
     let f = bpm_to_float(1.0);
     assert_eq!(f, 1.0, "extremely low BPM should be 1.0");

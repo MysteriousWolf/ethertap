@@ -119,7 +119,11 @@ pub fn run(port: u16, slots: [SlotState; 8], no_midi: bool) -> std::io::Result<(
 fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(5), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(5),
+            Constraint::Length(1),
+        ])
         .split(f.area());
 
     draw_header(f, chunks[0], app);
@@ -148,17 +152,31 @@ fn draw(f: &mut Frame, app: &App) {
 
 fn badge<'a>(label: &'a str, running: bool, error: &'a str) -> Vec<Span<'a>> {
     if !error.is_empty() {
-        return vec![Span::styled(format!("✗ {label}: {error}  "), Style::default().fg(Color::Red))];
+        return vec![Span::styled(
+            format!("✗ {label}: {error}  "),
+            Style::default().fg(Color::Red),
+        )];
     }
     vec![
         Span::styled(
             if running { "● " } else { "○ " },
-            Style::default().fg(if running { Color::Green } else { Color::DarkGray }),
+            Style::default().fg(if running {
+                Color::Green
+            } else {
+                Color::DarkGray
+            }),
         ),
-        Span::styled(format!("{label} "), Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("{label} "),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
         Span::styled(
             if running { "on   " } else { "off  " },
-            Style::default().fg(if running { Color::Green } else { Color::DarkGray }),
+            Style::default().fg(if running {
+                Color::Green
+            } else {
+                Color::DarkGray
+            }),
         ),
     ]
 }
@@ -169,7 +187,10 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
     #[cfg(not(unix))]
     let sink_running = false;
 
-    let mixer_label = format!("Mixer :{}", app.mixer.as_ref().map_or(app.port, |m| m.port()));
+    let mixer_label = format!(
+        "Mixer :{}",
+        app.mixer.as_ref().map_or(app.port, |m| m.port())
+    );
     let mut spans = vec![Span::raw("  ")];
     spans.extend(badge("MIDI sink", sink_running, &app.sink_error));
     spans.extend(badge(&mixer_label, app.mixer.is_some(), &app.mixer_error));
@@ -206,7 +227,10 @@ fn bpm_crosscheck(app: &App) -> Vec<Span<'static>> {
             };
             vec![
                 Span::raw(format!("BPM cross-check  MIDI {m:.1}  OSC {o:.1}  ")),
-                Span::styled(label, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    label,
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
             ]
         }
         _ => vec![Span::styled(
@@ -244,7 +268,11 @@ fn draw_midi_panel(f: &mut Frame, area: Rect, app: &App) {
     let mut lines: Vec<Line> = Vec::new();
     if !running {
         lines.push(Line::from(Span::styled(
-            if app.no_midi { "disabled (--no-midi)" } else { "stopped — c to start" },
+            if app.no_midi {
+                "disabled (--no-midi)"
+            } else {
+                "stopped — c to start"
+            },
             Style::default().add_modifier(Modifier::DIM),
         )));
     } else if let Some(s) = stats {
@@ -256,23 +284,56 @@ fn draw_midi_panel(f: &mut Frame, area: Rect, app: &App) {
         } else {
             ("● flowing".to_string(), Color::Green)
         };
-        let pct_of = |v: f64| if s.mean_us > 0.0 { format!(" ({:.1}%)", v / s.mean_us * 100.0) } else { String::new() };
+        let pct_of = |v: f64| {
+            if s.mean_us > 0.0 {
+                format!(" ({:.1}%)", v / s.mean_us * 100.0)
+            } else {
+                String::new()
+            }
+        };
 
         lines.push(Line::from(vec![
             Span::raw("BPM           "),
-            Span::styled(format!("{:.2}", s.bpm), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("{:.2}", s.bpm),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
         ]));
         lines.push(Line::from(Span::styled(status, Style::default().fg(color))));
         lines.push(Line::from(format!("Total clocks  {}", s.total_clocks)));
         lines.push(Line::from(format!("Other msgs    {}", s.other_msgs)));
         lines.push(Line::from(format!("Window        {} ivl", s.sample_count)));
         lines.push(Line::from(format!("Mean interval {:.1} µs", s.mean_us)));
-        lines.push(Line::from(format!("Std dev       {:.1} µs{}", s.std_us, pct_of(s.std_us))));
-        lines.push(Line::from(format!("Jitter p50    {:.1} µs{}", s.p50_us, pct_of(s.p50_us))));
-        lines.push(Line::from(format!("Jitter p75    {:.1} µs{}", s.p75_us, pct_of(s.p75_us))));
-        lines.push(Line::from(format!("Jitter p95    {:.1} µs{}", s.p95_us, pct_of(s.p95_us))));
-        lines.push(Line::from(format!("Jitter p99    {:.1} µs{}", s.p99_us, pct_of(s.p99_us))));
-        lines.push(Line::from(format!("Jitter max    {:.1} µs{}", s.max_us, pct_of(s.max_us))));
+        lines.push(Line::from(format!(
+            "Std dev       {:.1} µs{}",
+            s.std_us,
+            pct_of(s.std_us)
+        )));
+        lines.push(Line::from(format!(
+            "Jitter p50    {:.1} µs{}",
+            s.p50_us,
+            pct_of(s.p50_us)
+        )));
+        lines.push(Line::from(format!(
+            "Jitter p75    {:.1} µs{}",
+            s.p75_us,
+            pct_of(s.p75_us)
+        )));
+        lines.push(Line::from(format!(
+            "Jitter p95    {:.1} µs{}",
+            s.p95_us,
+            pct_of(s.p95_us)
+        )));
+        lines.push(Line::from(format!(
+            "Jitter p99    {:.1} µs{}",
+            s.p99_us,
+            pct_of(s.p99_us)
+        )));
+        lines.push(Line::from(format!(
+            "Jitter max    {:.1} µs{}",
+            s.max_us,
+            pct_of(s.max_us)
+        )));
         lines.push(Line::from(format!("Last message  {}", s.last_hex)));
         let spark = sparkline(&s.bpm_history, area.width.saturating_sub(16) as usize);
         if !spark.is_empty() {
@@ -285,7 +346,9 @@ fn draw_midi_panel(f: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from("Waiting for 0xF8 clock bytes…"));
     }
 
-    let block = Block::default().borders(Borders::ALL).title(" MIDI Clock Sink ");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" MIDI Clock Sink ");
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
@@ -299,7 +362,11 @@ fn draw_mixer_panel(f: &mut Frame, area: Rect, app: &App) {
             app.mixer_error.clone()
         };
         f.render_widget(
-            Paragraph::new(Span::styled(msg, Style::default().add_modifier(Modifier::DIM))).block(block),
+            Paragraph::new(Span::styled(
+                msg,
+                Style::default().add_modifier(Modifier::DIM),
+            ))
+            .block(block),
             area,
         );
         return;
@@ -321,7 +388,9 @@ fn draw_mixer_panel(f: &mut Frame, area: Rect, app: &App) {
         .map(|(i, s)| {
             let is_dly = s.type_id == DLY;
             let name_style = if is_dly {
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD)
             } else if s.type_id == EMPTY {
                 Style::default().add_modifier(Modifier::DIM)
             } else {
@@ -358,8 +427,11 @@ fn draw_mixer_panel(f: &mut Frame, area: Rect, app: &App) {
         ],
     )
     .header(
-        Row::new(vec!["Slot", "Name", "Init", "Rx BPM", "Syncs", "Last"])
-            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Row::new(vec!["Slot", "Name", "Init", "Rx BPM", "Syncs", "Last"]).style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
     );
     f.render_widget(table, parts[0]);
 
@@ -376,7 +448,11 @@ fn draw_mixer_panel(f: &mut Frame, area: Rect, app: &App) {
     lines.push(Line::from(Span::styled(
         format!(
             "log  {total} msgs total{}",
-            if scroll > 0 { format!("  ↓ {scroll} newer (r to follow)") } else { String::new() }
+            if scroll > 0 {
+                format!("  ↓ {scroll} newer (r to follow)")
+            } else {
+                String::new()
+            }
         ),
         Style::default().add_modifier(Modifier::DIM),
     )));
@@ -395,7 +471,13 @@ fn draw_mixer_panel(f: &mut Frame, area: Rect, app: &App) {
         // Highlight delay-time sets with the decoded BPM.
         let bpm_note = m
             .is_set_delay()
-            .map(|(_, v)| if v > 0.0 { format!("  → {:.2} BPM", 20.0 / v) } else { String::new() })
+            .map(|(_, v)| {
+                if v > 0.0 {
+                    format!("  → {:.2} BPM", 20.0 / v)
+                } else {
+                    String::new()
+                }
+            })
             .unwrap_or_default();
         lines.push(Line::from(vec![
             Span::styled(

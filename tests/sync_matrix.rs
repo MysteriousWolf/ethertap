@@ -25,8 +25,7 @@ use vst_runtime::Harness;
 #[test]
 fn param_sweep_no_panic_and_atoms_mirror() {
     let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut harness =
-        Harness::<EtherTap>::new(44_100.0, 256).expect("EtherTap should initialize");
+    let mut harness = Harness::<EtherTap>::new(44_100.0, 256).expect("EtherTap should initialize");
 
     // Sweep every #[id] param across its normalized range; one step each.
     // Proves no value combination panics the RT path.
@@ -57,8 +56,14 @@ fn param_sweep_no_panic_and_atoms_mirror() {
 
     // fx_type_filter bitmask: disable bit 0 (DLY), keep the rest.
     harness.set_param_normalized("fx_filter_dly", 0.0);
-    for f in ["fx_filter_3tap", "fx_filter_4tap", "fx_filter_drv",
-              "fx_filter_dcr", "fx_filter_dfl", "fx_filter_modd"] {
+    for f in [
+        "fx_filter_3tap",
+        "fx_filter_4tap",
+        "fx_filter_drv",
+        "fx_filter_dcr",
+        "fx_filter_dfl",
+        "fx_filter_modd",
+    ] {
         harness.set_param_normalized(f, 1.0);
     }
     step(&mut harness, 120.0);
@@ -163,7 +168,9 @@ fn force_sync_phase_sends_hard_reset_sequence() {
     harness.set_param_normalized("force_sync_phase", 1.0);
     let reset = step_until(&mut harness, 120.0, Duration::from_secs(5), |_| {
         // Unmute (mix/on 1) is the tail of the hard-reset sequence.
-        !mock.received_filtered(|m| m.is_mute() == Some((1, false))).is_empty()
+        !mock
+            .received_filtered(|m| m.is_mute() == Some((1, false)))
+            .is_empty()
     });
     assert!(reset, "hard reset never completed at the mock");
 
@@ -182,7 +189,10 @@ fn force_sync_phase_sends_hard_reset_sequence() {
             let set_between = msgs[m..u]
                 .iter()
                 .any(|msg| msg.is_set_delay().is_some_and(|(_, v)| v > 0.0));
-            assert!(set_between, "no delay-time set between mute ({m}) and unmute ({u})");
+            assert!(
+                set_between,
+                "no delay-time set between mute ({m}) and unmute ({u})"
+            );
         }
         other => panic!("hard reset incomplete: (mute, unmute) = {other:?}"),
     }
@@ -212,9 +222,15 @@ fn rate_on_change_dispatches_after_settle() {
     let dispatched = step_until(&mut harness, 100.0, Duration::from_secs(4), |_| {
         mock.sync_count(1) > before
     });
-    assert!(dispatched, "OnChange settle never dispatched after BPM change");
+    assert!(
+        dispatched,
+        "OnChange settle never dispatched after BPM change"
+    );
     let rx = mock.rx_bpm(1).expect("slot 1 should have a received BPM");
-    assert!((rx - 100.0).abs() < 0.5, "settled dispatch should carry 100 BPM, got {rx}");
+    assert!(
+        (rx - 100.0).abs() < 0.5,
+        "settled dispatch should carry 100 BPM, got {rx}"
+    );
 
     harness.deactivate();
 }
@@ -235,7 +251,10 @@ fn telemetry_readback_drives_is_matched() {
     let matched = step_until(&mut harness, 120.0, Duration::from_secs(8), |h| {
         h.param_normalized("is_matched") == Some(1.0)
     });
-    assert!(matched, "is_matched never became true after telemetry read-back");
+    assert!(
+        matched,
+        "is_matched never became true after telemetry read-back"
+    );
 
     // Host tempo moves to 100 while the hardware still holds 120 → mismatch.
     // (Keep rate mode Manual so nothing auto-corrects the drift.)
@@ -244,7 +263,10 @@ fn telemetry_readback_drives_is_matched() {
     let unmatched = step_until(&mut harness, 100.0, Duration::from_secs(8), |h| {
         h.param_normalized("is_matched") == Some(0.0)
     });
-    assert!(unmatched, "is_matched never dropped after host/hardware drift");
+    assert!(
+        unmatched,
+        "is_matched never dropped after host/hardware drift"
+    );
 
     harness.deactivate();
 }

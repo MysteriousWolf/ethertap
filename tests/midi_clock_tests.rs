@@ -28,8 +28,7 @@ fn clock_ticks_reach_virtual_sink_with_zero_drops() {
     let sink_name = format!("EtherTap Test Sink {}", std::process::id());
     let sink = MidiClockSink::start_named(&sink_name).expect("virtual MIDI sink should open");
 
-    let mut harness =
-        Harness::<EtherTap>::new(44_100.0, 256).expect("EtherTap should initialize");
+    let mut harness = Harness::<EtherTap>::new(44_100.0, 256).expect("EtherTap should initialize");
     let params = harness.plugin().ethertap_params();
     let handles = harness.plugin().test_handles();
 

@@ -35,8 +35,7 @@ impl Backoff {
 
     pub fn record_failure(&mut self) {
         self.attempts = self.attempts.saturating_add(1);
-        self.skip_until =
-            Some(Instant::now() + Duration::from_millis(self.next_delay_ms()));
+        self.skip_until = Some(Instant::now() + Duration::from_millis(self.next_delay_ms()));
     }
 
     pub fn record_success(&mut self) {
@@ -45,8 +44,7 @@ impl Backoff {
     }
 
     pub fn is_cooling_down(&self) -> bool {
-        self.skip_until
-            .is_some_and(|until| Instant::now() < until)
+        self.skip_until.is_some_and(|until| Instant::now() < until)
     }
 
     pub fn reset(&mut self) {
@@ -65,6 +63,10 @@ mod tests {
         for _ in 0..100 {
             b.record_failure();
         }
-        assert_eq!(b.next_delay_ms(), 10000, "must stay capped, not overflow to 0");
+        assert_eq!(
+            b.next_delay_ms(),
+            10000,
+            "must stay capped, not overflow to 0"
+        );
     }
 }

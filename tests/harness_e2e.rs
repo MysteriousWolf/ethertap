@@ -44,7 +44,10 @@ fn connect_disconnect_lifecycle_via_trigger_params() {
     let disconnected = step_until(&mut harness, 120.0, Duration::from_secs(5), |h| {
         h.param_normalized("is_connected") == Some(0.0)
     });
-    assert!(disconnected, "is_connected never dropped after disconnect pulse");
+    assert!(
+        disconnected,
+        "is_connected never dropped after disconnect pulse"
+    );
     assert_eq!(harness.param_normalized("disconnect"), Some(0.0));
 
     harness.deactivate();

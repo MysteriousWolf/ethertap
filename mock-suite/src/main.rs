@@ -16,7 +16,10 @@ use mock_suite::{default_slots, parse_slots_spec, MockMixer, SlotState};
 mod tui;
 
 #[derive(Parser, Debug)]
-#[command(name = "mock-suite", about = "EtherTap mock suite: X32/M32 mixer simulator + MIDI clock sink")]
+#[command(
+    name = "mock-suite",
+    about = "EtherTap mock suite: X32/M32 mixer simulator + MIDI clock sink"
+)]
 struct Args {
     /// UDP port for the mock mixer (0 = OS-assigned; real mixer uses 10023).
     #[arg(long, default_value_t = 10023)]
@@ -61,10 +64,16 @@ enum Expect {
 fn parse_expect(spec: &str) -> Result<Expect, String> {
     if let Some(rest) = spec.strip_prefix("sync:") {
         let (slot, min) = match rest.split_once(':') {
-            Some((s, m)) => (s, m.parse().map_err(|_| format!("--expect: bad count in {spec:?}"))?),
+            Some((s, m)) => (
+                s,
+                m.parse()
+                    .map_err(|_| format!("--expect: bad count in {spec:?}"))?,
+            ),
             None => (rest, 1u64),
         };
-        let slot: u8 = slot.parse().map_err(|_| format!("--expect: bad slot in {spec:?}"))?;
+        let slot: u8 = slot
+            .parse()
+            .map_err(|_| format!("--expect: bad slot in {spec:?}"))?;
         if !(1..=8).contains(&slot) {
             return Err(format!("--expect: slot out of range in {spec:?}"));
         }
@@ -79,9 +88,15 @@ fn parse_expect(spec: &str) -> Result<Expect, String> {
     // (OSC addresses themselves never contain ':').
     match spec.rsplit_once(':') {
         Some((addr, min)) if min.chars().all(|c| c.is_ascii_digit()) && !min.is_empty() => {
-            Ok(Expect::Addr { addr: addr.to_string(), min: min.parse().unwrap() })
+            Ok(Expect::Addr {
+                addr: addr.to_string(),
+                min: min.parse().unwrap(),
+            })
         }
-        _ => Ok(Expect::Addr { addr: spec.to_string(), min: 1 }),
+        _ => Ok(Expect::Addr {
+            addr: spec.to_string(),
+            min: 1,
+        }),
     }
 }
 
@@ -118,7 +133,10 @@ fn run_headless(args: &Args, slots: [SlotState; 8]) -> i32 {
     } else {
         match mock_suite::MidiClockSink::start() {
             Ok(s) => {
-                eprintln!("mock-suite: MIDI clock sink open ({:?})", mock_suite::SINK_PORT_NAME);
+                eprintln!(
+                    "mock-suite: MIDI clock sink open ({:?})",
+                    mock_suite::SINK_PORT_NAME
+                );
                 Some(s)
             }
             Err(e) => {

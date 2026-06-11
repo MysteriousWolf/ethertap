@@ -13,7 +13,7 @@
 /// Exits automatically when the audio-thread's `Sender` is dropped.
 use std::{
     net::{SocketAddr, UdpSocket},
-    sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering},
+    sync::atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicU8, Ordering},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -42,10 +42,10 @@ const LOOP_SLEEP: Duration = Duration::from_millis(10);
 #[derive(Debug, Clone)]
 pub struct DeviceInfo {
     /// Primary (best-path) IP — same-subnet preferred, then lowest latency.
-    pub ip:    String,
-    pub port:  u16,
+    pub ip: String,
+    pub port: u16,
     /// User-set name configured on the console (e.g. "Studio A Desk").
-    pub name:  String,
+    pub name: String,
     /// Hardware model string returned by the console (e.g. "X32", "M32").
     pub model: String,
     /// Probe round-trip time in milliseconds for the primary IP.
@@ -61,11 +61,10 @@ impl DeviceInfo {
     /// Human-readable label: "name (model)", "name", "model", or "ip:port".
     pub fn display_name(&self) -> String {
         match (self.name.is_empty(), self.model.is_empty()) {
-            (false, false) if self.name != self.model =>
-                format!("{} ({})", self.name, self.model),
+            (false, false) if self.name != self.model => format!("{} ({})", self.name, self.model),
             (false, _) => self.name.clone(),
-            (_, false)  => self.model.clone(),
-            _           => format!("{}:{}", self.ip, self.port),
+            (_, false) => self.model.clone(),
+            _ => format!("{}:{}", self.ip, self.port),
         }
     }
 }
@@ -174,7 +173,9 @@ pub struct NetworkWorker {
 
 /// Encode a slot list (values 1..=8) as a u8 bitmask: bit n = slot (n+1) present.
 fn slots_to_bitmask(slots: &[u8]) -> u8 {
-    slots.iter().fold(0u8, |acc, &s| acc | (1u8 << s.saturating_sub(1)))
+    slots
+        .iter()
+        .fold(0u8, |acc, &s| acc | (1u8 << s.saturating_sub(1)))
 }
 
 impl NetworkWorker {
@@ -225,7 +226,9 @@ impl NetworkWorker {
             // Periodic heartbeat / reconnect.
             // Skipped entirely when the user explicitly disconnected.
             if !self.user_disconnected && self.target.is_some() {
-                let interval = if self.connected { HEARTBEAT_INTERVAL } else {
+                let interval = if self.connected {
+                    HEARTBEAT_INTERVAL
+                } else {
                     Duration::from_millis(self.backoff.next_delay_ms())
                 };
                 if self.last_heartbeat.elapsed() >= interval {
@@ -279,7 +282,7 @@ impl NetworkWorker {
             NetworkCommand::UpdateTarget { ip, port } => self.connect(ip, port),
 
             NetworkCommand::ConnectToLast => {
-                let ip   = self.target_ip.lock().clone();
+                let ip = self.target_ip.lock().clone();
                 let port = *self.target_port.lock();
                 self.connect(ip, port);
             }
@@ -296,7 +299,7 @@ impl NetworkWorker {
             }
 
             NetworkCommand::SyncNow { slot, bpm } => {
-                let value   = osc::bpm_to_float(bpm);
+                let value = osc::bpm_to_float(bpm);
                 let type_id = self.slot_type_for(slot);
                 self.send(&osc::set_fx_delay(slot, type_id, value));
                 self.pulse_tx();
@@ -330,15 +333,17 @@ impl NetworkWorker {
                 // Run the 600 ms scan on a dedicated thread so the network
                 // worker remains responsive to sync commands during the window.
                 let scan_targets = self.scan_targets.clone();
-                let status_tx    = self.status_tx.clone();
-                let scan_gen     = self.scan_generation.clone();
+                let status_tx = self.status_tx.clone();
+                let scan_gen = self.scan_generation.clone();
                 // Capture the current generation so the background thread can
                 // detect if the editor opened a new scan (and cleared results)
                 // before this thread finishes.
-                let my_gen       = scan_gen.load(Ordering::Acquire);
+                let my_gen = scan_gen.load(Ordering::Acquire);
                 std::thread::Builder::new()
                     .name("ethertap-scan".into())
-                    .spawn(move || NetworkWorker::scan_targets_bg(scan_targets, status_tx, scan_gen, my_gen))
+                    .spawn(move || {
+                        NetworkWorker::scan_targets_bg(scan_targets, status_tx, scan_gen, my_gen)
+                    })
                     .ok(); // best-effort; failure just means no scan result
             }
         }
@@ -353,11 +358,13 @@ impl NetworkWorker {
     fn poll_delay(&mut self) {
         let Some(target) = self.target else { return };
 
-        let slot    = self.fx_slot.load(Ordering::Relaxed);
+        let slot = self.fx_slot.load(Ordering::Relaxed);
         let type_id = self.slot_type_for(slot);
-        let query   = osc::query_fx_delay(slot, type_id);
+        let query = osc::query_fx_delay(slot, type_id);
 
-        let send_ok = self.socket.as_ref()
+        let send_ok = self
+            .socket
+            .as_ref()
             .map(|s| s.send_to(&query, target).is_ok())
             .unwrap_or(false);
 
@@ -375,10 +382,12 @@ impl NetworkWorker {
             // Explicitly set timeout — do not rely on whatever was set by the
             // previous operation (rebind or audit).
             let _ = s.set_read_timeout(Some(RECV_TIMEOUT));
-            s.recv_from(&mut buf).ok()
+            s.recv_from(&mut buf)
+                .ok()
                 .and_then(|(len, _)| parse_fx_delay_response(&buf[..len]))
         }) {
-            self.hardware_float_out.store(value.to_bits(), Ordering::Release);
+            self.hardware_float_out
+                .store(value.to_bits(), Ordering::Release);
             let _ = self.status_tx.try_send(NetworkStatus::DelayReadback(value));
             self.pulse_rx();
         }
@@ -391,7 +400,9 @@ impl NetworkWorker {
 
         // Send the /info probe.  Use .map() so the borrow on self.socket is
         // released before we need to mutate self.connected below.
-        let sent = self.socket.as_ref()
+        let sent = self
+            .socket
+            .as_ref()
             .map(|s| s.send_to(&osc::heartbeat(), target).is_ok())
             .unwrap_or(false);
 
@@ -406,9 +417,10 @@ impl NetworkWorker {
 
         // Wait briefly for the response (timeout set during rebind).
         let mut buf = [0u8; 512];
-        let recv_len = self.socket.as_ref().and_then(|sock| {
-            sock.recv_from(&mut buf).ok().map(|(len, _)| len)
-        });
+        let recv_len = self
+            .socket
+            .as_ref()
+            .and_then(|sock| sock.recv_from(&mut buf).ok().map(|(len, _)| len));
 
         match recv_len.filter(|&len| {
             decoder::decode_udp(&buf[..len])
@@ -451,9 +463,9 @@ impl NetworkWorker {
             let _ = s.set_read_timeout(Some(RECV_TIMEOUT));
         }
 
-        let mut compatible  = Vec::new();
-        let mut occupied    = Vec::new();
-        let mut slot_types  = [None::<i32>; 8];
+        let mut compatible = Vec::new();
+        let mut occupied = Vec::new();
+        let mut slot_types = [None::<i32>; 8];
         let mut interrupted = false;
 
         'audit: for slot in 1u8..=8 {
@@ -462,11 +474,13 @@ impl NetworkWorker {
             // to avoid re-entrancy; they'll be processed after this audit finishes.
             loop {
                 match self.cmd_rx.try_recv() {
-                    Ok(cmd @ (NetworkCommand::SyncNow { .. }
-                            | NetworkCommand::HardResetBatch { .. }
-                            | NetworkCommand::Disconnect
-                            | NetworkCommand::UpdateTarget { .. }
-                            | NetworkCommand::ConnectToLast)) => self.handle(cmd),
+                    Ok(
+                        cmd @ (NetworkCommand::SyncNow { .. }
+                        | NetworkCommand::HardResetBatch { .. }
+                        | NetworkCommand::Disconnect
+                        | NetworkCommand::UpdateTarget { .. }
+                        | NetworkCommand::ConnectToLast),
+                    ) => self.handle(cmd),
                     Ok(_) => {} // defer AuditSlots / ScanTargets
                     Err(_) => break,
                 }
@@ -508,8 +522,8 @@ impl NetworkWorker {
             match slot_types[(slot - 1) as usize] {
                 Some(type_id) => {
                     let short = crate::osc::fx_type_short(type_id, slot);
-                    let long  = crate::osc::fx_type_long(type_id, slot);
-                    let tag   = if crate::osc::is_bpm_compatible(type_id, slot) {
+                    let long = crate::osc::fx_type_long(type_id, slot);
+                    let tag = if crate::osc::is_bpm_compatible(type_id, slot) {
                         "  [BPM-compatible]"
                     } else {
                         ""
@@ -526,8 +540,10 @@ impl NetworkWorker {
         for (i, t) in slot_types.iter().enumerate() {
             self.slot_types[i].store(t.unwrap_or(i32::MIN), Ordering::Relaxed);
         }
-        self.compatible_slots.store(slots_to_bitmask(&compatible), Ordering::Release);
-        self.occupied_slots.store(slots_to_bitmask(&occupied), Ordering::Release);
+        self.compatible_slots
+            .store(slots_to_bitmask(&compatible), Ordering::Release);
+        self.occupied_slots
+            .store(slots_to_bitmask(&occupied), Ordering::Release);
         let _ = self.status_tx.try_send(NetworkStatus::SlotScanDone);
     }
 
@@ -550,43 +566,62 @@ impl NetworkWorker {
     /// Runs on a dedicated short-lived thread (spawned from `handle()`) so the
     /// network worker remains fully responsive during the 600 ms window.
     fn scan_targets_bg(
-        scan_targets:    Arc<parking_lot::Mutex<Vec<DeviceInfo>>>,
-        status_tx:       Sender<NetworkStatus>,
+        scan_targets: Arc<parking_lot::Mutex<Vec<DeviceInfo>>>,
+        status_tx: Sender<NetworkStatus>,
         scan_generation: Arc<AtomicU64>,
-        expected_gen:    u64,
+        expected_gen: u64,
     ) {
         use std::{collections::HashMap, net::Ipv4Addr};
 
-        let probe  = osc::heartbeat();
+        let probe = osc::heartbeat();
         let window = Duration::from_millis(600);
 
         // ── One socket per real IPv4 interface ────────────────────────────
-        struct Iface { sock: UdpSocket, local: Ipv4Addr, netmask: Ipv4Addr }
+        struct Iface {
+            sock: UdpSocket,
+            local: Ipv4Addr,
+            netmask: Ipv4Addr,
+        }
 
         let mut ifaces: Vec<Iface> = Vec::new();
 
         let raw = if_addrs::get_if_addrs().unwrap_or_default();
         for iface in raw {
-            let if_addrs::IfAddr::V4(v4) = iface.addr else { continue };
-            if v4.ip.is_loopback() { continue; }
+            let if_addrs::IfAddr::V4(v4) = iface.addr else {
+                continue;
+            };
+            if v4.ip.is_loopback() {
+                continue;
+            }
 
-            let Ok(sock) = UdpSocket::bind(format!("{}:0", v4.ip)) else { continue };
+            let Ok(sock) = UdpSocket::bind(format!("{}:0", v4.ip)) else {
+                continue;
+            };
             let _ = sock.set_broadcast(true);
-            let bcast = v4.broadcast.unwrap_or_else(|| {
-                Ipv4Addr::from(u32::from(v4.ip) | !u32::from(v4.netmask))
-            });
+            let bcast = v4
+                .broadcast
+                .unwrap_or_else(|| Ipv4Addr::from(u32::from(v4.ip) | !u32::from(v4.netmask)));
             let _ = sock.send_to(&probe, SocketAddr::from((bcast, 10023u16)));
             let _ = sock.set_nonblocking(true);
-            ifaces.push(Iface { sock, local: v4.ip, netmask: v4.netmask });
+            ifaces.push(Iface {
+                sock,
+                local: v4.ip,
+                netmask: v4.netmask,
+            });
         }
 
         // Loopback socket so a local mock mixer is always discoverable.
         if let Ok(sock) = UdpSocket::bind("127.0.0.1:0") {
-            let _ = sock.send_to(&probe, "127.0.0.1:10023".parse::<SocketAddr>().expect("loopback address literal"));
+            let _ = sock.send_to(
+                &probe,
+                "127.0.0.1:10023"
+                    .parse::<SocketAddr>()
+                    .expect("loopback address literal"),
+            );
             let _ = sock.set_nonblocking(true);
             ifaces.push(Iface {
                 sock,
-                local:   Ipv4Addr::LOCALHOST,
+                local: Ipv4Addr::LOCALHOST,
                 netmask: Ipv4Addr::new(255, 0, 0, 0),
             });
         }
@@ -608,28 +643,36 @@ impl NetworkWorker {
                     match iface.sock.recv_from(&mut buf) {
                         Ok((len, src)) => {
                             any_recv = true;
-                            if decoder::decode_udp(&buf[..len]).is_err() { continue; }
+                            if decoder::decode_udp(&buf[..len]).is_err() {
+                                continue;
+                            }
                             let src_v4 = match src.ip() {
                                 std::net::IpAddr::V4(v) => v,
                                 _ => continue,
                             };
 
-                            let mask        = u32::from(iface.netmask);
+                            let mask = u32::from(iface.netmask);
                             let same_subnet =
                                 (u32::from(iface.local) & mask) == (u32::from(src_v4) & mask);
-                            let latency_ms  = probe_sent_at.elapsed().as_micros() as f32 / 1000.0;
-                            let ip_key      = src_v4.to_string();
+                            let latency_ms = probe_sent_at.elapsed().as_micros() as f32 / 1000.0;
+                            let ip_key = src_v4.to_string();
                             let (name, model) = parse_info_strings(&buf[..len]);
 
-                            let entry: RawEntry = (ip_key.clone(), latency_ms, name, model, same_subnet);
+                            let entry: RawEntry =
+                                (ip_key.clone(), latency_ms, name, model, same_subnet);
 
                             match by_ip.get(&ip_key) {
-                                None => { by_ip.insert(ip_key, entry); }
+                                None => {
+                                    by_ip.insert(ip_key, entry);
+                                }
                                 Some((_, _, _, _, prev_same)) => {
                                     // Prefer same-subnet; within that, prefer lower latency.
                                     let better = (!*prev_same && same_subnet)
-                                        || (*prev_same == same_subnet && latency_ms < by_ip[&ip_key].1);
-                                    if better { by_ip.insert(ip_key, entry); }
+                                        || (*prev_same == same_subnet
+                                            && latency_ms < by_ip[&ip_key].1);
+                                    if better {
+                                        by_ip.insert(ip_key, entry);
+                                    }
                                 }
                             }
                         }
@@ -647,9 +690,10 @@ impl NetworkWorker {
         // Sort: same-subnet before routed, then ascending latency.
         let mut all: Vec<RawEntry> = by_ip.into_values().collect();
         all.sort_by(|a, b| {
-            match (a.4, b.4) { // same_subnet: true sorts before false
-                (true,  false) => std::cmp::Ordering::Less,
-                (false, true)  => std::cmp::Ordering::Greater,
+            match (a.4, b.4) {
+                // same_subnet: true sorts before false
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
                 _ => a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal),
             }
         });
@@ -661,7 +705,8 @@ impl NetworkWorker {
 
             // Try to find an existing entry with the same identity.
             if has_id {
-                if let Some(existing) = result.iter_mut()
+                if let Some(existing) = result
+                    .iter_mut()
                     .find(|d| d.name == name && d.model == model)
                 {
                     // Same physical device reachable via another IP — append.
@@ -674,12 +719,12 @@ impl NetworkWorker {
 
             // New device.
             result.push(DeviceInfo {
-                ip:         ip.clone(),
-                port:       10023,
+                ip: ip.clone(),
+                port: 10023,
                 name,
                 model,
                 latency_ms: Some(latency_ms),
-                all_addrs:  vec![(ip, Some(latency_ms), same_subnet)],
+                all_addrs: vec![(ip, Some(latency_ms), same_subnet)],
             });
         }
 
@@ -692,19 +737,22 @@ impl NetworkWorker {
         {
             let mut list = scan_targets.lock();
             if scan_generation.load(Ordering::Acquire) != expected_gen {
-                log::debug!("[EtherTap] scan_targets_bg: generation changed, discarding stale results");
+                log::debug!(
+                    "[EtherTap] scan_targets_bg: generation changed, discarding stale results"
+                );
                 return;
             }
             for dev in result {
                 let has_id = !dev.name.is_empty() || !dev.model.is_empty();
                 let existing = if has_id {
-                    list.iter_mut().find(|d| d.name == dev.name && d.model == dev.model)
+                    list.iter_mut()
+                        .find(|d| d.name == dev.name && d.model == dev.model)
                 } else {
                     list.iter_mut().find(|d| d.ip == dev.ip)
                 };
                 match existing {
                     Some(e) => *e = dev,
-                    None    => list.push(dev),
+                    None => list.push(dev),
                 }
             }
         }
@@ -731,7 +779,9 @@ impl NetworkWorker {
     /// the next heartbeat cycle triggers a fresh `rebind()` attempt.
     fn send(&mut self, bytes: &[u8]) {
         let Some(target) = self.target else { return };
-        let ok = self.socket.as_ref()
+        let ok = self
+            .socket
+            .as_ref()
             .map(|s| s.send_to(bytes, target).is_ok())
             .unwrap_or(false);
         if !ok {
@@ -754,7 +804,11 @@ impl NetworkWorker {
     /// Returns 10 (DLY) as a safe default when the type is not yet known.
     fn slot_type_for(&self, slot: u8) -> i32 {
         let idx = slot.saturating_sub(1) as usize;
-        let raw = if idx < 8 { self.slot_types[idx].load(Ordering::Relaxed) } else { i32::MIN };
+        let raw = if idx < 8 {
+            self.slot_types[idx].load(Ordering::Relaxed)
+        } else {
+            i32::MIN
+        };
         if raw == i32::MIN {
             log::warn!(
                 "[EtherTap] slot_type_for: slot {slot} type unknown (audit pending), \
@@ -792,9 +846,17 @@ fn parse_info_strings(data: &[u8]) -> (String, String) {
     let Ok((_, OscPacket::Message(msg))) = decoder::decode_udp(data) else {
         return (String::new(), String::new());
     };
-    let strings: Vec<String> = msg.args.iter().filter_map(|a| {
-        if let OscType::String(s) = a { Some(s.clone()) } else { None }
-    }).collect();
+    let strings: Vec<String> = msg
+        .args
+        .iter()
+        .filter_map(|a| {
+            if let OscType::String(s) = a {
+                Some(s.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
     match strings.len() {
         0 => (String::new(), String::new()),
         // With a single string we don't know if it's version or name; skip it.
@@ -838,9 +900,12 @@ mod tests {
     #[test]
     fn display_name_name_and_model() {
         let d = DeviceInfo {
-            ip: "192.168.1.100".into(), port: 10023,
-            name: "Studio Desk".into(), model: "X32".into(),
-            latency_ms: None, all_addrs: vec![],
+            ip: "192.168.1.100".into(),
+            port: 10023,
+            name: "Studio Desk".into(),
+            model: "X32".into(),
+            latency_ms: None,
+            all_addrs: vec![],
         };
         assert_eq!(d.display_name(), "Studio Desk (X32)");
     }
@@ -848,9 +913,12 @@ mod tests {
     #[test]
     fn display_name_name_only() {
         let d = DeviceInfo {
-            ip: "192.168.1.100".into(), port: 10023,
-            name: "Studio Desk".into(), model: "".into(),
-            latency_ms: None, all_addrs: vec![],
+            ip: "192.168.1.100".into(),
+            port: 10023,
+            name: "Studio Desk".into(),
+            model: "".into(),
+            latency_ms: None,
+            all_addrs: vec![],
         };
         assert_eq!(d.display_name(), "Studio Desk");
     }
@@ -858,9 +926,12 @@ mod tests {
     #[test]
     fn display_name_model_only() {
         let d = DeviceInfo {
-            ip: "192.168.1.100".into(), port: 10023,
-            name: "".into(), model: "X32".into(),
-            latency_ms: None, all_addrs: vec![],
+            ip: "192.168.1.100".into(),
+            port: 10023,
+            name: "".into(),
+            model: "X32".into(),
+            latency_ms: None,
+            all_addrs: vec![],
         };
         assert_eq!(d.display_name(), "X32");
     }
@@ -868,9 +939,12 @@ mod tests {
     #[test]
     fn display_name_fallback_to_ip() {
         let d = DeviceInfo {
-            ip: "192.168.1.100".into(), port: 10023,
-            name: "".into(), model: "".into(),
-            latency_ms: None, all_addrs: vec![],
+            ip: "192.168.1.100".into(),
+            port: 10023,
+            name: "".into(),
+            model: "".into(),
+            latency_ms: None,
+            all_addrs: vec![],
         };
         assert_eq!(d.display_name(), "192.168.1.100:10023");
     }
@@ -878,9 +952,12 @@ mod tests {
     #[test]
     fn display_name_name_equals_model_uses_name() {
         let d = DeviceInfo {
-            ip: "192.168.1.100".into(), port: 10023,
-            name: "X32".into(), model: "X32".into(),
-            latency_ms: None, all_addrs: vec![],
+            ip: "192.168.1.100".into(),
+            port: 10023,
+            name: "X32".into(),
+            model: "X32".into(),
+            latency_ms: None,
+            all_addrs: vec![],
         };
         assert_eq!(d.display_name(), "X32");
     }
@@ -888,7 +965,10 @@ mod tests {
     // ── parse_fx_type ────────────────────────────────────────────────────
 
     fn make_osc_msg(addr: &str, args: Vec<OscType>) -> Vec<u8> {
-        let packet = OscPacket::Message(OscMessage { addr: addr.into(), args });
+        let packet = OscPacket::Message(OscMessage {
+            addr: addr.into(),
+            args,
+        });
         encoder::encode(&packet).expect("encode")
     }
 
@@ -922,12 +1002,15 @@ mod tests {
 
     #[test]
     fn parse_info_strings_full_response() {
-        let data = make_osc_msg("/info", vec![
-            OscType::String("V2.12".into()),
-            OscType::String("Studio Desk".into()),
-            OscType::String("X32".into()),
-            OscType::String("4.06".into()),
-        ]);
+        let data = make_osc_msg(
+            "/info",
+            vec![
+                OscType::String("V2.12".into()),
+                OscType::String("Studio Desk".into()),
+                OscType::String("X32".into()),
+                OscType::String("4.06".into()),
+            ],
+        );
         let (name, model) = parse_info_strings(&data);
         assert_eq!(name, "Studio Desk");
         assert_eq!(model, "X32");
@@ -944,9 +1027,7 @@ mod tests {
     #[test]
     fn parse_info_strings_single_arg() {
         // Single string is ambiguous (version or name) — return empty to be safe.
-        let data = make_osc_msg("/info", vec![
-            OscType::String("V2.12".into()),
-        ]);
+        let data = make_osc_msg("/info", vec![OscType::String("V2.12".into())]);
         let (name, model) = parse_info_strings(&data);
         assert_eq!(name, "");
         assert_eq!(model, "");
@@ -955,10 +1036,13 @@ mod tests {
     #[test]
     fn parse_info_strings_two_args() {
         // X32 layout: (version, name) — skip version, return name.
-        let data = make_osc_msg("/info", vec![
-            OscType::String("V2.12".into()),
-            OscType::String("Studio Desk".into()),
-        ]);
+        let data = make_osc_msg(
+            "/info",
+            vec![
+                OscType::String("V2.12".into()),
+                OscType::String("Studio Desk".into()),
+            ],
+        );
         let (name, model) = parse_info_strings(&data);
         assert_eq!(name, "Studio Desk");
         assert_eq!(model, "");
@@ -1040,8 +1124,8 @@ mod tests {
             ("172.16.0.1".into(), 1.0, "C".into(), "X32".into(), false),
         ];
         entries.sort_by(|a, b| match (a.4, b.4) {
-            (true,  false) => std::cmp::Ordering::Less,
-            (false, true)  => std::cmp::Ordering::Greater,
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
             _ => a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal),
         });
         assert!(entries[0].4, "first entry should be same-subnet");

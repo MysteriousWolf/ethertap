@@ -21,123 +21,131 @@ use rosc::{encoder, OscMessage, OscPacket, OscType};
 /// `(short_label, full_name)` for FX bus slots 1–4 (Sfxtyp1 from X32.c).
 fn fx_bus(type_id: i32) -> (&'static str, &'static str) {
     match type_id {
-        0  => ("HALL", "Hall Reverb"),
-        1  => ("AMBI", "Ambience"),
-        2  => ("RPLT", "Dual Reverb Plate"),
-        3  => ("ROOM", "Room Reverb"),
-        4  => ("CHAM", "Chamber Reverb"),
-        5  => ("PLAT", "Plate Reverb"),
-        6  => ("VREV", "Vintage Reverb"),
-        7  => ("VRM",  "Vintage Room"),
-        8  => ("GATE", "Gated Reverb"),
-        9  => ("RVRS", "Reverse Reverb"),
-        10 => ("DLY",  "Stereo Delay"),          // ← BPM via par/02 (mix=par/01, time=par/02)
-        11 => ("3TAP", "3-Tap Delay"),            // ← BPM via par/01 (time is first param)
-        12 => ("4TAP", "4-Tap Delay"),            // ← BPM via par/01 (time is first param)
-        13 => ("CRS",  "Chorus"),
+        0 => ("HALL", "Hall Reverb"),
+        1 => ("AMBI", "Ambience"),
+        2 => ("RPLT", "Dual Reverb Plate"),
+        3 => ("ROOM", "Room Reverb"),
+        4 => ("CHAM", "Chamber Reverb"),
+        5 => ("PLAT", "Plate Reverb"),
+        6 => ("VREV", "Vintage Reverb"),
+        7 => ("VRM", "Vintage Room"),
+        8 => ("GATE", "Gated Reverb"),
+        9 => ("RVRS", "Reverse Reverb"),
+        10 => ("DLY", "Stereo Delay"), // ← BPM via par/02 (mix=par/01, time=par/02)
+        11 => ("3TAP", "3-Tap Delay"), // ← BPM via par/01 (time is first param)
+        12 => ("4TAP", "4-Tap Delay"), // ← BPM via par/01 (time is first param)
+        13 => ("CRS", "Chorus"),
         14 => ("FLNG", "Flanger"),
         15 => ("PHAS", "Phaser"),
         16 => ("DIMC", "Dimension Chorus"),
         17 => ("FILT", "Filter"),
         18 => ("ROTA", "Rotary"),
-        19 => ("PAN",  "Autopanner"),
-        20 => ("SUB",  "Sub Synth"),
-        21 => ("D/RV", "Delay + Reverb"),         // ← BPM via par/01 (time is first param)
+        19 => ("PAN", "Autopanner"),
+        20 => ("SUB", "Sub Synth"),
+        21 => ("D/RV", "Delay + Reverb"), // ← BPM via par/01 (time is first param)
         22 => ("CR/R", "Chorus + Reverb"),
         23 => ("FL/R", "Flanger + Reverb"),
-        24 => ("D/CR", "Delay + Chorus"),          // ← BPM via par/01 (time is first param)
-        25 => ("D/FL", "Delay + Flanger"),         // ← BPM via par/01 (time is first param)
-        26 => ("MODD", "Modulated Delay"),        // ← BPM via par/01 (confirmed fxparse1.c)
+        24 => ("D/CR", "Delay + Chorus"), // ← BPM via par/01 (time is first param)
+        25 => ("D/FL", "Delay + Flanger"), // ← BPM via par/01 (time is first param)
+        26 => ("MODD", "Modulated Delay"), // ← BPM via par/01 (confirmed fxparse1.c)
         27 => ("GEQ2", "Dual GEQ 27"),
         28 => ("TEQ2", "Dual True EQ"),
-        29 => ("GEQ",  "GEQ 27"),
-        30 => ("TEQ",  "True EQ"),
+        29 => ("GEQ", "GEQ 27"),
+        30 => ("TEQ", "True EQ"),
         31 => ("DES2", "Dual De-esser"),
-        32 => ("DES",  "De-esser"),
+        32 => ("DES", "De-esser"),
         // NOTE: X32.c lists these as "PCM42/P1A2"; fxparse1.c shows only EQ
         // parameters (no delay time) for P1A2.  Display labels kept from X32.c;
         // neither type is BPM-compatible.
         33 => ("P1A2", "Dual PCM42"),
-        34 => ("P1A",  "PCM42"),
+        34 => ("P1A", "PCM42"),
         35 => ("PQ5S", "PQ Stereo"),
-        36 => ("PQ5",  "Para EQ"),
+        36 => ("PQ5", "Para EQ"),
         37 => ("WAVD", "Wave Designer"),
-        38 => ("LIM",  "Limiter"),
+        38 => ("LIM", "Limiter"),
         39 => ("CMB2", "Dual Combinator"),
-        40 => ("CMB",  "Combinator"),
+        40 => ("CMB", "Combinator"),
         41 => ("FAC2", "Dual FACilitator"),
         42 => ("F1MS", "FACilitator M/S"),
-        43 => ("FAC",  "FACilitator"),
+        43 => ("FAC", "FACilitator"),
         44 => ("LEC2", "Dual Leveler"),
-        45 => ("LEC",  "Leveler"),
+        45 => ("LEC", "Leveler"),
         46 => ("ULC2", "Dual UltraShaper"),
-        47 => ("ULC",  "UltraShaper"),
+        47 => ("ULC", "UltraShaper"),
         48 => ("ENH2", "Dual Enhancer"),
-        49 => ("ENH",  "Enhancer"),
+        49 => ("ENH", "Enhancer"),
         50 => ("EXC2", "Dual Exciter"),
-        51 => ("EXC",  "Exciter"),
-        52 => ("IMG",  "Stereo Imager"),
-        53 => ("EDI",  "Edison EX1"),
-        54 => ("SON",  "Sonic Maximizer"),
+        51 => ("EXC", "Exciter"),
+        52 => ("IMG", "Stereo Imager"),
+        53 => ("EDI", "Edison EX1"),
+        54 => ("SON", "Sonic Maximizer"),
         55 => ("AMP2", "Dual Amp Sim"),
-        56 => ("AMP",  "Amp Sim"),
+        56 => ("AMP", "Amp Sim"),
         57 => ("DRV2", "Dual Drive"),
-        58 => ("DRV",  "Drive"),
+        58 => ("DRV", "Drive"),
         59 => ("PIT2", "Dual Pitch"),
-        60 => ("PIT",  "Pitch Shift"),
-        _  => ("???",  "Unknown"),
+        60 => ("PIT", "Pitch Shift"),
+        _ => ("???", "Unknown"),
     }
 }
 
 /// `(short_label, full_name)` for FX insert slots 5–8 (Sfxtyp2 from X32.c).
 fn fx_insert(type_id: i32) -> (&'static str, &'static str) {
     match type_id {
-        0  => ("GEQ2", "Dual GEQ 27"),
-        1  => ("TEQ2", "Dual True EQ"),
-        2  => ("GEQ",  "GEQ 27"),
-        3  => ("TEQ",  "True EQ"),
-        4  => ("DES2", "Dual De-esser"),
-        5  => ("DES",  "De-esser"),
-        6  => ("P1A",  "PCM42"),
-        7  => ("P1A2", "Dual PCM42"),
-        8  => ("PQ5",  "Para EQ"),
-        9  => ("PQ5S", "PQ Stereo"),
+        0 => ("GEQ2", "Dual GEQ 27"),
+        1 => ("TEQ2", "Dual True EQ"),
+        2 => ("GEQ", "GEQ 27"),
+        3 => ("TEQ", "True EQ"),
+        4 => ("DES2", "Dual De-esser"),
+        5 => ("DES", "De-esser"),
+        6 => ("P1A", "PCM42"),
+        7 => ("P1A2", "Dual PCM42"),
+        8 => ("PQ5", "Para EQ"),
+        9 => ("PQ5S", "PQ Stereo"),
         10 => ("WAVD", "Wave Designer"),
-        11 => ("LIM",  "Limiter"),
-        12 => ("FAC",  "FACilitator"),
+        11 => ("LIM", "Limiter"),
+        12 => ("FAC", "FACilitator"),
         13 => ("F1MS", "FACilitator M/S"),
         14 => ("FAC2", "Dual FACilitator"),
-        15 => ("LEC",  "Leveler"),
+        15 => ("LEC", "Leveler"),
         16 => ("LEC2", "Dual Leveler"),
-        17 => ("ULC",  "UltraShaper"),
+        17 => ("ULC", "UltraShaper"),
         18 => ("ULC2", "Dual UltraShaper"),
         19 => ("ENH2", "Dual Enhancer"),
-        20 => ("ENH",  "Enhancer"),
+        20 => ("ENH", "Enhancer"),
         21 => ("EXC2", "Dual Exciter"),
-        22 => ("EXC",  "Exciter"),
-        23 => ("IMG",  "Stereo Imager"),
-        24 => ("EDI",  "Edison EX1"),
-        25 => ("SON",  "Sonic Maximizer"),
+        22 => ("EXC", "Exciter"),
+        23 => ("IMG", "Stereo Imager"),
+        24 => ("EDI", "Edison EX1"),
+        25 => ("SON", "Sonic Maximizer"),
         26 => ("AMP2", "Dual Amp Sim"),
-        27 => ("AMP",  "Amp Sim"),
+        27 => ("AMP", "Amp Sim"),
         28 => ("DRV2", "Dual Drive"),
-        29 => ("DRV",  "Drive"),
+        29 => ("DRV", "Drive"),
         30 => ("PHAS", "Phaser"),
         31 => ("FILT", "Filter"),
-        32 => ("PAN",  "Autopanner"),
-        33 => ("SUB",  "Sub Synth"),
-        _  => ("???",  "Unknown"),
+        32 => ("PAN", "Autopanner"),
+        33 => ("SUB", "Sub Synth"),
+        _ => ("???", "Unknown"),
     }
 }
 
 /// Short display label (≤4 chars) for the given type ID and slot.
 pub fn fx_type_short(type_id: i32, slot: u8) -> &'static str {
-    if slot <= 4 { fx_bus(type_id).0 } else { fx_insert(type_id).0 }
+    if slot <= 4 {
+        fx_bus(type_id).0
+    } else {
+        fx_insert(type_id).0
+    }
 }
 
 /// Full human-readable effect name for debug output and the FX detail row.
 pub fn fx_type_long(type_id: i32, slot: u8) -> &'static str {
-    if slot <= 4 { fx_bus(type_id).1 } else { fx_insert(type_id).1 }
+    if slot <= 4 {
+        fx_bus(type_id).1
+    } else {
+        fx_insert(type_id).1
+    }
 }
 
 /// Returns true for effects that accept a BPM-derived delay time.
@@ -165,9 +173,9 @@ pub fn is_bpm_compatible(type_id: i32, slot: u8) -> bool {
 ///   3TAP/4TAP/MODD; delay time is the first parameter (confirmed fxparse1.c).
 pub fn delay_par(type_id: i32) -> u8 {
     match type_id {
-        10 => 2,                    // DLY  — time follows mix; confirmed par/02
+        10 => 2,                          // DLY  — time follows mix; confirmed par/02
         11 | 12 | 21 | 24 | 25 | 26 => 1, // 3TAP / 4TAP / D/RV / D/CR / D/FL / MODD — time first = par/01
-        _ => 2,                     // safe fallback for any future delay effect
+        _ => 2,                           // safe fallback for any future delay effect
     }
 }
 
@@ -203,7 +211,10 @@ pub fn bpm_to_float(bpm: f64) -> f32 {
 /// `type_id` must be a BPM-compatible effect; pass 0 to fall back to par/02.
 pub fn set_fx_delay(slot: u8, type_id: i32, value: f32) -> Vec<u8> {
     let par = delay_par(type_id);
-    msg(format!("/fx/{slot}/par/{par:02}"), vec![OscType::Float(value)])
+    msg(
+        format!("/fx/{slot}/par/{par:02}"),
+        vec![OscType::Float(value)],
+    )
 }
 
 /// `/fx/{slot}/type` — query which effect occupies `slot`.
@@ -270,14 +281,20 @@ mod tests {
     fn bpm_scaling_120() {
         // 120 BPM → 500 ms → 500 / 3000 ≈ 0.1667
         let f = bpm_to_float(120.0);
-        assert!((f - 0.1667_f32).abs() < 0.001, "120 BPM → {f}, expected ~0.1667");
+        assert!(
+            (f - 0.1667_f32).abs() < 0.001,
+            "120 BPM → {f}, expected ~0.1667"
+        );
     }
 
     #[test]
     fn bpm_scaling_60() {
         // 60 BPM → 1000 ms → 1000 / 3000 ≈ 0.3333
         let f = bpm_to_float(60.0);
-        assert!((f - 0.3333_f32).abs() < 0.001, "60 BPM → {f}, expected ~0.3333");
+        assert!(
+            (f - 0.3333_f32).abs() < 0.001,
+            "60 BPM → {f}, expected ~0.3333"
+        );
     }
 
     #[test]
@@ -360,7 +377,10 @@ mod tests {
         for bpm in [60.0_f64, 90.0, 120.0, 140.0, 180.0] {
             let f = bpm_to_float(bpm);
             let recovered = float_to_bpm(f);
-            assert!((recovered - bpm).abs() < 0.1, "bpm={bpm} → f={f} → {recovered}");
+            assert!(
+                (recovered - bpm).abs() < 0.1,
+                "bpm={bpm} → f={f} → {recovered}"
+            );
         }
     }
 
@@ -432,9 +452,16 @@ mod tests {
     #[test]
     fn bpm_to_float_extremes() {
         assert_eq!(super::bpm_to_float(20.0), 1.0_f32, "20 BPM = ceiling");
-        assert_eq!(super::bpm_to_float(10.0), 1.0_f32, "10 BPM clamps to ceiling");
+        assert_eq!(
+            super::bpm_to_float(10.0),
+            1.0_f32,
+            "10 BPM clamps to ceiling"
+        );
         let f = super::bpm_to_float(21.0);
-        assert!(f < 1.0 && f > 0.0, "21 BPM gives positive fraction below ceiling");
+        assert!(
+            f < 1.0 && f > 0.0,
+            "21 BPM gives positive fraction below ceiling"
+        );
         let f = super::bpm_to_float(120.0);
         assert!(f > 0.0 && f < 1.0, "120 BPM produces fraction");
     }

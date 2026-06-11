@@ -44,7 +44,6 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
 
-
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 /// Minimum silence inserted after `BpmChanged`.  1 500 ms ≈ 3× the former
@@ -86,12 +85,12 @@ const STAT_WINDOW: usize = 256;
 /// - `max_us` — single worst pulse in the current window
 #[derive(Default, Clone, Copy, Debug)]
 pub struct ClockStats {
-    pub interval_us: u32,  // mean inter-pulse interval
-    pub p50_us:      u32,  // 50th-percentile jitter (median)
-    pub p95_us:      u32,  // 95th-percentile jitter
-    pub p99_us:      u32,  // 99th-percentile jitter
-    pub max_us:      u32,  // peak jitter in current window
-    pub sample_n:    u32,  // samples currently in window (≤ 256)
+    pub interval_us: u32, // mean inter-pulse interval
+    pub p50_us: u32,      // 50th-percentile jitter (median)
+    pub p95_us: u32,      // 95th-percentile jitter
+    pub p99_us: u32,      // 99th-percentile jitter
+    pub max_us: u32,      // peak jitter in current window
+    pub sample_n: u32,    // samples currently in window (≤ 256)
 }
 
 /// Lock-free version of `ClockStats` for sharing between the RT-priority MIDI
@@ -100,31 +99,31 @@ pub struct ClockStats {
 #[derive(Default)]
 pub struct AtomicClockStats {
     pub interval_us: AtomicU32,
-    pub p50_us:      AtomicU32,
-    pub p95_us:      AtomicU32,
-    pub p99_us:      AtomicU32,
-    pub max_us:      AtomicU32,
-    pub sample_n:    AtomicU32,
+    pub p50_us: AtomicU32,
+    pub p95_us: AtomicU32,
+    pub p99_us: AtomicU32,
+    pub max_us: AtomicU32,
+    pub sample_n: AtomicU32,
 }
 
 impl AtomicClockStats {
     pub fn store(&self, s: &ClockStats) {
         self.interval_us.store(s.interval_us, Ordering::Relaxed);
-        self.p50_us     .store(s.p50_us,      Ordering::Relaxed);
-        self.p95_us     .store(s.p95_us,      Ordering::Relaxed);
-        self.p99_us     .store(s.p99_us,      Ordering::Relaxed);
-        self.max_us     .store(s.max_us,      Ordering::Relaxed);
-        self.sample_n   .store(s.sample_n,    Ordering::Relaxed);
+        self.p50_us.store(s.p50_us, Ordering::Relaxed);
+        self.p95_us.store(s.p95_us, Ordering::Relaxed);
+        self.p99_us.store(s.p99_us, Ordering::Relaxed);
+        self.max_us.store(s.max_us, Ordering::Relaxed);
+        self.sample_n.store(s.sample_n, Ordering::Relaxed);
     }
 
     pub fn load(&self) -> ClockStats {
         ClockStats {
             interval_us: self.interval_us.load(Ordering::Relaxed),
-            p50_us:      self.p50_us     .load(Ordering::Relaxed),
-            p95_us:      self.p95_us     .load(Ordering::Relaxed),
-            p99_us:      self.p99_us     .load(Ordering::Relaxed),
-            max_us:      self.max_us     .load(Ordering::Relaxed),
-            sample_n:    self.sample_n   .load(Ordering::Relaxed),
+            p50_us: self.p50_us.load(Ordering::Relaxed),
+            p95_us: self.p95_us.load(Ordering::Relaxed),
+            p99_us: self.p99_us.load(Ordering::Relaxed),
+            max_us: self.max_us.load(Ordering::Relaxed),
+            sample_n: self.sample_n.load(Ordering::Relaxed),
         }
     }
 }
@@ -157,46 +156,59 @@ pub enum ClockMsg {
 // ─── Worker struct ────────────────────────────────────────────────────────────
 
 pub struct MidiClockWorker {
-    enabled:          Arc<AtomicBool>,
+    enabled: Arc<AtomicBool>,
     /// When true, auto-pick + connect the first available physical MIDI
     /// device whenever a port scan finds none currently selected. Mirrors
     /// the mixer's `connect_to_last` reconnect posture. Default OFF.
-    auto_connect:     Arc<AtomicBool>,
-    clock_rx:         Receiver<ClockMsg>,
+    auto_connect: Arc<AtomicBool>,
+    clock_rx: Receiver<ClockMsg>,
     device_change_rx: Receiver<Option<String>>,
-    device_watch_rx:  Receiver<Vec<String>>,
-    initial_device:   Option<String>,
-    bridge_connected:  Arc<AtomicBool>,
+    device_watch_rx: Receiver<Vec<String>>,
+    initial_device: Option<String>,
+    bridge_connected: Arc<AtomicBool>,
     bridge_connecting: Arc<AtomicBool>,
     /// Shared timing statistics — written by this worker, read by the editor.
-    pub clock_stats:   Arc<AtomicClockStats>,
+    pub clock_stats: Arc<AtomicClockStats>,
     /// Pulses per quarter note — used to gate stats updates at beat boundaries.
-    pub midi_ppq:      u8,
+    pub midi_ppq: u8,
 }
 
 impl MidiClockWorker {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        enabled:           Arc<AtomicBool>,
-        auto_connect:      Arc<AtomicBool>,
-        clock_rx:          Receiver<ClockMsg>,
-        device_change_rx:  Receiver<Option<String>>,
-        device_watch_rx:   Receiver<Vec<String>>,
-        initial_device:    Option<String>,
-        bridge_connected:  Arc<AtomicBool>,
+        enabled: Arc<AtomicBool>,
+        auto_connect: Arc<AtomicBool>,
+        clock_rx: Receiver<ClockMsg>,
+        device_change_rx: Receiver<Option<String>>,
+        device_watch_rx: Receiver<Vec<String>>,
+        initial_device: Option<String>,
+        bridge_connected: Arc<AtomicBool>,
         bridge_connecting: Arc<AtomicBool>,
-        clock_stats:       Arc<AtomicClockStats>,
-        midi_ppq:          u8,
+        clock_stats: Arc<AtomicClockStats>,
+        midi_ppq: u8,
     ) -> Self {
-        Self { enabled, auto_connect, clock_rx, device_change_rx, device_watch_rx,
-               initial_device, bridge_connected, bridge_connecting, clock_stats, midi_ppq }
+        Self {
+            enabled,
+            auto_connect,
+            clock_rx,
+            device_change_rx,
+            device_watch_rx,
+            initial_device,
+            bridge_connected,
+            bridge_connecting,
+            clock_stats,
+            midi_ppq,
+        }
     }
 
     pub fn run(self) {
         use midir::MidiOutput;
         let output = match MidiOutput::new("EtherTap") {
             Ok(o) => o,
-            Err(e) => { log::error!("[EtherTap] MIDI clock: init failed: {e}"); return; }
+            Err(e) => {
+                log::error!("[EtherTap] MIDI clock: init failed: {e}");
+                return;
+            }
         };
 
         #[cfg(not(target_os = "windows"))]
@@ -222,28 +234,26 @@ impl MidiClockWorker {
 #[cfg(target_os = "macos")]
 fn set_realtime_priority() {
     #[repr(C)]
-    struct MachTimebaseInfo { numer: u32, denom: u32 }
+    struct MachTimebaseInfo {
+        numer: u32,
+        denom: u32,
+    }
 
     #[repr(C)]
     struct ThreadTimeConstraintPolicy {
-        period:      u32,
+        period: u32,
         computation: u32,
-        constraint:  u32,
+        constraint: u32,
         preemptible: i32, // boolean_t
     }
 
-    const THREAD_TIME_CONSTRAINT_POLICY:       u32 = 2;
+    const THREAD_TIME_CONSTRAINT_POLICY: u32 = 2;
     const THREAD_TIME_CONSTRAINT_POLICY_COUNT: u32 = 4;
 
     extern "C" {
         fn mach_timebase_info(info: *mut MachTimebaseInfo) -> i32;
         fn mach_thread_self() -> u32;
-        fn thread_policy_set(
-            thread:      u32,
-            flavor:      u32,
-            policy_info: *const u32,
-            count:       u32,
-        ) -> i32;
+        fn thread_policy_set(thread: u32, flavor: u32, policy_info: *const u32, count: u32) -> i32;
     }
 
     unsafe {
@@ -252,9 +262,9 @@ fn set_realtime_priority() {
 
         let ratio = tb.numer as f64 / tb.denom as f64;
         let policy = ThreadTimeConstraintPolicy {
-            period:      (8_000_000.0 / ratio) as u32, //  8 ms
-            computation: (  500_000.0 / ratio) as u32, //  0.5 ms
-            constraint:  (4_000_000.0 / ratio) as u32, //  4 ms
+            period: (8_000_000.0 / ratio) as u32,     //  8 ms
+            computation: (500_000.0 / ratio) as u32,  //  0.5 ms
+            constraint: (4_000_000.0 / ratio) as u32, //  4 ms
             preemptible: 1,
         };
 
@@ -304,11 +314,11 @@ fn compute_stats(win: &[u32; STAT_WINDOW], n: usize) -> ClockStats {
 
     ClockStats {
         interval_us: mean,
-        p50_us:      pct(50),
-        p95_us:      pct(95),
-        p99_us:      pct(99),
-        max_us:      *dev_slice.last().unwrap_or(&0),
-        sample_n:    n as u32,
+        p50_us: pct(50),
+        p95_us: pct(95),
+        p99_us: pct(99),
+        max_us: *dev_slice.last().unwrap_or(&0),
+        sample_n: n as u32,
     }
 }
 
@@ -322,7 +332,10 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
 
     set_realtime_priority();
 
-    log::info!("[EtherTap] MidiClockWorker starting: initial_device={:?}", worker.initial_device);
+    log::info!(
+        "[EtherTap] MidiClockWorker starting: initial_device={:?}",
+        worker.initial_device
+    );
 
     let mut virt_conn: Option<_> = match output.create_virtual("EtherTap MIDI Clock") {
         Ok(c) => Some(c),
@@ -347,9 +360,9 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
     let mut phys_in: Option<MidiInputConnection<()>> = None;
 
     // ── Resync gap — silence inserted after BPM change ───────────────────────
-    let mut gap_expires:      Option<Instant> = None;
+    let mut gap_expires: Option<Instant> = None;
     // After the gap (or on TransportStart) hold off until next beat boundary.
-    let mut waiting_for_beat: bool            = false;
+    let mut waiting_for_beat: bool = false;
 
     // ── Initial physical device connection ────────────────────────────────────
     if let Some(ref name) = current_device {
@@ -361,7 +374,9 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
     } else {
         log::info!("[EtherTap] run_unix: no initial_device (user must select)");
     }
-    worker.bridge_connected.store(phys_out.is_some(), Ordering::Release);
+    worker
+        .bridge_connected
+        .store(phys_out.is_some(), Ordering::Release);
     // If a device is selected but not connected at startup, show connecting state.
     if current_device.is_some() && phys_out.is_none() {
         worker.bridge_connecting.store(true, Ordering::Release);
@@ -370,13 +385,13 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
     let mut known_ports: Vec<String> = Vec::new();
 
     // ── Inter-pulse timing stats ─ rolling STAT_WINDOW (256) sample ring ──────
-    let mut last_send:  Option<Instant>         = None;
-    let mut win_us:     [u32; STAT_WINDOW]      = [0u32; STAT_WINDOW];
-    let mut win_idx:    usize                   = 0;
+    let mut last_send: Option<Instant> = None;
+    let mut win_us: [u32; STAT_WINDOW] = [0u32; STAT_WINDOW];
+    let mut win_idx: usize = 0;
     // Total pulses received — used to detect wrap and to gate stat updates.
-    let mut win_total:  usize                   = 0;
+    let mut win_total: usize = 0;
     // Per-instance tick counter for debug log throttling (replaces static AtomicU64).
-    let mut tick_count: u64                     = 0;
+    let mut tick_count: u64 = 0;
 
     // Periodic port scan timer — fires every 1 s regardless of clock activity.
     let port_scan_timer = crossbeam_channel::tick(Duration::from_secs(1));
@@ -387,195 +402,195 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
     loop {
         crossbeam_channel::select! {
 
-            // ── Clock messages from the audio thread ──────────────────────────
-            recv(worker.clock_rx) -> msg => {
-                let Ok(msg) = msg else { break };
+                    // ── Clock messages from the audio thread ──────────────────────────
+                    recv(worker.clock_rx) -> msg => {
+                        let Ok(msg) = msg else { break };
 
-                match msg {
-                    // ── BPM changed: insert silence gap ──────────────────────
-                    ClockMsg::BpmChanged { new_bpm } => {
-                        let beat_ms = 60_000.0 / new_bpm.max(1.0);
-                        let gap_ms = (BEATS_IN_GAP * beat_ms)
-                            .max(MIN_RESYNC_GAP_MS as f64)
-                            .min(MAX_RESYNC_GAP_MS as f64) as u64;
-                        gap_expires = Some(Instant::now()
-                            + Duration::from_millis(gap_ms));
-                        // Discard timing history — the gap will corrupt intervals.
-                        last_send = None;
+                        match msg {
+                            // ── BPM changed: insert silence gap ──────────────────────
+                            ClockMsg::BpmChanged { new_bpm } => {
+                                let beat_ms = 60_000.0 / new_bpm.max(1.0);
+                                let gap_ms = (BEATS_IN_GAP * beat_ms)
+                                    .max(MIN_RESYNC_GAP_MS as f64)
+                                    .min(MAX_RESYNC_GAP_MS as f64) as u64;
+                                gap_expires = Some(Instant::now()
+                                    + Duration::from_millis(gap_ms));
+                                // Discard timing history — the gap will corrupt intervals.
+                                last_send = None;
+                            }
+
+                            // ── Transport started: phase-align without gap ────────────
+                            ClockMsg::TransportStart => {
+                                // Cancel any in-progress BPM-change gap — the user
+                                // explicitly restarted transport, so phase-align now
+                                // rather than waiting for the gap to drain.
+                                gap_expires      = None;
+                                waiting_for_beat = true;
+                                // Reset timing history so stats start fresh each play.
+                                last_send  = None;
+                                win_total  = 0;
+                                win_idx    = 0;
+                                worker.clock_stats.store(&ClockStats::default());
+                            }
+
+                            // ── Transport stopped: gate pending ticks ─────────────────
+                            ClockMsg::Stop => {
+                                // Any ticks already queued before this Stop was sent will
+                                // be consumed and silenced by the waiting_for_beat gate.
+                                // The next TransportStart re-arms with a beat-boundary
+                                // realignment so resumption is always in-phase.
+                                gap_expires      = None;
+                                waiting_for_beat = true;
+                                last_send        = None;
+                            }
+
+                            // ── Clock tick (forwarded immediately — no sleep) ─────────
+                            ClockMsg::Tick { on_beat } => {
+                                // Drop ticks while a resync gap is active.
+                                if let Some(exp) = gap_expires {
+                                    if Instant::now() < exp {
+                                        continue; // still in gap
+                                    }
+                                    // Gap over — wait for the next beat boundary.
+                                    gap_expires      = None;
+                                    waiting_for_beat = true;
+                                    last_send        = None; // discard stale timestamp
+                                }
+
+                                // Hold until the next quarter-note beat to phase-align.
+                                if waiting_for_beat {
+                                    if !on_beat {
+                                        continue;
+                                    }
+                                    waiting_for_beat = false;
+                                }
+
+                                if !worker.enabled.load(Ordering::Relaxed) {
+                                    continue;
+                                }
+
+                                // ── Timing stats: rolling 256-pulse window ────────────
+                                if let Some(prev) = last_send.take() {
+                                    let us = prev.elapsed().as_micros()
+                                                 .min(u32::MAX as u128) as u32;
+                                    win_us[win_idx] = us;
+                                    win_idx   = (win_idx + 1) % STAT_WINDOW;
+                                    win_total = win_total.saturating_add(1);
+
+                                    // Update stats every PPQ ticks (one beat).
+                                    // Gate on ≥2*PPQ samples so p50/p95 are meaningful.
+                                    let ppq_usize = worker.midi_ppq as usize;
+                                    if win_total.is_multiple_of(ppq_usize) && win_total >= ppq_usize * 2 {
+                                        let n = win_total.min(STAT_WINDOW);
+                                        let stats = compute_stats(&win_us, n);
+                                        worker.clock_stats.store(&stats);
+                                    }
+                                }
+                                last_send = Some(Instant::now());
+                                tick_count = tick_count.wrapping_add(1);
+                                if tick_count.is_multiple_of(DEBUG_LOG_INTERVAL_TICKS) {
+                                    log::debug!("[EtherTap] tick #{} to virtual port, enabled={}", tick_count, worker.enabled.load(Ordering::Relaxed));
+                                }
+                                if let Some(ref mut vc) = virt_conn {
+                                    if vc.send(CLOCK_BYTE).is_err() {
+                                        log::warn!("[EtherTap] virtual port send failed — port may be disconnected");
+                                    }
+                                }
+                                if let Some(ref mut out) = phys_out {
+                                    if out.send(CLOCK_BYTE).is_err() {
+                                        phys_out  = None;
+                                        phys_in   = None;
+                                        worker.bridge_connected.store(false, Ordering::Release);
+                                    }
+                                }
+                            }
+                        }
                     }
 
-                    // ── Transport started: phase-align without gap ────────────
-                    ClockMsg::TransportStart => {
-                        // Cancel any in-progress BPM-change gap — the user
-                        // explicitly restarted transport, so phase-align now
-                        // rather than waiting for the gap to drain.
-                        gap_expires      = None;
-                        waiting_for_beat = true;
-                        // Reset timing history so stats start fresh each play.
-                        last_send  = None;
-                        win_total  = 0;
-                        win_idx    = 0;
-                        worker.clock_stats.store(&ClockStats::default());
+                    // ── Passthrough: forward non-clock bytes from physical input ───
+                    recv(pass_rx) -> msg => {
+                        let drops = pass_drop_count.swap(0, Ordering::Relaxed);
+                        if drops > 0 {
+                            log::warn!("[EtherTap] MIDI passthrough: {drops} byte(s) dropped (pass channel full)");
+                        }
+                        if let Ok(bytes) = msg {
+                            if let Some(ref mut vc) = virt_conn {
+                                let _ = vc.send(&bytes);
+                            }
+                        }
                     }
 
-                    // ── Transport stopped: gate pending ticks ─────────────────
-                    ClockMsg::Stop => {
-                        // Any ticks already queued before this Stop was sent will
-                        // be consumed and silenced by the waiting_for_beat gate.
-                        // The next TransportStart re-arms with a beat-boundary
-                        // realignment so resumption is always in-phase.
-                        gap_expires      = None;
-                        waiting_for_beat = true;
-                        last_send        = None;
+        // ── Device selection changed by editor ────────────────────────────
+                    recv(worker.device_change_rx) -> dev => {
+                        let Ok(new_device) = dev else { break };
+                        log::info!("[EtherTap] device_change_rx: {:?}", new_device.as_deref());
+                        phys_in  = None;
+                        phys_out = None;
+                        current_device = new_device;
+                        backoff.reset();
+                        if let Some(ref name) = current_device {
+                            worker.bridge_connecting.store(true, Ordering::Release);
+                            phys_out = try_connect_out(name);
+                            if phys_out.is_some() {
+                                phys_in = try_connect_in(name, pass_tx.clone(), pass_drop_count.clone());
+                                if phys_in.is_none() {
+                                    log::warn!("[EtherTap] MIDI passthrough unavailable: \
+                                                no input port matching '{name}'");
+                                }
+                            }
+                            worker.bridge_connecting.store(false, Ordering::Release);
+                            worker.bridge_connected.store(phys_out.is_some(), Ordering::Release);
+                        } else {
+                            worker.bridge_connected.store(false, Ordering::Release);
+                        }
                     }
 
-                    // ── Clock tick (forwarded immediately — no sleep) ─────────
-                    ClockMsg::Tick { on_beat } => {
-                        // Drop ticks while a resync gap is active.
-                        if let Some(exp) = gap_expires {
-                            if Instant::now() < exp {
-                                continue; // still in gap
-                            }
-                            // Gap over — wait for the next beat boundary.
-                            gap_expires      = None;
-                            waiting_for_beat = true;
-                            last_send        = None; // discard stale timestamp
+                    // ── Device watcher notification (macOS: native CoreMIDI callback;
+                    //     non-macOS: polling fallback).  When device topology changes,
+                    //     immediately try to reconnect or mark as disconnected.
+                    recv(worker.device_watch_rx) -> msg => {
+                        if let Ok(ports_now) = msg {
+                            handle_port_scan(
+                                &ports_now,
+                                &mut known_ports,
+                                &mut current_device,
+                                &mut phys_out,
+                                &mut phys_in,
+                                &mut backoff,
+                                &pass_tx,
+                                &pass_drop_count,
+                                &worker,
+                            );
                         }
+                    }
 
-                        // Hold until the next quarter-note beat to phase-align.
-                        if waiting_for_beat {
-                            if !on_beat {
-                                continue;
-                            }
-                            waiting_for_beat = false;
-                        }
-
-                        if !worker.enabled.load(Ordering::Relaxed) {
-                            continue;
-                        }
-
-                        // ── Timing stats: rolling 256-pulse window ────────────
-                        if let Some(prev) = last_send.take() {
-                            let us = prev.elapsed().as_micros()
-                                         .min(u32::MAX as u128) as u32;
-                            win_us[win_idx] = us;
-                            win_idx   = (win_idx + 1) % STAT_WINDOW;
-                            win_total = win_total.saturating_add(1);
-
-                            // Update stats every PPQ ticks (one beat).
-                            // Gate on ≥2*PPQ samples so p50/p95 are meaningful.
-                            let ppq_usize = worker.midi_ppq as usize;
-                            if win_total.is_multiple_of(ppq_usize) && win_total >= ppq_usize * 2 {
-                                let n = win_total.min(STAT_WINDOW);
-                                let stats = compute_stats(&win_us, n);
-                                worker.clock_stats.store(&stats);
-                            }
-                        }
-                        last_send = Some(Instant::now());
-                        tick_count = tick_count.wrapping_add(1);
-                        if tick_count.is_multiple_of(DEBUG_LOG_INTERVAL_TICKS) {
-                            log::debug!("[EtherTap] tick #{} to virtual port, enabled={}", tick_count, worker.enabled.load(Ordering::Relaxed));
-                        }
-                        if let Some(ref mut vc) = virt_conn {
-                            if vc.send(CLOCK_BYTE).is_err() {
-                                log::warn!("[EtherTap] virtual port send failed — port may be disconnected");
-                            }
-                        }
-                        if let Some(ref mut out) = phys_out {
-                            if out.send(CLOCK_BYTE).is_err() {
-                                phys_out  = None;
-                                phys_in   = None;
-                                worker.bridge_connected.store(false, Ordering::Release);
-                            }
-                        }
+                    // ── Periodic port scan (safety net when notifications are delayed;
+                    //     primary mechanism on non-macOS where polling is the only option).
+                    recv(port_scan_timer) -> _ => {
+                        // On macOS the notification callback is the primary trigger; the
+                        // timer is a 30 s recovery fallback.  On non-macOS it runs every 1 s.
+                        let ports_now: Vec<String> =
+                            if let Ok(out) = midir::MidiOutput::new("EtherTap-Scan") {
+                                out.ports()
+                                    .iter()
+                                    .filter_map(|p| out.port_name(p).ok())
+                                    .collect()
+                            } else {
+                                Vec::new()
+                            };
+                        handle_port_scan(
+                            &ports_now,
+                            &mut known_ports,
+                            &mut current_device,
+                            &mut phys_out,
+                            &mut phys_in,
+                            &mut backoff,
+                            &pass_tx,
+                            &pass_drop_count,
+                            &worker,
+                        );
                     }
                 }
-            }
-
-            // ── Passthrough: forward non-clock bytes from physical input ───
-            recv(pass_rx) -> msg => {
-                let drops = pass_drop_count.swap(0, Ordering::Relaxed);
-                if drops > 0 {
-                    log::warn!("[EtherTap] MIDI passthrough: {drops} byte(s) dropped (pass channel full)");
-                }
-                if let Ok(bytes) = msg {
-                    if let Some(ref mut vc) = virt_conn {
-                        let _ = vc.send(&bytes);
-                    }
-                }
-            }
-
-// ── Device selection changed by editor ────────────────────────────
-            recv(worker.device_change_rx) -> dev => {
-                let Ok(new_device) = dev else { break };
-                log::info!("[EtherTap] device_change_rx: {:?}", new_device.as_deref());
-                phys_in  = None;
-                phys_out = None;
-                current_device = new_device;
-                backoff.reset();
-                if let Some(ref name) = current_device {
-                    worker.bridge_connecting.store(true, Ordering::Release);
-                    phys_out = try_connect_out(name);
-                    if phys_out.is_some() {
-                        phys_in = try_connect_in(name, pass_tx.clone(), pass_drop_count.clone());
-                        if phys_in.is_none() {
-                            log::warn!("[EtherTap] MIDI passthrough unavailable: \
-                                        no input port matching '{name}'");
-                        }
-                    }
-                    worker.bridge_connecting.store(false, Ordering::Release);
-                    worker.bridge_connected.store(phys_out.is_some(), Ordering::Release);
-                } else {
-                    worker.bridge_connected.store(false, Ordering::Release);
-                }
-            }
-
-            // ── Device watcher notification (macOS: native CoreMIDI callback;
-            //     non-macOS: polling fallback).  When device topology changes,
-            //     immediately try to reconnect or mark as disconnected.
-            recv(worker.device_watch_rx) -> msg => {
-                if let Ok(ports_now) = msg {
-                    handle_port_scan(
-                        &ports_now,
-                        &mut known_ports,
-                        &mut current_device,
-                        &mut phys_out,
-                        &mut phys_in,
-                        &mut backoff,
-                        &pass_tx,
-                        &pass_drop_count,
-                        &worker,
-                    );
-                }
-            }
-
-            // ── Periodic port scan (safety net when notifications are delayed;
-            //     primary mechanism on non-macOS where polling is the only option).
-            recv(port_scan_timer) -> _ => {
-                // On macOS the notification callback is the primary trigger; the
-                // timer is a 30 s recovery fallback.  On non-macOS it runs every 1 s.
-                let ports_now: Vec<String> =
-                    if let Ok(out) = midir::MidiOutput::new("EtherTap-Scan") {
-                        out.ports()
-                            .iter()
-                            .filter_map(|p| out.port_name(p).ok())
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
-                handle_port_scan(
-                    &ports_now,
-                    &mut known_ports,
-                    &mut current_device,
-                    &mut phys_out,
-                    &mut phys_in,
-                    &mut backoff,
-                    &pass_tx,
-                    &pass_drop_count,
-                    &worker,
-                );
-            }
-        }
     }
 }
 
@@ -613,33 +628,46 @@ fn handle_port_scan(
         && !known_ports.is_empty()
     {
         let picked = known_ports[0].clone();
-        log::info!("[EtherTap] handle_port_scan: auto_connect ON, no device selected — \
-                    auto-picking '{picked}'");
+        log::info!(
+            "[EtherTap] handle_port_scan: auto_connect ON, no device selected — \
+                    auto-picking '{picked}'"
+        );
         *current_device = Some(picked);
         backoff.reset();
     }
 
     if let Some(ref name) = current_device {
         let present = known_ports.iter().any(|p| p == name);
-        log::debug!("[EtherTap] handle_port_scan: device={:?}, present={}, phys_out.is_some()={}",
-            name, present, phys_out.is_some());
+        log::debug!(
+            "[EtherTap] handle_port_scan: device={:?}, present={}, phys_out.is_some()={}",
+            name,
+            present,
+            phys_out.is_some()
+        );
 
         if present && phys_out.is_none() {
-            log::info!("[EtherTap] handle_port_scan: attempting to connect to {:?}", name);
+            log::info!(
+                "[EtherTap] handle_port_scan: attempting to connect to {:?}",
+                name
+            );
             worker.bridge_connecting.store(true, Ordering::Release);
             *phys_out = try_connect_out(name);
             if phys_out.is_some() {
                 backoff.record_success();
                 *phys_in = try_connect_in(name, pass_tx.clone(), pass_drop_count.clone());
                 if phys_in.is_none() {
-                    log::warn!("[EtherTap] MIDI passthrough unavailable: \
-                                no input port matching '{name}'");
+                    log::warn!(
+                        "[EtherTap] MIDI passthrough unavailable: \
+                                no input port matching '{name}'"
+                    );
                 }
             } else {
                 backoff.record_failure();
             }
             worker.bridge_connecting.store(false, Ordering::Release);
-            worker.bridge_connected.store(phys_out.is_some(), Ordering::Release);
+            worker
+                .bridge_connected
+                .store(phys_out.is_some(), Ordering::Release);
         } else if !present && phys_out.is_some() {
             *phys_out = None;
             *phys_in = None;
@@ -665,9 +693,11 @@ fn try_connect_out(device_name: &str) -> Option<midir::MidiOutputConnection> {
             return None;
         }
     };
-    let port = match out.ports().into_iter().find(|p| {
-        out.port_name(p).map(|n| n == device_name).unwrap_or(false)
-    }) {
+    let port = match out
+        .ports()
+        .into_iter()
+        .find(|p| out.port_name(p).map(|n| n == device_name).unwrap_or(false))
+    {
         Some(p) => p,
         None => {
             log::warn!("[EtherTap] try_connect_out: port '{device_name}' not found");
@@ -703,22 +733,29 @@ fn try_connect_in(
             return None;
         }
     };
-    let port = match inp.ports().into_iter().find(|p| {
-        inp.port_name(p).map(|n| n == device_name).unwrap_or(false)
-    }) {
+    let port = match inp
+        .ports()
+        .into_iter()
+        .find(|p| inp.port_name(p).map(|n| n == device_name).unwrap_or(false))
+    {
         Some(p) => p,
         None => {
             log::warn!("[EtherTap] try_connect_in: port '{device_name}' not found");
             return None;
         }
     };
-    match inp.connect(&port, "EtherTap-PhysIn", move |_ts, msg, _| {
-        if msg.first().copied() != Some(0xF8) {
-            if pass_tx.try_send(msg.to_vec()).is_err() {
-                drop_count.fetch_add(1, Ordering::Relaxed);
+    match inp.connect(
+        &port,
+        "EtherTap-PhysIn",
+        move |_ts, msg, _| {
+            if msg.first().copied() != Some(0xF8) {
+                if pass_tx.try_send(msg.to_vec()).is_err() {
+                    drop_count.fetch_add(1, Ordering::Relaxed);
+                }
             }
-        }
-    }, ()) {
+        },
+        (),
+    ) {
         Ok(c) => {
             log::info!("[EtherTap] try_connect_in: connected input to '{device_name}'");
             Some(c)
@@ -742,7 +779,7 @@ mod tests {
         assert_eq!(stats.interval_us, 0);
     }
 
-#[test]
+    #[test]
     fn compute_stats_single_sample() {
         let mut win = [0u32; STAT_WINDOW];
         win[0] = 20833;
@@ -773,7 +810,7 @@ mod tests {
         assert_eq!(stats.interval_us, 20833);
     }
 
-#[test]
+    #[test]
     fn backoff_initial_state() {
         let b = crate::reconnect::Backoff::new(1000, 10000);
         assert!(!b.is_cooling_down());
