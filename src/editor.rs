@@ -125,17 +125,18 @@ struct Theme {
     inset_bg: Color,     // background for recessed elements
 
     // ── Standalone DAW-shell chrome (test harness only, never shipped) ───
-    // dark Asiimov palette — black base, gunmetal panels, orange accents, near-white text
-    // Only read from #[cfg(feature = "standalone")] view code.
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    // dark Asiimov palette — black base, gunmetal panels, orange accents,
+    // near-white text. Compiled only with the standalone feature: the shipped
+    // VST3 never renders DAW chrome, so the fields don't exist there.
+    #[cfg(feature = "standalone")]
     daw_chrome_bg: Color, // transport row / DAW I/O footer background
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    #[cfg(feature = "standalone")]
     daw_chrome_panel: Color, // subsection panel backgrounds
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    #[cfg(feature = "standalone")]
     daw_chrome_border: Color, // panel border + accent (Asiimov orange)
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    #[cfg(feature = "standalone")]
     daw_chrome_text: Color, // primary text on the chrome surface
-    #[cfg_attr(not(feature = "standalone"), allow(dead_code))]
+    #[cfg(feature = "standalone")]
     daw_chrome_text_dim: Color, // secondary/label text on the chrome surface
 }
 
@@ -201,10 +202,15 @@ impl Theme {
             inset_bg: rgb(10, 10, 14),
 
             // ── Standalone DAW-shell chrome ─────────────────────────────────
-            daw_chrome_bg: rgb(0, 0, 0),             // Asiimov black base
-            daw_chrome_panel: rgb(18, 18, 22),       // Asiimov near-black panel
-            daw_chrome_border: rgb(251, 116, 45),    // Asiimov signature orange (#fb742d)
-            daw_chrome_text: rgb(246, 246, 246),     // Asiimov near-white (#f6f6f6)
+            #[cfg(feature = "standalone")]
+            daw_chrome_bg: rgb(0, 0, 0), // Asiimov black base
+            #[cfg(feature = "standalone")]
+            daw_chrome_panel: rgb(18, 18, 22), // Asiimov near-black panel
+            #[cfg(feature = "standalone")]
+            daw_chrome_border: rgb(251, 116, 45), // Asiimov signature orange (#fb742d)
+            #[cfg(feature = "standalone")]
+            daw_chrome_text: rgb(246, 246, 246), // Asiimov near-white (#f6f6f6)
+            #[cfg(feature = "standalone")]
             daw_chrome_text_dim: rgb(165, 163, 170), // dimmed chrome text (readable on black)
         }
     }
@@ -223,6 +229,12 @@ const SPACING_BTN_BASELINE: u16 = 10;
 const SPACING_FX_ROW_GAP: u16 = 12;
 const SCAN_MODAL_W: u16 = 290;
 const MIDI_MODAL_W: u16 = 240;
+/// Vertical gap between titled sections in the main column.
+const SECTION_GAP: u16 = 3;
+/// Inner padding of every section frame: [top, right, bottom, left].
+const SECTION_PAD: [u16; 4] = [2, 6, 4, 6];
+/// Title size of every section header (MIXER / EFFECTS / MIDI / SYNC).
+const SECTION_TITLE_SIZE: u16 = 9;
 
 // ─── Button stylesheet ───────────────────────────────────────────────────────
 
@@ -2092,65 +2104,39 @@ impl IcedEditor for EtherTapEditor {
         // ── Assembly ──────────────────────────────────────────────────────
         //
         // The banner is edge-to-edge (outside the content padding).  Each
-        // section frame uses a titled-border pattern: the title text sits
-        // right on the top border line (zero top padding, no background
-        // patch) with the content below it.
+        // section frame uses a titled-border pattern via `section()`: the
+        // title text sits right on the top border line (zero top padding,
+        // no background patch) with the content below it.
         let banner = header; // edge-to-edge, outside content padding
         let content = Column::new()
-            .push(t!("MIXER").size(9).color(THEME.text_dim))
-            .push(
-                Container::new(
-                    Container::new(
-                        Column::new()
-                            .push(net_row)
-                            .push(Space::with_height(4.into()))
-                            .push(telem_row),
-                    )
-                    .padding([2, 6, 4, 6])
-                    .width(Length::Fill),
-                )
-                .style(ModSection),
-            )
-            .push(Space::with_height(Length::Units(3)))
-            .push(t!("EFFECTS").size(9).color(THEME.text_dim))
-            .push(
-                Container::new(
-                    Container::new(
-                        Column::new()
-                            .push(fx_line1)
-                            .push(Space::with_height(3.into()))
-                            .push(fx_line2),
-                    )
-                    .padding([2, 6, 4, 6])
-                    .width(Length::Fill),
-                )
-                .style(ModSection),
-            )
-            .push(Space::with_height(Length::Units(3)))
-            .push(t!("MIDI").size(9).color(THEME.text_dim))
-            .push(
-                Container::new(
-                    Container::new(
-                        Column::new()
-                            .push(clock_row)
-                            .push(Space::with_height(3.into()))
-                            .push(clock_stats_row),
-                    )
-                    .padding([2, 6, 4, 6])
-                    .width(Length::Fill),
-                )
-                .style(ModSection),
-            )
-            .push(Space::with_height(Length::Units(3)))
-            .push(t!("SYNC").size(9).color(THEME.text_dim))
-            .push(
-                Container::new(
-                    Container::new(rate_row)
-                        .padding([2, 6, 4, 6])
-                        .width(Length::Fill),
-                )
-                .style(ModSection),
-            )
+            .push(section(
+                "MIXER",
+                Column::new()
+                    .push(net_row)
+                    .push(Space::with_height(4.into()))
+                    .push(telem_row)
+                    .into(),
+            ))
+            .push(Space::with_height(Length::Units(SECTION_GAP)))
+            .push(section(
+                "EFFECTS",
+                Column::new()
+                    .push(fx_line1)
+                    .push(Space::with_height(3.into()))
+                    .push(fx_line2)
+                    .into(),
+            ))
+            .push(Space::with_height(Length::Units(SECTION_GAP)))
+            .push(section(
+                "MIDI",
+                Column::new()
+                    .push(clock_row)
+                    .push(Space::with_height(3.into()))
+                    .push(clock_stats_row)
+                    .into(),
+            ))
+            .push(Space::with_height(Length::Units(SECTION_GAP)))
+            .push(section("SYNC", rate_row.into()))
             .padding([0, 4, 3, 4])
             .spacing(0);
 
@@ -2195,6 +2181,24 @@ impl IcedEditor for EtherTapEditor {
 /// Pulse a momentary trigger BoolParam: set true via ParamSetter so the host
 /// records the gesture; process() consumes the rising edge and self-resets the
 /// param to false through context.set_parameter().
+/// Titled section frame — the one visual pattern every main-column group
+/// (MIXER / EFFECTS / MIDI / SYNC) uses: dim uppercase title sitting on the
+/// frame's top edge, content inside a `ModSection`-styled container with the
+/// shared `SECTION_PAD` inset.
+fn section<'a>(title: &'static str, content: Element<'a, Message>) -> Element<'a, Message> {
+    Column::new()
+        .push(t!(title).size(SECTION_TITLE_SIZE).color(THEME.text_dim))
+        .push(
+            Container::new(
+                Container::new(content)
+                    .padding(SECTION_PAD)
+                    .width(Length::Fill),
+            )
+            .style(ModSection),
+        )
+        .into()
+}
+
 fn pulse_param(context: &dyn GuiContext, param: &BoolParam) {
     let setter = ParamSetter::new(context);
     setter.begin_set_parameter(param);
