@@ -312,6 +312,8 @@ fn telemetry_poll_updates_hardware_float() {
             scan_targets: Arc::new(parking_lot::Mutex::new(Vec::new())),
             connected_device: Arc::new(parking_lot::Mutex::new((String::new(), String::new()))),
             scan_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            auto_reconnect: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_device: Arc::new(parking_lot::Mutex::new((String::new(), String::new()))),
         },
     );
     let handle = std::thread::Builder::new()

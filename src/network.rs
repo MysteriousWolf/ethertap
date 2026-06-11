@@ -35,6 +35,10 @@ const RECV_TIMEOUT: Duration = Duration::from_millis(250);
 const HARD_RESET_DWELL: Duration = Duration::from_millis(75);
 /// Worker loop sleep when idle.
 const LOOP_SLEEP: Duration = Duration::from_millis(10);
+/// Consecutive heartbeat failures before an auto_reconnect rescan kicks in.
+const AUTO_RESCAN_FAILURES: u32 = 3;
+/// Listen window for the synchronous identity rescan.
+const RESCAN_WINDOW: Duration = Duration::from_millis(600);
 
 // ─── Device info ─────────────────────────────────────────────────────────────
 
@@ -140,6 +144,13 @@ pub struct WorkerShared {
     /// Monotonically-increasing counter; background scan threads discard results
     /// when this changes, preventing stale results from a previous scan.
     pub scan_generation: Arc<AtomicU64>,
+    /// Mirrored from the `auto_reconnect` host param each `process()` call.
+    /// ON: the worker self-connects to the persisted target on startup and
+    /// retargets via identity-verified rescan when the device moved.
+    pub auto_reconnect: Arc<std::sync::atomic::AtomicBool>,
+    /// Persisted (name, model) of the last connected device. Empty until the
+    /// first successful connect; verified on auto-reconnect.
+    pub last_device: Arc<Mutex<(String, String)>>,
 }
 
 // ─── Worker ──────────────────────────────────────────────────────────────────
@@ -173,6 +184,21 @@ pub struct NetworkWorker {
     /// in production; tests override it so a MockMixer on an OS-assigned port
     /// is discoverable without colliding across parallel test binaries.
     scan_port: u16,
+    /// Mirror of the `auto_reconnect` host param (see [`WorkerShared`]).
+    auto_reconnect: Arc<std::sync::atomic::AtomicBool>,
+    /// Persisted (name, model) of the last connected device.
+    last_device: Arc<Mutex<(String, String)>>,
+    /// True when the current target was established by the run-loop
+    /// self-connect (auto-resume) rather than an explicit user command.
+    /// Auto-resumed targets get identity verification; explicit ones adopt
+    /// whatever identity answers — the user chose that device.
+    target_from_auto: bool,
+    /// Consecutive heartbeat failures since the last success; at
+    /// [`AUTO_RESCAN_FAILURES`] with auto_reconnect ON, the worker rescans
+    /// for the persisted identity in case the device's address moved.
+    heartbeat_failures: u32,
+    /// Throttle for run-loop self-connect attempts.
+    last_auto_attempt: Option<Instant>,
 }
 
 /// Encode a slot list (values 1..=8) as a u8 bitmask: bit n = slot (n+1) present.
@@ -213,6 +239,11 @@ impl NetworkWorker {
             connected: false,
             backoff: Backoff::new(2000, 10000),
             scan_port: 10023,
+            auto_reconnect: shared.auto_reconnect,
+            last_device: shared.last_device,
+            target_from_auto: false,
+            heartbeat_failures: 0,
+            last_auto_attempt: None,
         }
     }
 
@@ -234,6 +265,13 @@ impl NetworkWorker {
                     Err(TryRecvError::Disconnected) => return,
                 }
             }
+
+            // Auto-resume: with the auto_reconnect param ON, no target, and a
+            // persisted address available, connect without any user pulse.
+            // This is the authoritative auto-connect path — `initialize()`
+            // sends nothing, so hosts that restore param state after init
+            // still converge here once `process()` mirrors the atom.
+            self.maybe_auto_connect();
 
             // Periodic heartbeat / reconnect.
             // Skipped entirely when the user explicitly disconnected.
@@ -285,17 +323,52 @@ impl NetworkWorker {
                 self.last_heartbeat = Instant::now();
                 self.send_heartbeat();
             }
-            Err(_) => log::warn!("[EtherTap] invalid target: {ip}:{port}"),
+            Err(_) => {
+                // Count as a failure so the auto-resume throttle backs off
+                // instead of retrying an unparseable address at loop cadence.
+                self.backoff.record_failure();
+                log::warn!("[EtherTap] invalid target: {ip}:{port}");
+            }
         }
+    }
+
+    /// Run-loop self-connect: auto_reconnect ON, no explicit disconnect, no
+    /// current target, persisted address available, and the throttle expired.
+    fn maybe_auto_connect(&mut self) {
+        if self.target.is_some()
+            || self.user_disconnected
+            || !self.auto_reconnect.load(Ordering::Relaxed)
+        {
+            return;
+        }
+        // Throttle attempts by the shared backoff so a dead persisted target
+        // doesn't get hammered at loop cadence.
+        let delay = Duration::from_millis(self.backoff.next_delay_ms());
+        if self.last_auto_attempt.is_some_and(|t| t.elapsed() < delay) {
+            return;
+        }
+        let ip = self.target_ip.lock().clone();
+        let port = *self.target_port.lock();
+        if ip.is_empty() || port == 0 {
+            return;
+        }
+        self.last_auto_attempt = Some(Instant::now());
+        self.target_from_auto = true;
+        log::info!("[EtherTap] auto_reconnect: resuming last target {ip}:{port}");
+        self.connect(ip, port);
     }
 
     fn handle(&mut self, cmd: NetworkCommand) {
         match cmd {
-            NetworkCommand::UpdateTarget { ip, port } => self.connect(ip, port),
+            NetworkCommand::UpdateTarget { ip, port } => {
+                self.target_from_auto = false;
+                self.connect(ip, port);
+            }
 
             NetworkCommand::ConnectToLast => {
                 let ip = self.target_ip.lock().clone();
                 let port = *self.target_port.lock();
+                self.target_from_auto = false;
                 self.connect(ip, port);
             }
 
@@ -447,21 +520,91 @@ impl NetworkWorker {
                 .unwrap_or(false)
         }) {
             Some(len) => {
+                let (name, model) = parse_info_strings(&buf[..len]);
+
+                // Identity check for auto-resumed targets: if a *different*
+                // device answers at the persisted address (DHCP moved things),
+                // reject it and rescan for the persisted identity instead.
+                if self.target_from_auto && !name.is_empty() {
+                    let expected = self.last_device.lock().clone();
+                    let known = !expected.0.is_empty() || !expected.1.is_empty();
+                    if known && (expected.0 != name || expected.1 != model) {
+                        log::warn!(
+                            "[EtherTap] auto_reconnect: expected {expected:?}, got \
+                             ({name:?}, {model:?}) — rescanning for the device"
+                        );
+                        self.target = None;
+                        self.connected = false;
+                        self.rescan_for_last_device();
+                        return;
+                    }
+                }
+
                 self.connected = true;
+                self.heartbeat_failures = 0;
                 self.backoff.record_success();
                 let _ = self.status_tx.try_send(NetworkStatus::Connected);
                 self.pulse_rx();
                 // Write device identity directly — avoids a String allocation on
                 // the audio thread that would otherwise receive DeviceIdentified.
-                let (name, model) = parse_info_strings(&buf[..len]);
                 if !name.is_empty() || !model.is_empty() {
-                    *self.connected_device.lock() = (name, model);
+                    *self.connected_device.lock() = (name.clone(), model.clone());
+                    // Write-through persist: explicit connects adopt whatever
+                    // device the user pointed at; auto-resumes only reach here
+                    // with a matching (or previously unknown) identity.
+                    *self.last_device.lock() = (name, model);
                 }
             }
             None => {
                 self.connected = false;
+                self.heartbeat_failures = self.heartbeat_failures.saturating_add(1);
                 self.backoff.record_failure();
                 let _ = self.status_tx.try_send(NetworkStatus::Disconnected);
+
+                // The device may have moved address entirely — after a few
+                // straight failures, try to find it again by identity.
+                if self.heartbeat_failures >= AUTO_RESCAN_FAILURES
+                    && self.auto_reconnect.load(Ordering::Relaxed)
+                {
+                    self.heartbeat_failures = 0;
+                    self.rescan_for_last_device();
+                }
+            }
+        }
+    }
+
+    /// Synchronous LAN rescan for the persisted device identity. On a hit,
+    /// write the new address through to the persisted target and connect to
+    /// it (as an auto-resumed target, so identity stays verified).
+    ///
+    /// Blocks the worker for [`RESCAN_WINDOW`] — acceptable: it only runs
+    /// while disconnected, when there is nothing to sync or poll.
+    fn rescan_for_last_device(&mut self) {
+        debug_assert!(!self.connected, "rescan must not run while connected");
+        let expected = self.last_device.lock().clone();
+        if expected.0.is_empty() && expected.1.is_empty() {
+            return;
+        }
+        let devices = Self::scan_collect(self.scan_port, RESCAN_WINDOW);
+        let hit = devices
+            .into_iter()
+            .find(|d| d.name == expected.0 && d.model == expected.1);
+        match hit {
+            Some(dev) => {
+                log::info!(
+                    "[EtherTap] auto_reconnect: found {:?} at {}:{}",
+                    dev.display_name(),
+                    dev.ip,
+                    dev.port
+                );
+                *self.target_ip.lock() = dev.ip.clone();
+                *self.target_port.lock() = dev.port;
+                self.target_from_auto = true;
+                self.connect(dev.ip, dev.port);
+            }
+            None => {
+                self.backoff.record_failure();
+                log::debug!("[EtherTap] auto_reconnect: device {expected:?} not found in rescan");
             }
         }
     }
@@ -591,10 +734,47 @@ impl NetworkWorker {
         expected_gen: u64,
         scan_port: u16,
     ) {
+        let result = Self::scan_collect(scan_port, Duration::from_millis(600));
+
+        // Merge into the shared mutex — the editor reads scan_targets;
+        // process() receives ScanDone.
+        //
+        // Check the scan generation inside the lock so we can't race with the
+        // editor's fetch_add + clear: if the generation changed, the editor
+        // already cleared the list for a new scan and our results are stale.
+        {
+            let mut list = scan_targets.lock();
+            if scan_generation.load(Ordering::Acquire) != expected_gen {
+                log::debug!(
+                    "[EtherTap] scan_targets_bg: generation changed, discarding stale results"
+                );
+                return;
+            }
+            for dev in result {
+                let has_id = !dev.name.is_empty() || !dev.model.is_empty();
+                let existing = if has_id {
+                    list.iter_mut()
+                        .find(|d| d.name == dev.name && d.model == dev.model)
+                } else {
+                    list.iter_mut().find(|d| d.ip == dev.ip)
+                };
+                match existing {
+                    Some(e) => *e = dev,
+                    None => list.push(dev),
+                }
+            }
+        }
+        let _ = status_tx.try_send(NetworkStatus::ScanDone);
+    }
+
+    /// Probe every IPv4 interface (plus loopback) on `scan_port` and collect
+    /// the devices that answer within `window`. Pure collection — no shared
+    /// state; used by the editor-driven background scan and the synchronous
+    /// auto-reconnect rescan.
+    fn scan_collect(scan_port: u16, window: Duration) -> Vec<DeviceInfo> {
         use std::{collections::HashMap, net::Ipv4Addr};
 
         let probe = osc::heartbeat();
-        let window = Duration::from_millis(600);
 
         // ── One socket per real IPv4 interface ────────────────────────────
         struct Iface {
@@ -743,35 +923,7 @@ impl NetworkWorker {
             });
         }
 
-        // Merge into the shared mutex — the editor reads scan_targets;
-        // process() receives ScanDone.
-        //
-        // Check the scan generation inside the lock so we can't race with the
-        // editor's fetch_add + clear: if the generation changed, the editor
-        // already cleared the list for a new scan and our results are stale.
-        {
-            let mut list = scan_targets.lock();
-            if scan_generation.load(Ordering::Acquire) != expected_gen {
-                log::debug!(
-                    "[EtherTap] scan_targets_bg: generation changed, discarding stale results"
-                );
-                return;
-            }
-            for dev in result {
-                let has_id = !dev.name.is_empty() || !dev.model.is_empty();
-                let existing = if has_id {
-                    list.iter_mut()
-                        .find(|d| d.name == dev.name && d.model == dev.model)
-                } else {
-                    list.iter_mut().find(|d| d.ip == dev.ip)
-                };
-                match existing {
-                    Some(e) => *e = dev,
-                    None => list.push(dev),
-                }
-            }
-        }
-        let _ = status_tx.try_send(NetworkStatus::ScanDone);
+        result
     }
 
     // ── UDP helpers ───────────────────────────────────────────────────────

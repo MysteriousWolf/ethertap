@@ -74,6 +74,35 @@ pub fn create_worker(
     Receiver<NetworkStatus>,
     WorkerShared,
 ) {
+    create_worker_full(
+        fx_slot,
+        slot_types_init,
+        hardware_float_out,
+        Arc::new(Mutex::new(String::new())),
+        Arc::new(Mutex::new(0u16)),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(Mutex::new((String::new(), String::new()))),
+    )
+}
+
+/// Like [`create_worker`], but with caller-controlled persisted target,
+/// auto_reconnect atom, and persisted device identity — the knobs the
+/// reconnect tests drive.
+#[allow(clippy::type_complexity)]
+pub fn create_worker_full(
+    fx_slot: u8,
+    slot_types_init: [Option<i32>; 8],
+    hardware_float_out: Arc<std::sync::atomic::AtomicU32>,
+    target_ip: Arc<Mutex<String>>,
+    target_port: Arc<Mutex<u16>>,
+    auto_reconnect: Arc<std::sync::atomic::AtomicBool>,
+    last_device: Arc<Mutex<(String, String)>>,
+) -> (
+    NetworkWorker,
+    Sender<NetworkCommand>,
+    Receiver<NetworkStatus>,
+    WorkerShared,
+) {
     let (cmd_tx, cmd_rx) = crossbeam_channel::bounded::<NetworkCommand>(64);
     let (status_tx, status_rx) = crossbeam_channel::bounded::<NetworkStatus>(64);
 
@@ -97,8 +126,8 @@ pub fn create_worker(
     let worker = NetworkWorker::new(
         cmd_rx,
         status_tx,
-        Arc::new(Mutex::new(String::new())),
-        Arc::new(Mutex::new(0u16)),
+        target_ip,
+        target_port,
         Arc::new(AtomicU8::new(fx_slot)),
         ethertap::network::WorkerShared {
             hardware_float_out,
@@ -108,6 +137,8 @@ pub fn create_worker(
             scan_targets,
             connected_device,
             scan_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            auto_reconnect,
+            last_device,
         },
     );
 

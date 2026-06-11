@@ -119,6 +119,23 @@ pub struct EtherTapParams {
     #[persist = "target-port"]
     pub target_port: Arc<Mutex<u16>>,
 
+    /// (name, model) of the last connected device, from its `/info` reply.
+    /// The network worker verifies this identity on auto-reconnect and
+    /// rescans for the device if a different console answers at the
+    /// persisted address (e.g. DHCP reassigned the IP).
+    #[persist = "last-device"]
+    pub last_device: Arc<Mutex<(String, String)>>,
+
+    // ── Auto-reconnect (automatable + worker-facing atom) ────────────────
+    /// Opt-in: connect to the last mixer on plugin load and auto-retarget
+    /// via identity-verified rescan when the connection drops. Default OFF —
+    /// EtherTap never fires network traffic without explicit user consent
+    /// ("no surprise automation").
+    #[id = "auto_reconnect"]
+    pub auto_reconnect: BoolParam,
+
+    pub auto_reconnect_atom: Arc<AtomicBool>,
+
     // ── FX slot (automatable + worker-facing atom) ───────────────────────
     /// Selected FX slot (1–8).  Exposed as an automatable parameter so a DAW
     /// preset or automation lane can switch the active delay slot.
@@ -230,6 +247,9 @@ impl Default for EtherTapParams {
                 "192.168.1.100".to_owned()
             })),
             target_port: Arc::new(Mutex::new(10023)),
+            last_device: Arc::new(Mutex::new((String::new(), String::new()))),
+            auto_reconnect: BoolParam::new("Auto Reconnect", false),
+            auto_reconnect_atom: Arc::new(AtomicBool::new(false)),
             fx_slot: IntParam::new("FX Slot", 1, IntRange::Linear { min: 1, max: 8 }),
             fx_slot_atom: Arc::new(AtomicU8::new(1)),
             fx_type_filter: Arc::new(AtomicU32::new(0x7F)),

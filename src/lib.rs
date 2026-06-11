@@ -261,6 +261,8 @@ impl Default for EtherTap {
                 scan_targets: scan_targets.clone(),
                 connected_device: connected_device.clone(),
                 scan_generation: scan_generation.clone(),
+                auto_reconnect: params.auto_reconnect_atom.clone(),
+                last_device: params.last_device.clone(),
             },
         );
         std::thread::Builder::new()
@@ -409,12 +411,12 @@ impl Plugin for EtherTap {
         #[cfg(not(feature = "standalone"))]
         let _ = layout;
 
-        let ip = self.params.target_ip.lock().clone();
-        let port = *self.params.target_port.lock();
-        let _ = self
-            .cmd_tx
-            .try_send(NetworkCommand::UpdateTarget { ip, port });
-        let _ = self.cmd_tx.try_send(NetworkCommand::AuditSlots);
+        // No network traffic at load: connecting is either explicit (user
+        // pulses connect_to_last / the editor Connect button) or opt-in via
+        // the auto_reconnect param, whose atom the network worker polls and
+        // self-connects on. The worker path also covers hosts that restore
+        // param state only *after* initialize() returns. AuditSlots fires
+        // from process() on every connect transition.
         true
     }
 
@@ -438,6 +440,9 @@ impl Plugin for EtherTap {
         self.params
             .midi_auto_connect_atom
             .store(self.params.midi_auto_connect.value(), Ordering::Relaxed);
+        self.params
+            .auto_reconnect_atom
+            .store(self.params.auto_reconnect.value(), Ordering::Relaxed);
         self.params.midi_clock_ppq_atom.store(
             self.params.midi_clock_ppq.value().to_u8(),
             Ordering::Relaxed,
@@ -1402,5 +1407,20 @@ mod tests {
         *params.midi_out_device.lock() = None;
         let json = serde_json::to_string(&*params.midi_out_device.lock()).unwrap();
         assert_eq!(serde_json::from_str::<Option<String>>(&json).unwrap(), None);
+
+        // last_device identity (name, model) — adopted on connect, verified
+        // by the auto-reconnect path; must survive session reloads.
+        *params.last_device.lock() = ("Studio Desk".to_owned(), "X32".to_owned());
+        let json = serde_json::to_string(&*params.last_device.lock()).unwrap();
+        assert_eq!(
+            serde_json::from_str::<(String, String)>(&json).unwrap(),
+            ("Studio Desk".to_owned(), "X32".to_owned())
+        );
+
+        // auto_reconnect must default OFF — no surprise automation.
+        assert!(!params.auto_reconnect.value());
+        assert!(!params
+            .auto_reconnect_atom
+            .load(std::sync::atomic::Ordering::Relaxed));
     }
 }
