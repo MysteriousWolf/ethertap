@@ -409,3 +409,43 @@ fn audit_slots_empty_mixer() {
     drop(cmd_tx);
     handle.join().expect("worker thread panicked");
 }
+
+/// A LAN scan with an overridden probe port must discover a mock mixer bound
+/// to an OS-assigned port — this is what lets reconnect tests rediscover a
+/// device whose IP/port moved without colliding on the fixed real port 10023.
+#[test]
+fn scan_discovers_mock_on_custom_scan_port() {
+    let mixer = MockMixer::start_with_identity(0, default_slots(), "Scan Target", "X32")
+        .expect("bind mock mixer");
+
+    let hardware_float = Arc::new(AtomicU32::new(0));
+    let (mut worker, cmd_tx, status_rx, shared) = create_worker(1, [None; 8], hardware_float);
+    worker.set_scan_port(mixer.port());
+
+    let handle = std::thread::Builder::new()
+        .name("ethertap-net-scan-test".into())
+        .spawn(move || worker.run())
+        .expect("spawn worker");
+
+    cmd_tx.send(NetworkCommand::ScanTargets).unwrap();
+    let done = wait_for_specific_status(
+        &status_rx,
+        |s| matches!(s, NetworkStatus::ScanDone),
+        Duration::from_secs(5),
+    );
+    assert!(done.is_some(), "Expected ScanDone after ScanTargets");
+
+    let targets = shared.scan_targets.lock().clone();
+    let found = targets
+        .iter()
+        .find(|d| d.name == "Scan Target" && d.model == "X32");
+    let found = found.unwrap_or_else(|| panic!("mock not discovered; targets: {targets:?}"));
+    assert_eq!(
+        found.port,
+        mixer.port(),
+        "DeviceInfo must carry the scan port"
+    );
+
+    drop(cmd_tx);
+    handle.join().expect("worker thread panicked");
+}

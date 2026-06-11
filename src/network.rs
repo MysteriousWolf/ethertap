@@ -169,6 +169,10 @@ pub struct NetworkWorker {
     user_disconnected: bool,
     connected: bool,
     backoff: Backoff,
+    /// UDP port scan probes are sent to. Always 10023 (the real mixer port)
+    /// in production; tests override it so a MockMixer on an OS-assigned port
+    /// is discoverable without colliding across parallel test binaries.
+    scan_port: u16,
 }
 
 /// Encode a slot list (values 1..=8) as a u8 bitmask: bit n = slot (n+1) present.
@@ -208,7 +212,15 @@ impl NetworkWorker {
             user_disconnected: false,
             connected: false,
             backoff: Backoff::new(2000, 10000),
+            scan_port: 10023,
         }
+    }
+
+    /// Override the port scan probes target. Test hook — production code
+    /// never calls this; the real mixer always listens on 10023.
+    #[doc(hidden)]
+    pub fn set_scan_port(&mut self, port: u16) {
+        self.scan_port = port;
     }
 
     /// Main loop — runs until the command channel disconnects (plugin dropped).
@@ -339,10 +351,17 @@ impl NetworkWorker {
                 // detect if the editor opened a new scan (and cleared results)
                 // before this thread finishes.
                 let my_gen = scan_gen.load(Ordering::Acquire);
+                let scan_port = self.scan_port;
                 std::thread::Builder::new()
                     .name("ethertap-scan".into())
                     .spawn(move || {
-                        NetworkWorker::scan_targets_bg(scan_targets, status_tx, scan_gen, my_gen)
+                        NetworkWorker::scan_targets_bg(
+                            scan_targets,
+                            status_tx,
+                            scan_gen,
+                            my_gen,
+                            scan_port,
+                        )
                     })
                     .ok(); // best-effort; failure just means no scan result
             }
@@ -570,6 +589,7 @@ impl NetworkWorker {
         status_tx: Sender<NetworkStatus>,
         scan_generation: Arc<AtomicU64>,
         expected_gen: u64,
+        scan_port: u16,
     ) {
         use std::{collections::HashMap, net::Ipv4Addr};
 
@@ -601,7 +621,7 @@ impl NetworkWorker {
             let bcast = v4
                 .broadcast
                 .unwrap_or_else(|| Ipv4Addr::from(u32::from(v4.ip) | !u32::from(v4.netmask)));
-            let _ = sock.send_to(&probe, SocketAddr::from((bcast, 10023u16)));
+            let _ = sock.send_to(&probe, SocketAddr::from((bcast, scan_port)));
             let _ = sock.set_nonblocking(true);
             ifaces.push(Iface {
                 sock,
@@ -612,12 +632,7 @@ impl NetworkWorker {
 
         // Loopback socket so a local mock mixer is always discoverable.
         if let Ok(sock) = UdpSocket::bind("127.0.0.1:0") {
-            let _ = sock.send_to(
-                &probe,
-                "127.0.0.1:10023"
-                    .parse::<SocketAddr>()
-                    .expect("loopback address literal"),
-            );
+            let _ = sock.send_to(&probe, SocketAddr::from((Ipv4Addr::LOCALHOST, scan_port)));
             let _ = sock.set_nonblocking(true);
             ifaces.push(Iface {
                 sock,
@@ -720,7 +735,7 @@ impl NetworkWorker {
             // New device.
             result.push(DeviceInfo {
                 ip: ip.clone(),
-                port: 10023,
+                port: scan_port,
                 name,
                 model,
                 latency_ms: Some(latency_ms),

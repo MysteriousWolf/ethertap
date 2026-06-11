@@ -154,6 +154,19 @@ impl MockMixer {
     /// Bind a specific port (0 = OS-assigned). The real mixer listens on
     /// 10023; the CLI defaults to that.
     pub fn start_on(port: u16, slots: [SlotState; 8]) -> std::io::Result<Self> {
+        Self::start_with_identity(port, slots, "Mock Console", "X32")
+    }
+
+    /// Like [`start_on`](Self::start_on), but with a configurable device
+    /// identity echoed in `/info` replies. Lets tests stand up two mixers with
+    /// distinct (name, model) pairs to exercise identity-verified reconnect.
+    pub fn start_with_identity(
+        port: u16,
+        slots: [SlotState; 8],
+        name: &str,
+        model: &str,
+    ) -> std::io::Result<Self> {
+        let identity = (name.to_string(), model.to_string());
         let shutdown = Arc::new(AtomicBool::new(false));
         let received_msgs: Arc<Mutex<Vec<ReceivedMsg>>> = Arc::new(Mutex::new(Vec::new()));
         let slots_shared: Arc<Mutex<[SlotState; 8]>> = Arc::new(Mutex::new(slots));
@@ -171,7 +184,7 @@ impl MockMixer {
         let total = total_msgs.clone();
         let handle = thread::Builder::new()
             .name("mock-mixer".into())
-            .spawn(move || run_mock_mixer(sock, sh, rx_msgs, sl, ts, total))?;
+            .spawn(move || run_mock_mixer(sock, sh, rx_msgs, sl, ts, total, identity))?;
 
         Ok(Self {
             shutdown,
@@ -267,6 +280,7 @@ fn run_mock_mixer(
     slots: Arc<Mutex<[SlotState; 8]>>,
     last_msg_ts: Arc<AtomicU64>,
     total_msgs: Arc<AtomicU64>,
+    identity: (String, String),
 ) {
     let mut buf = [0u8; 4096];
     while !shutdown.load(Ordering::Acquire) {
@@ -291,7 +305,7 @@ fn run_mock_mixer(
                             log.drain(..len - LOG_CAP);
                         }
                     }
-                    if let Some(response) = handle_request(&msg, &slots) {
+                    if let Some(response) = handle_request(&msg, &slots, &identity) {
                         let _ = sock.send_to(&response, peer);
                     }
                 }
@@ -302,14 +316,18 @@ fn run_mock_mixer(
     }
 }
 
-fn handle_request(msg: &OscMessage, slots: &Arc<Mutex<[SlotState; 8]>>) -> Option<Vec<u8>> {
+fn handle_request(
+    msg: &OscMessage,
+    slots: &Arc<Mutex<[SlotState; 8]>>,
+    identity: &(String, String),
+) -> Option<Vec<u8>> {
     if msg.addr == "/info" {
         return Some(encode_msg(
             "/info",
             vec![
                 OscType::String("V2.12".to_string()),
-                OscType::String("Mock Console".to_string()),
-                OscType::String("X32".to_string()),
+                OscType::String(identity.0.clone()),
+                OscType::String(identity.1.clone()),
                 OscType::String("4.06".to_string()),
             ],
         ));
@@ -475,5 +493,61 @@ mod tests {
         assert!((mock.rx_bpm(1).unwrap() - 120.0).abs() < 0.01);
         assert_eq!(mock.count_addr("/fx/1/par/02"), 1);
         assert!(mock.total_msgs.load(Ordering::Relaxed) >= 2);
+    }
+
+    /// /info must echo the configured identity so reconnect tests can stand up
+    /// two mixers with distinct (name, model) pairs and verify identity checks.
+    #[test]
+    fn mixer_reports_configured_identity() {
+        let mock = MockMixer::start_with_identity(0, default_slots(), "Console A", "M32")
+            .expect("bind UDP socket");
+        let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sock.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+
+        let info = encode_msg("/info", vec![]);
+        sock.send_to(&info, ("127.0.0.1", mock.port())).unwrap();
+        let mut buf = [0u8; 1024];
+        let (len, _) = sock.recv_from(&mut buf).unwrap();
+        let (_, OscPacket::Message(reply)) = decoder::decode_udp(&buf[..len]).unwrap() else {
+            panic!("expected OSC message reply");
+        };
+        assert_eq!(reply.addr, "/info");
+        let strings: Vec<&str> = reply
+            .args
+            .iter()
+            .filter_map(|a| match a {
+                OscType::String(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(strings.get(1), Some(&"Console A"));
+        assert_eq!(strings.get(2), Some(&"M32"));
+    }
+
+    /// Default identity stays the historical "Mock Console"/"X32" so existing
+    /// consumers are unaffected.
+    #[test]
+    fn mixer_default_identity_unchanged() {
+        let mock = MockMixer::start();
+        let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sock.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+
+        sock.send_to(&encode_msg("/info", vec![]), ("127.0.0.1", mock.port()))
+            .unwrap();
+        let mut buf = [0u8; 1024];
+        let (len, _) = sock.recv_from(&mut buf).unwrap();
+        let (_, OscPacket::Message(reply)) = decoder::decode_udp(&buf[..len]).unwrap() else {
+            panic!("expected OSC message reply");
+        };
+        let strings: Vec<&str> = reply
+            .args
+            .iter()
+            .filter_map(|a| match a {
+                OscType::String(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(strings.get(1), Some(&"Mock Console"));
+        assert_eq!(strings.get(2), Some(&"X32"));
     }
 }
