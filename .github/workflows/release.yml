@@ -14,9 +14,15 @@ on:
         default: 'dev'
 
 jobs:
+  # ── Full CI gate: a release never ships untested code ───────────────────────
+  tests:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
   # ── Per-platform build ───────────────────────────────────────────────────────
   build:
     name: Build / ${{ matrix.os }}
+    needs: tests
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

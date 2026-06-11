@@ -1,0 +1,19 @@
+version: 2
+updates:
+  # Rust dependencies (workspace root Cargo.toml + lockfile).
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # One PR per week for routine patch/minor bumps; majors stay separate.
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # Pinned GitHub Actions in workflow files.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
