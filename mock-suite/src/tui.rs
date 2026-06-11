@@ -1,7 +1,8 @@
 //! Interactive TUI — parity with the retired Python `mock_ethertap.py`.
 //!
-//! Keys: `c` toggle MIDI clock sink, `m` toggle mixer, `k`/`j` scroll the
-//! mixer log (older/newer), `r` follow latest, `q` quit.
+//! Tabbed layout: `1` Overview, `2` MIDI Clock, `3` Mixer, `4` Log
+//! (`Tab` cycles). Keys: `c` toggle MIDI clock sink, `m` toggle mixer,
+//! `k`/`j` scroll the mixer log (older/newer), `r` follow latest, `q` quit.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -9,7 +10,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
+use ratatui::widgets::{Block, BorderType, Cell, Paragraph, Row, Table, Tabs};
 use ratatui::Frame;
 
 use mock_suite::{type_name, MockMixer, SlotState, DLY, EMPTY};
@@ -23,6 +24,26 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Overview,
+    Midi,
+    Mixer,
+    Log,
+}
+
+impl Tab {
+    const ALL: [Tab; 4] = [Tab::Overview, Tab::Midi, Tab::Mixer, Tab::Log];
+
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|t| *t == self).unwrap_or(0)
+    }
+
+    fn next(self) -> Tab {
+        Self::ALL[(self.index() + 1) % Self::ALL.len()]
+    }
+}
+
 struct App {
     port: u16,
     slots: [SlotState; 8],
@@ -34,6 +55,14 @@ struct App {
     mixer_error: String,
     /// 0 = follow latest; >0 = lines scrolled back.
     log_scroll: usize,
+    tab: Tab,
+}
+
+/// Rounded-corner bordered block — the house style for every panel.
+fn panel(title: &str) -> Block<'_> {
+    Block::bordered()
+        .border_type(BorderType::Rounded)
+        .title(format!(" {title} "))
 }
 
 impl App {
@@ -80,6 +109,7 @@ pub fn run(port: u16, slots: [SlotState; 8], no_midi: bool) -> std::io::Result<(
         sink_error: String::new(),
         mixer_error: String::new(),
         log_scroll: 0,
+        tab: Tab::Overview,
     };
     // Both services start automatically, like the Python tool.
     app.toggle_mixer();
@@ -107,6 +137,11 @@ pub fn run(port: u16, slots: [SlotState; 8], no_midi: bool) -> std::io::Result<(
                         app.log_scroll = app.log_scroll.saturating_sub(1)
                     }
                     KeyCode::Char('r') | KeyCode::Char('R') => app.log_scroll = 0,
+                    KeyCode::Char('1') => app.tab = Tab::Overview,
+                    KeyCode::Char('2') => app.tab = Tab::Midi,
+                    KeyCode::Char('3') => app.tab = Tab::Mixer,
+                    KeyCode::Char('4') => app.tab = Tab::Log,
+                    KeyCode::Tab => app.tab = app.tab.next(),
                     _ => {}
                 }
             }
@@ -120,34 +155,61 @@ fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
-            Constraint::Min(5),
-            Constraint::Length(1),
+            Constraint::Length(1), // tab bar
+            Constraint::Length(1), // status badges
+            Constraint::Min(5),    // tab body
+            Constraint::Length(1), // footer keymap
         ])
         .split(f.area());
 
-    draw_header(f, chunks[0], app);
+    let tabs = Tabs::new(["1 Overview", "2 MIDI Clock", "3 Mixer", "4 Log"])
+        .select(app.tab.index())
+        .style(Style::default().add_modifier(Modifier::DIM))
+        .highlight_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .remove_modifier(Modifier::DIM)
+                .add_modifier(Modifier::BOLD),
+        )
+        .divider("│");
+    f.render_widget(tabs, chunks[0]);
 
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-        .split(chunks[1]);
-    draw_midi_panel(f, body[0], app);
-    draw_mixer_panel(f, body[1], app);
+    draw_header(f, chunks[1], app);
 
+    match app.tab {
+        Tab::Overview => {
+            let body = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+                .split(chunks[2]);
+            draw_midi_panel(f, body[0], app);
+            draw_mixer_panel(f, body[1], app);
+        }
+        Tab::Midi => draw_midi_panel(f, chunks[2], app),
+        Tab::Mixer => draw_mixer_panel(f, chunks[2], app),
+        Tab::Log => draw_log_tab(f, chunks[2], app),
+    }
+
+    let key = |k: &'static str| Span::styled(k, Style::default().fg(Color::Cyan));
     let footer = Line::from(vec![
-        Span::styled("  c", Style::default().add_modifier(Modifier::DIM)),
+        Span::raw("  "),
+        key("1-4/Tab"),
+        Span::raw(" tabs   "),
+        key("c"),
         Span::raw(" MIDI   "),
-        Span::styled("m", Style::default().add_modifier(Modifier::DIM)),
+        key("m"),
         Span::raw(" Mixer   "),
-        Span::styled("k/j", Style::default().add_modifier(Modifier::DIM)),
+        key("k/j"),
         Span::raw(" scroll   "),
-        Span::styled("r", Style::default().add_modifier(Modifier::DIM)),
+        key("r"),
         Span::raw(" latest   "),
-        Span::styled("q", Style::default().add_modifier(Modifier::DIM)),
+        key("q"),
         Span::raw(" quit"),
     ]);
-    f.render_widget(Paragraph::new(footer), chunks[2]);
+    f.render_widget(
+        Paragraph::new(footer).style(Style::default().add_modifier(Modifier::DIM)),
+        chunks[3],
+    );
 }
 
 fn badge<'a>(label: &'a str, running: bool, error: &'a str) -> Vec<Span<'a>> {
@@ -346,14 +408,11 @@ fn draw_midi_panel(f: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from("Waiting for 0xF8 clock bytes…"));
     }
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" MIDI Clock Sink ");
-    f.render_widget(Paragraph::new(lines).block(block), area);
+    f.render_widget(Paragraph::new(lines).block(panel("MIDI Clock Sink")), area);
 }
 
 fn draw_mixer_panel(f: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default().borders(Borders::ALL).title(" Mock Mixer ");
+    let block = panel("Mock Mixer");
 
     let Some(mixer) = &app.mixer else {
         let msg = if app.mixer_error.is_empty() {
@@ -434,12 +493,35 @@ fn draw_mixer_panel(f: &mut Frame, area: Rect, app: &App) {
         ),
     );
     f.render_widget(table, parts[0]);
+    draw_log(f, parts[1], mixer, app.log_scroll);
+}
 
-    // Message log with k/j scroll-back.
+/// Full-screen log tab — same renderer as the mixer panel's embedded log,
+/// wrapped in its own rounded panel.
+fn draw_log_tab(f: &mut Frame, area: Rect, app: &App) {
+    let block = panel("OSC Log");
+    let Some(mixer) = &app.mixer else {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "mixer stopped — m to start",
+                Style::default().add_modifier(Modifier::DIM),
+            ))
+            .block(block),
+            area,
+        );
+        return;
+    };
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    draw_log(f, inner, mixer, app.log_scroll);
+}
+
+/// Message log with k/j scroll-back; shared by the mixer panel and Log tab.
+fn draw_log(f: &mut Frame, area: Rect, mixer: &MockMixer, log_scroll: usize) {
     let log = mixer.received_msgs.lock().clone();
-    let visible_rows = parts[1].height.saturating_sub(1) as usize;
+    let visible_rows = area.height.saturating_sub(1) as usize;
     let n = log.len();
-    let scroll = app.log_scroll.min(n.saturating_sub(visible_rows));
+    let scroll = log_scroll.min(n.saturating_sub(visible_rows));
     let end = n - scroll;
     let start = end.saturating_sub(visible_rows);
 
@@ -488,7 +570,7 @@ fn draw_mixer_panel(f: &mut Frame, area: Rect, app: &App) {
             Span::styled(bpm_note, Style::default().fg(Color::Green).bold()),
         ]));
     }
-    f.render_widget(Paragraph::new(lines), parts[1]);
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 /// HH:MM:SS in local time from ms-since-epoch (good enough for a log column;
