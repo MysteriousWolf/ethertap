@@ -43,6 +43,15 @@ EtherTap sends a heartbeat every 5 seconds. If the mixer stops responding it sho
 a disconnected state and retries automatically every 2 seconds until it comes back.
 Pressing **Disconnect** stops all retries.
 
+### Auto reconnect
+
+The **Auto** toggle next to the Connect button (also the `auto_reconnect` host
+parameter) is off by default: EtherTap never sends network traffic on load
+unless you opt in. With Auto on, the plugin reconnects to the last mixer when
+the session loads and remembers the console's name and model. If a different
+device answers at the saved address, or the connection stays down, EtherTap
+rescans the network for the console it knows and follows it to its new IP.
+
 ---
 
 ## Sync modes

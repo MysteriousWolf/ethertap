@@ -17,11 +17,11 @@
 | Bundle VST3 | `cargo run -p xtask -- bundle ethertap --release` | `xtask/src/main.rs` |
 | Universal macOS | `./scripts/build.sh --universal` | `scripts/build.sh` |
 | Setup (vendor + patch) | `./scripts/setup.sh` | `scripts/setup.sh` |
-| Run tests | `cargo test` | `tests/` |
+| Run tests | `cargo test --workspace` | `tests/` |
 | Benchmarks | `cargo bench` | `benches/core.rs` |
-| Standalone GUI test | `./scripts/gui_test_with_mock.sh` | `scripts/gui_test_with_mock.sh` |
+| Standalone GUI test | `./scripts/gui_test.sh` (+ `cargo run -p mock-suite` for the mock) | `scripts/gui_test.sh` |
 
-CI gate: GitHub Actions on `v*` tag push — matrix: macos-latest (universal), windows-latest, ubuntu-latest. Defined in `.github/workflows/release.yml`.
+CI gate: GitHub Actions — `.github/workflows/ci.yml` on every push/PR (3-OS test matrix, clippy both feature sets `-D warnings`, fmt check, bench compile-check, cargo-audit); release on `v*` tag push via `.github/workflows/release.yml`, gated on the full CI workflow.
 
 ## Language breakdown
 
@@ -54,7 +54,7 @@ CI gate: GitHub Actions on `v*` tag push — matrix: macos-latest (universal), w
 
 ## Cross-cutting
 
-- **Test layout:** `tests/integration_tests.rs` (network worker against `MockMixer`), `tests/osc_tests.rs` (OSC encode/decode), `tests/harness_e2e.rs` + `tests/sync_matrix.rs` + `tests/midi_clock_tests.rs` (vst-runtime harness driving the full plugin against `MockMixer` / virtual MIDI sink; VST3-build-gated), `tests/common/mod.rs` (NetworkWorker glue + `harness_util` helpers; `MockMixer`/`SlotState` re-exported from the `mock-suite` crate). Unit tests co-located in `src/reconnect.rs`; `vst-runtime` and `mock-suite` carry their own unit tests.
+- **Test layout:** `tests/integration_tests.rs` (network worker against `MockMixer`, incl. scan-port discovery), `tests/reconnect_tests.rs` (auto_reconnect: opt-in self-connect, identity verification, rescan retargeting; worker- and harness-level), `tests/osc_tests.rs` (OSC encode/decode), `tests/harness_e2e.rs` + `tests/sync_matrix.rs` + `tests/midi_clock_tests.rs` (vst-runtime harness driving the full plugin against `MockMixer` / virtual MIDI sink; VST3-build-gated), `tests/vst_runtime_integration.rs` (harness sanity + host-param-set coverage guard), `tests/common/mod.rs` (NetworkWorker glue + `harness_util` helpers; `MockMixer`/`SlotState` re-exported from the `mock-suite` crate). Unit tests co-located in `src/reconnect.rs`; `vst-runtime` and `mock-suite` carry their own unit tests (incl. TUI helper math).
 - **RT safety contract:** `process()` in `src/lib.rs` must never allocate, block, or lock a contended mutex. Enforced by convention; no static analysis gate.
 - **Atomic bit-packing convention:** `f32` values shared across threads stored as `u32` via `f32::to_bits`/`f32::from_bits` (BPM, hardware delay float); `f64` standalone beat position stored as `u64` bits in `standalone_pos_beats`.
 - **Vendor patch workflow:** `scripts/setup.sh` clones `vendor/baseview` and `vendor/nih-plug`, applies `patches/`. Must re-run after upstream vendor updates.
