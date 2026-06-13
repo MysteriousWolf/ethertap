@@ -23,9 +23,11 @@ following forward-ports and fixes.
 | File | What it does |
 |------|-------------|
 | `Cargo_toml.patch` | Adds `rwh04` alias (`raw-window-handle = "0.4"`) so the crate exposes both rwh 0.4 and 0.5 traits |
-| `src_window_rs.patch` | Implements `rwh04::HasRawWindowHandle` for `WindowHandle` and `Window`, changes `open_parented` bound to rwh04, adds `open_as_if_parented` dispatch, adds `rwh05_to_rwh04` converter |
+| `src_window_rs.patch` | Implements `rwh04::HasRawWindowHandle` for `WindowHandle` and `Window`, changes `open_parented` bound to rwh04, adds `open_as_if_parented` dispatch, adds `rwh05_to_rwh04` converter (Xlib arm only carries `window`/`visual_id` — rwh 0.5 moved the `display` pointer to `XlibDisplayHandle`, so `rwh04::XlibHandle::empty()`'s null `display` is used as-is) |
 | `src_macos_window_rs.patch` | Changes `open_parented` parent bound to `rwh04::HasRawWindowHandle`, adds `open_as_if_parented` (creates NSView without NSWindow — required by iced_baseview) |
 | `src_macos_view_rs.patch` | Guards `become_first_responder` against `nil` from `[view window]` on ARM64 macOS before the view is attached — fixes a crash during `setContentView_` |
+| `src_x11_window_rs.patch` | Adds `open_as_if_parented` for X11 (creates the window as a child of the root window, returns immediately) — `iced_baseview` calls `baseview::Window::open_as_if_parented` unconditionally, so it must exist on every platform for the crate to compile |
+| `src_win_window_rs.patch` | Adds `open_as_if_parented` for Win32 (`Self::open(false, null_mut(), ...)`, no message loop) — same cross-platform compile requirement as above |
 
 ### Updating baseview
 

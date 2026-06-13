@@ -55,7 +55,7 @@
      /// Close the window
      pub fn close(&mut self) {
          self.window.close();
-@@ -129,3 +154,48 @@
+@@ -129,3 +154,52 @@
          self.window.raw_display_handle()
      }
  }
@@ -69,8 +69,9 @@
 +
 +/// Convert a raw-window-handle 0.5 handle to its 0.4 equivalent.
 +///
-+/// Both versions carry the same underlying pointer fields for every platform
-+/// baseview supports; the rename is purely a crate-version-boundary artefact.
++/// Most platforms carry the same underlying pointer fields across both
++/// versions; the rename is purely a crate-version-boundary artefact. The
++/// Xlib case is the exception — see the comment on that arm below.
 +#[allow(unused_variables)]
 +fn rwh05_to_rwh04(h: RawWindowHandle) -> rwh04::RawWindowHandle {
 +    match h {
@@ -89,9 +90,12 @@
 +        }
 +        #[cfg(target_os = "linux")]
 +        RawWindowHandle::Xlib(h) => {
++            // rwh 0.5's XlibWindowHandle dropped the `display` pointer (it now
++            // lives on XlibDisplayHandle via HasRawDisplayHandle); rwh04's
++            // XlibHandle::empty() already zero-inits `display` to null.
 +            let mut out = rwh04::XlibHandle::empty();
 +            out.window = h.window;
-+            out.display = h.display;
++            out.visual_id = h.visual_id;
 +            rwh04::RawWindowHandle::Xlib(out)
 +        }
 +        #[cfg(target_os = "windows")]

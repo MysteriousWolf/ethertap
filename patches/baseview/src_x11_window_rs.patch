@@ -1,0 +1,34 @@
+--- a/src/x11/window.rs
++++ b/src/x11/window.rs
+@@ -163,7 +163,31 @@
+ 
+         thread.join().unwrap_or_else(|err| {
+             eprintln!("Window thread panicked: {:#?}", err);
++        });
++    }
++
++    /// Create a window without a parent. Like `open_parented`, this returns
++    /// immediately without blocking the calling thread; unlike `open_parented`,
++    /// the window is created as a child of the X root window (there is no
++    /// "view without a window" concept on X11).
++    pub fn open_as_if_parented<H, B>(options: WindowOpenOptions, build: B) -> WindowHandle
++    where
++        H: WindowHandler + 'static,
++        B: FnOnce(&mut crate::Window) -> H,
++        B: Send + 'static,
++    {
++        let (tx, rx) = mpsc::sync_channel::<WindowOpenResult>(1);
++
++        let (_, mut window_handle) = ParentHandle::new();
++
++        thread::spawn(move || {
++            Self::window_thread(None, options, build, tx, None).unwrap();
+         });
++
++        let raw_window_handle = rx.recv().unwrap().unwrap();
++        window_handle.raw_window_handle = Some(raw_window_handle.0);
++
++        window_handle
+     }
+ 
+     fn window_thread<H, B>(

@@ -1,0 +1,23 @@
+--- a/src/win/window.rs
++++ b/src/win/window.rs
+@@ -622,6 +622,20 @@
+                 DispatchMessageW(&msg);
+             }
+         }
++    }
++
++    /// Create a window without a parent and return immediately without
++    /// running a message loop. Like `open_blocking` with `parented = false`,
++    /// but the caller drives the message loop (or embeds the window) itself.
++    pub fn open_as_if_parented<H, B>(options: WindowOpenOptions, build: B) -> WindowHandle
++    where
++        H: WindowHandler + 'static,
++        B: FnOnce(&mut crate::Window) -> H,
++        B: Send + 'static,
++    {
++        let (window_handle, _) = Self::open(false, null_mut(), options, build);
++
++        window_handle
+     }
+ 
+     fn open<H, B>(
