@@ -1,0 +1,12 @@
+# cargo-audit configuration. See `cargo audit --help` and
+# https://docs.rs/cargo-audit/latest/cargo_audit/config/index.html
+
+[advisories]
+ignore = [
+    # xcb 0.10.1: "Multiple soundness issues", fix is to upgrade to xcb >=1.0.
+    # Pulled in transitively via iced_baseview -> copypasta -> x11-clipboard,
+    # which pins xcb 0.10. No direct dependency on xcb; upgrading requires an
+    # upstream bump in x11-clipboard/copypasta that iced_baseview has not
+    # picked up. Linux-only (X11 clipboard support).
+    "RUSTSEC-2021-0019",
+]

@@ -1,11 +1,35 @@
 --- a/src/win/window.rs
 +++ b/src/win/window.rs
-@@ -622,6 +622,20 @@
-                 DispatchMessageW(&msg);
-             }
+@@ -30,6 +30,7 @@
+     HasRawDisplayHandle, HasRawWindowHandle, RawDisplayHandle, RawWindowHandle, Win32WindowHandle,
+     WindowsDisplayHandle,
+ };
++extern crate rwh04;
+ 
+ const BV_WINDOW_MUST_CLOSE: UINT = WM_USER + 1;
+ 
+@@ -585,13 +586,15 @@
+ impl Window<'_> {
+     pub fn open_parented<P, H, B>(parent: &P, options: WindowOpenOptions, build: B) -> WindowHandle
+     where
+-        P: HasRawWindowHandle,
++        // Accept the rwh 0.4 trait so that iced_baseview (which pins 0.4) can
++        // call this function.
++        P: rwh04::HasRawWindowHandle,
+         H: WindowHandler + 'static,
+         B: FnOnce(&mut crate::Window) -> H,
+         B: Send + 'static,
+     {
+         let parent = match parent.raw_window_handle() {
+-            RawWindowHandle::Win32(h) => h.hwnd as HWND,
++            rwh04::RawWindowHandle::Win32(h) => h.hwnd as HWND,
+             h => panic!("unsupported parent handle {:?}", h),
+         };
+ 
+@@ -624,6 +627,20 @@
          }
-+    }
-+
+     }
+ 
 +    /// Create a window without a parent and return immediately without
 +    /// running a message loop. Like `open_blocking` with `parented = false`,
 +    /// but the caller drives the message loop (or embeds the window) itself.
@@ -18,6 +42,8 @@
 +        let (window_handle, _) = Self::open(false, null_mut(), options, build);
 +
 +        window_handle
-     }
- 
++    }
++
      fn open<H, B>(
+         parented: bool, parent: HWND, options: WindowOpenOptions, build: B,
+     ) -> (WindowHandle, HWND)
