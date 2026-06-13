@@ -822,10 +822,10 @@ impl NetworkWorker {
         }
 
         // ── Collect responses — raw entry per (socket, device) pair ───────
-        // Tuple: (ip, latency_ms, name, model, same_subnet)
-        type RawEntry = (String, f32, String, String, bool);
+        // Tuple: (ip, latency_ms, name, model, same_subnet, is_loopback)
+        type RawEntry = (String, f32, String, String, bool, bool);
 
-        // ip_key → best raw entry (same-subnet wins; ties broken by latency)
+        // ip_key → best raw entry (loopback wins, then same-subnet; ties broken by latency)
         let mut by_ip: HashMap<String, RawEntry> = HashMap::new();
         let mut buf = [0u8; 512];
         let probe_sent_at = Instant::now();
@@ -849,22 +849,31 @@ impl NetworkWorker {
                             let mask = u32::from(iface.netmask);
                             let same_subnet =
                                 (u32::from(iface.local) & mask) == (u32::from(src_v4) & mask);
+                            let is_loopback = src_v4.is_loopback();
                             let latency_ms = probe_sent_at.elapsed().as_micros() as f32 / 1000.0;
                             let ip_key = src_v4.to_string();
                             let (name, model) = parse_info_strings(&buf[..len]);
 
-                            let entry: RawEntry =
-                                (ip_key.clone(), latency_ms, name, model, same_subnet);
+                            let entry: RawEntry = (
+                                ip_key.clone(),
+                                latency_ms,
+                                name,
+                                model,
+                                same_subnet,
+                                is_loopback,
+                            );
 
                             match by_ip.get(&ip_key) {
                                 None => {
                                     by_ip.insert(ip_key, entry);
                                 }
-                                Some((_, _, _, _, prev_same)) => {
-                                    // Prefer same-subnet; within that, prefer lower latency.
-                                    let better = (!*prev_same && same_subnet)
-                                        || (*prev_same == same_subnet
-                                            && latency_ms < by_ip[&ip_key].1);
+                                Some((_, _, _, _, prev_same, prev_loopback)) => {
+                                    // Prefer loopback, then same-subnet; within that, lower latency.
+                                    let better = (!*prev_loopback && is_loopback)
+                                        || (*prev_loopback == is_loopback
+                                            && ((!*prev_same && same_subnet)
+                                                || (*prev_same == same_subnet
+                                                    && latency_ms < by_ip[&ip_key].1)));
                                     if better {
                                         by_ip.insert(ip_key, entry);
                                     }
@@ -882,20 +891,25 @@ impl NetworkWorker {
         }
 
         // ── Merge by (name, model) — best path first ──────────────────────
-        // Sort: same-subnet before routed, then ascending latency.
+        // Sort: loopback first, then same-subnet before routed, then ascending latency.
         let mut all: Vec<RawEntry> = by_ip.into_values().collect();
         all.sort_by(|a, b| {
-            match (a.4, b.4) {
-                // same_subnet: true sorts before false
+            match (a.5, b.5) {
+                // is_loopback: true sorts before false
                 (true, false) => std::cmp::Ordering::Less,
                 (false, true) => std::cmp::Ordering::Greater,
-                _ => a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal),
+                _ => match (a.4, b.4) {
+                    // same_subnet: true sorts before false
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal),
+                },
             }
         });
 
         let mut result: Vec<DeviceInfo> = Vec::new();
 
-        for (ip, latency_ms, name, model, same_subnet) in all {
+        for (ip, latency_ms, name, model, same_subnet, _is_loopback) in all {
             let has_id = !name.is_empty() || !model.is_empty();
 
             // Try to find an existing entry with the same identity.
