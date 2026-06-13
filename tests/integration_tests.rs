@@ -126,7 +126,20 @@ fn hard_reset_mutes_sets_unmutes() {
     cmd_tx
         .send(NetworkCommand::HardResetBatch { slots, bpm: 120.0 })
         .unwrap();
-    std::thread::sleep(Duration::from_millis(350));
+
+    // Poll until the final unmute pair lands instead of a fixed sleep —
+    // the two HARD_RESET_DWELL pauses (150ms total) plus scheduling jitter
+    // on a loaded CI runner can exceed a short fixed window.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        let unmute_count = mixer
+            .received_filtered(|m| m.is_mute().is_some_and(|(_, v)| !v))
+            .len();
+        if unmute_count >= 2 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 
     // Collect the ordered message log once so we can verify both count and sequence.
     let all_msgs: Vec<_> = mixer.received_filtered(|_| true);
