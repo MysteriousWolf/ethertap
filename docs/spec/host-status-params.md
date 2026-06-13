@@ -60,3 +60,22 @@ Precedence inside `sync_status`: Offline if not connected; else Synced if matche
 ## Change log
 
 <!-- Populated on first amendment after the spec is approved. -->
+
+## Implementation log
+
+### shipped — 2026-06-12
+
+Built across 2 iterations of /subagent-implementation on branch `host-status-and-te-reskin`. Commits (chronological):
+
+- `b081063` — CP-1 `SyncStatus` enum + 5 read-only params + §3b shadow-guarded wiring + unit tests (`read_only_params_update_on_process` extended, `sync_status_precedence_transitions` added)
+- `f2a0926` — CP-2 param-id coverage guard + standalone DAW shell PARAMETERS OUT chips (`daw_value_chip`, `sync_status_label` helpers)
+
+**Out-of-scope work performed during this build:**
+- none
+
+**Unforeseens — surprises that emerged during implementation:**
+- Iteration 1 reviewer caught a `cargo fmt` violation (CI hard gate); fixed by orchestrator-run `cargo fmt --all` rather than a re-dispatch.
+- `cargo test --workspace` was intentionally red between CP-1 and CP-2 (param-id coverage guard), as the checkpoint split predicted.
+
+**Deferred items still open:**
+- none

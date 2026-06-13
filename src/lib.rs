@@ -40,7 +40,7 @@ pub use params::EtherTapParams;
 
 use editor::EditorData;
 use network::{now_ms, NetworkCommand, NetworkStatus, NetworkWorker};
-use params::SyncMode;
+use params::{SyncMode, SyncStatus};
 
 // ─── Timing constants ────────────────────────────────────────────────────────
 
@@ -91,6 +91,10 @@ pub struct EtherTap {
     host_bpm: Arc<AtomicU32>,
     /// Receiver for MIDI device list changes (from midi_watcher).
     midi_device_rx: Arc<crossbeam_channel::Receiver<Vec<String>>>,
+    /// Millisecond timestamp of the last MIDI device-list broadcast (from midi_watcher).
+    midi_last_update_ts: Arc<AtomicU64>,
+    /// True once the initial MIDI device-list broadcast has landed (from midi_watcher).
+    midi_has_update: Arc<AtomicBool>,
     /// Bitmask: bit n set ↔ slot (n+1) is BPM-compatible. Written by network worker.
     compatible_slots: Arc<AtomicU8>,
     /// Bitmask: bit n set ↔ slot (n+1) is occupied. Written by network worker.
@@ -179,6 +183,17 @@ pub struct EtherTap {
     last_conn_status: bool,
     /// Last value written to `params.is_matched` from the audio thread.
     last_matched_status: bool,
+    /// Last value written to `params.sync_status` from the audio thread.
+    last_sync_status: SyncStatus,
+    /// Last value written to `params.phase_reset_pending` from the audio thread.
+    last_phase_reset_pending: bool,
+    /// Last value written to `params.hardware_bpm` from the audio thread.
+    /// Compared with an epsilon (> 0.01 BPM) to absorb telemetry jitter.
+    last_hardware_bpm: f64,
+    /// Last value written to `params.compatible_slot_count` from the audio thread.
+    last_compatible_slot_count: u8,
+    /// Last value written to `params.midi_bridge_connected` from the audio thread.
+    last_midi_bridge_connected_param: bool,
 
     // ── OnChange retry ────────────────────────────────────────────────────
     /// True while we're waiting for hardware to confirm the tempo.
@@ -246,6 +261,8 @@ impl Default for EtherTap {
         let midi_watch = midi_watcher::spawn();
         let midi_watcher_shutdown = midi_watch.shutdown.clone();
         let midi_device_rx = Arc::new(midi_watch.editor_rx);
+        let midi_last_update_ts = midi_watch.last_update_ts.clone();
+        let midi_has_update = midi_watch.has_update.clone();
 
         let worker = NetworkWorker::new(
             cmd_rx,
@@ -307,6 +324,8 @@ impl Default for EtherTap {
             hardware_float,
             host_bpm,
             midi_device_rx,
+            midi_last_update_ts,
+            midi_has_update,
             midi_watcher_shutdown,
             compatible_slots,
             occupied_slots,
@@ -319,6 +338,11 @@ impl Default for EtherTap {
             reconnect_sync_pending: false,
             last_conn_status: false,
             last_matched_status: false,
+            last_sync_status: SyncStatus::Offline,
+            last_phase_reset_pending: false,
+            last_hardware_bpm: 0.0,
+            last_compatible_slot_count: 0,
+            last_midi_bridge_connected_param: false,
             last_bpm: 0.0,
             bpm_change_ts: 0,
             bpm_is_settling: false,
@@ -595,6 +619,55 @@ impl Plugin for EtherTap {
         if in_sync != self.last_matched_status {
             context.set_parameter(&self.params.is_matched, in_sync);
             self.last_matched_status = in_sync;
+        }
+
+        // sync_status: Offline (not connected) > Synced (matched) > Syncing
+        // (settling / retry pending / Hard Reset armed) > Connected (idle).
+        let sync_status = if !connected {
+            SyncStatus::Offline
+        } else if in_sync {
+            SyncStatus::Synced
+        } else if self.bpm_is_settling || self.on_change_retry_pending || self.hr_pending {
+            SyncStatus::Syncing
+        } else {
+            SyncStatus::Connected
+        };
+        if sync_status != self.last_sync_status {
+            context.set_parameter(&self.params.sync_status, sync_status);
+            self.last_sync_status = sync_status;
+        }
+
+        // phase_reset_pending mirrors hr_pending (quantised Hard Reset armed).
+        if self.hr_pending != self.last_phase_reset_pending {
+            context.set_parameter(&self.params.phase_reset_pending, self.hr_pending);
+            self.last_phase_reset_pending = self.hr_pending;
+        }
+
+        // hardware_bpm = 20.0 / hardware_float when telemetry present, else 0.0.
+        // Epsilon-guarded (> 0.01 BPM) to absorb telemetry float jitter.
+        let hardware_bpm = if hw_float > 0.0001 {
+            osc::float_to_bpm(hw_float)
+        } else {
+            0.0
+        };
+        if (hardware_bpm - self.last_hardware_bpm).abs() > 0.01 {
+            context.set_parameter(&self.params.hardware_bpm, hardware_bpm as f32);
+            self.last_hardware_bpm = hardware_bpm;
+        }
+
+        // compatible_slot_count = popcount of the compatible_slots bitmask.
+        let compatible_slot_count =
+            self.compatible_slots.load(Ordering::Relaxed).count_ones() as i32;
+        if compatible_slot_count as u8 != self.last_compatible_slot_count {
+            context.set_parameter(&self.params.compatible_slot_count, compatible_slot_count);
+            self.last_compatible_slot_count = compatible_slot_count as u8;
+        }
+
+        // midi_bridge_connected mirrors the MIDI worker's open-connection flag.
+        let midi_bridge_connected = self.midi_bridge_connected.load(Ordering::Relaxed);
+        if midi_bridge_connected != self.last_midi_bridge_connected_param {
+            context.set_parameter(&self.params.midi_bridge_connected, midi_bridge_connected);
+            self.last_midi_bridge_connected_param = midi_bridge_connected;
         }
 
         // ── 3c. Backward seek / loop detection ───────────────────────────
@@ -980,6 +1053,8 @@ impl Plugin for EtherTap {
             hardware_float: self.hardware_float.clone(),
             host_bpm: self.host_bpm.clone(),
             midi_device_rx: self.midi_device_rx.clone(),
+            midi_last_update_ts: self.midi_last_update_ts.clone(),
+            midi_has_update: self.midi_has_update.clone(),
             compatible_slots: self.compatible_slots.clone(),
             occupied_slots: self.occupied_slots.clone(),
             slot_types: self.slot_types.clone(),
@@ -1344,11 +1419,19 @@ mod tests {
 
         assert!(!plugin.params.is_connected.value());
         assert!(!plugin.params.is_matched.value());
+        assert_eq!(plugin.params.sync_status.value(), SyncStatus::Offline);
+        assert!(!plugin.params.phase_reset_pending.value());
+        assert_eq!(plugin.params.hardware_bpm.value(), 0.0);
+        assert_eq!(plugin.params.compatible_slot_count.value(), 0);
+        assert!(!plugin.params.midi_bridge_connected.value());
 
         plugin.process(&mut buffer, &mut aux, &mut ctx);
         assert!(!plugin.params.is_connected.value());
         assert!(!plugin.params.is_matched.value());
+        assert_eq!(plugin.params.sync_status.value(), SyncStatus::Offline);
 
+        // Connect + matching hardware telemetry: is_connected, is_matched,
+        // and sync_status (Offline -> Synced) all flip together.
         plugin.conn_status.store(true, Ordering::Release);
         let hw_val = (20.0_f64 / 120.0_f64) as f32;
         plugin
@@ -1357,11 +1440,99 @@ mod tests {
         plugin.process(&mut buffer, &mut aux, &mut ctx);
         assert!(plugin.params.is_connected.value());
         assert!(plugin.params.is_matched.value());
+        assert_eq!(plugin.params.sync_status.value(), SyncStatus::Synced);
 
+        // hardware_bpm = 20.0 / hardware_float = 120.0 in this case.
+        assert!(
+            (plugin.params.hardware_bpm.value() - 120.0).abs() < 0.01,
+            "hardware_bpm = {}",
+            plugin.params.hardware_bpm.value()
+        );
+
+        // compatible_slot_count mirrors popcount of compatible_slots bitmask.
+        plugin
+            .compatible_slots
+            .store(0b0000_1011, Ordering::Relaxed); // 3 bits set
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+        assert_eq!(plugin.params.compatible_slot_count.value(), 3);
+
+        // midi_bridge_connected mirrors the MIDI worker's atomic.
+        plugin.midi_bridge_connected.store(true, Ordering::Relaxed);
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+        assert!(plugin.params.midi_bridge_connected.value());
+
+        // phase_reset_pending mirrors hr_pending.
+        plugin.hr_pending = true;
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+        assert!(plugin.params.phase_reset_pending.value());
+
+        // Disconnect: is_connected, is_matched, sync_status, hardware_bpm
+        // all reflect the offline state. hr_pending is cleared by the
+        // disconnect handler, so phase_reset_pending follows it down.
         plugin.conn_status.store(false, Ordering::Release);
+        plugin
+            .hardware_float
+            .store(0.0f32.to_bits(), Ordering::Release);
         plugin.process(&mut buffer, &mut aux, &mut ctx);
         assert!(!plugin.params.is_connected.value());
         assert!(!plugin.params.is_matched.value());
+        assert_eq!(plugin.params.sync_status.value(), SyncStatus::Offline);
+        assert_eq!(plugin.params.hardware_bpm.value(), 0.0);
+        assert!(!plugin.params.phase_reset_pending.value());
+    }
+
+    /// `sync_status` precedence: Offline (not connected) > Synced (matched) >
+    /// Syncing (settling / retry pending / Hard Reset armed) > Connected (idle).
+    #[test]
+    fn sync_status_precedence_transitions() {
+        let mut plugin = EtherTap::default();
+        let mut ctx = MockProcessContext::new(120.0, false);
+        let mut buffer = make_buffer();
+        let mut aux = make_aux();
+
+        // Not connected -> Offline regardless of other flags.
+        assert_eq!(plugin.params.sync_status.value(), SyncStatus::Offline);
+
+        // Connected, no telemetry (not matched), no syncing flags -> Connected.
+        plugin.conn_status.store(true, Ordering::Release);
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+        assert_eq!(plugin.params.sync_status.value(), SyncStatus::Connected);
+
+        // Connected + bpm_is_settling -> Syncing (even though not matched).
+        plugin.bpm_is_settling = true;
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+        assert_eq!(plugin.params.sync_status.value(), SyncStatus::Syncing);
+        plugin.bpm_is_settling = false;
+
+        // Back to Connected once the settling flag clears.
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+        assert_eq!(plugin.params.sync_status.value(), SyncStatus::Connected);
+
+        // Connected + on_change_retry_pending -> Syncing.
+        plugin.on_change_retry_pending = true;
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+        assert_eq!(plugin.params.sync_status.value(), SyncStatus::Syncing);
+        plugin.on_change_retry_pending = false;
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+        assert_eq!(plugin.params.sync_status.value(), SyncStatus::Connected);
+
+        // Connected + hr_pending -> Syncing.
+        plugin.hr_pending = true;
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+        assert_eq!(plugin.params.sync_status.value(), SyncStatus::Syncing);
+
+        // Matched (Synced) takes precedence over Syncing flags.
+        let hw_val = (20.0_f64 / 120.0_f64) as f32;
+        plugin
+            .hardware_float
+            .store(hw_val.to_bits(), Ordering::Release);
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+        assert_eq!(plugin.params.sync_status.value(), SyncStatus::Synced);
+
+        // Disconnect: Offline takes precedence over everything else.
+        plugin.conn_status.store(false, Ordering::Release);
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+        assert_eq!(plugin.params.sync_status.value(), SyncStatus::Offline);
     }
 
     // ── Persistence round-trip ─────────────────────────────────────────────

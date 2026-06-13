@@ -33,6 +33,30 @@ pub enum SyncMode {
     Continuous,
 }
 
+// ─── Sync status enum ────────────────────────────────────────────────────────
+
+/// Host-visible summary of the rate-sync state, derived from `conn_status`,
+/// `in_sync`, `bpm_is_settling`, `on_change_retry_pending`, and `hr_pending`.
+///
+/// Precedence (highest first): Offline (not connected) > Synced (matched) >
+/// Syncing (settling / retry pending / Hard Reset armed) > Connected (idle).
+#[derive(Enum, Debug, PartialEq, Eq, Clone, Copy)]
+pub enum SyncStatus {
+    /// Not connected to a mixer.
+    #[id = "offline"]
+    Offline,
+    /// Connected, idle, not yet matched to the host BPM.
+    #[id = "connected"]
+    Connected,
+    /// Connected; a sync is in flight (BPM settling, retry pending, or Hard
+    /// Reset armed and waiting for its quantised beat boundary).
+    #[id = "syncing"]
+    Syncing,
+    /// Connected and the hardware delay time matches the host BPM.
+    #[id = "synced"]
+    Synced,
+}
+
 // ─── MIDI clock PPQ enum ─────────────────────────────────────────────────────
 
 /// Pulses-per-quarter-note options for MIDI clock output.
@@ -232,6 +256,31 @@ pub struct EtherTapParams {
 
     #[id = "is_matched"]
     pub is_matched: BoolParam,
+
+    /// Summary sync state: Offline / Connected / Syncing / Synced. See
+    /// [`SyncStatus`] for the precedence rules.
+    #[id = "sync_status"]
+    pub sync_status: EnumParam<SyncStatus>,
+
+    /// Mirrors `hr_pending` — a quantised Hard Reset is armed and waiting
+    /// for its target beat boundary.
+    #[id = "phase_reset_pending"]
+    pub phase_reset_pending: BoolParam,
+
+    /// Hardware delay time converted to BPM (`20.0 / hardware_float`).
+    /// `0.0` means no telemetry has been received yet.
+    #[id = "hardware_bpm"]
+    pub hardware_bpm: FloatParam,
+
+    /// Number of FX slots (0–8) reported BPM-compatible by the last slot
+    /// audit, i.e. `compatible_slots.count_ones()`.
+    #[id = "compatible_slot_count"]
+    pub compatible_slot_count: IntParam,
+
+    /// Mirrors the MIDI clock worker's open-connection flag for the
+    /// selected physical output.
+    #[id = "midi_bridge_connected"]
+    pub midi_bridge_connected: BoolParam,
 }
 
 impl Default for EtherTapParams {
@@ -278,6 +327,22 @@ impl Default for EtherTapParams {
             all_slots_atom: Arc::new(AtomicBool::new(true)),
             is_connected: BoolParam::new("Is Connected", false),
             is_matched: BoolParam::new("Is Matched", false),
+            sync_status: EnumParam::new("Sync Status", SyncStatus::Offline),
+            phase_reset_pending: BoolParam::new("Phase Reset Pending", false),
+            hardware_bpm: FloatParam::new(
+                "Hardware BPM",
+                0.0,
+                FloatRange::Linear {
+                    min: 0.0,
+                    max: 999.0,
+                },
+            ),
+            compatible_slot_count: IntParam::new(
+                "Compatible Slot Count",
+                0,
+                IntRange::Linear { min: 0, max: 8 },
+            ),
+            midi_bridge_connected: BoolParam::new("MIDI Bridge Connected", false),
         }
     }
 }

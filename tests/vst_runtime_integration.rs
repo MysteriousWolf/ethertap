@@ -109,6 +109,11 @@ fn param_id_set_is_accounted_for() {
         "all_slots",
         "is_connected",
         "is_matched",
+        "sync_status",
+        "phase_reset_pending",
+        "hardware_bpm",
+        "compatible_slot_count",
+        "midi_bridge_connected",
     ];
     expected.sort_unstable();
 

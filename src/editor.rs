@@ -21,6 +21,8 @@ use nih_plug_iced::{
 };
 use parking_lot::Mutex;
 
+#[cfg(feature = "standalone")]
+use crate::params::SyncStatus;
 use crate::{
     network::{now_ms, DeviceInfo, NetworkCommand},
     osc,
@@ -78,9 +80,12 @@ struct Theme {
     bg: Color, // window background
 
     // ── Surfaces (idle buttons, text inputs) ─────────────────────────────
-    surface: Color,        // button / input fill
-    surface_border: Color, // idle border
-    muted: Color,          // idle / placeholder text
+    surface: Color, // button / input fill
+    // Single uniform 1px hairline border tone used wherever a flat surface
+    // needs an edge (idle buttons, inputs, picklists). One fill colour +
+    // (at most) this hairline, no bevels.
+    surface_border: Color,
+    muted: Color, // idle / placeholder text
 
     // ── Selected state (active radio option, focused input) ───────────────
     selected_bg: Color,
@@ -103,12 +108,6 @@ struct Theme {
     // ── Brand accent ─────────────────────────────────────────────────────
     // Used for: logo "ETHER" glyph, RX active dot, bolt icon, focused input.
     accent: Color,
-
-    // ── Border bevels (simulate 3D on glow renderer) ─────────────────────
-    // nih-plug-iced glow backend has no shadow support, so bevels use
-    // light-edge / dark-edge pairs on raised surfaces.
-    bevel_hi: Color, // light bevel (top/left edge of raised surface)
-    bevel_lo: Color, // dark bevel  (bottom/right edge of raised surface)
 
     // ── Section grouping ──────────────────────────────────────────────────
     section_border: Color, // subtle border around grouped controls
@@ -155,25 +154,25 @@ impl Theme {
     const fn dark() -> Self {
         Self {
             // ── Window ──────────────────────────────────────────────────────
-            bg: rgb(12, 12, 16), // near-black charcoal
+            bg: rgb(10, 10, 10), // near-black neutral
 
             // ── Surfaces ────────────────────────────────────────────────────
-            surface: rgb(28, 28, 36),        // dark panel
-            surface_border: rgb(50, 50, 58), // subtle panel edge
-            muted: rgb(110, 110, 122),       // placeholder / disabled text
+            surface: rgb(22, 22, 22), // button fill — one step above cards
+            surface_border: rgb(40, 40, 40), // hairline: idle buttons, inputs, picklists
+            muted: rgb(75, 75, 75),   // placeholder / disabled text
 
             // ── Selected / active ────────────────────────────────────────────
-            selected_bg: rgb(50, 85, 155), // muted engineering blue
-            selected_border: rgb(50, 85, 155),
+            selected_bg: rgb(55, 88, 145), // muted engineering blue, flattened
+            selected_border: rgb(55, 88, 145),
             selected_text: rgb(210, 225, 250), // bright on blue
 
             // ── Force action ───────────────────────────────────────────────────
-            danger_bg: rgb(130, 45, 20), // amber fill
-            danger_border: rgb(130, 45, 20),
+            danger_bg: rgb(125, 50, 25), // burnt-amber fill, flattened
+            danger_border: rgb(125, 50, 25),
 
             // ── Body text ────────────────────────────────────────────────────
-            text: rgb(205, 205, 215),
-            text_dim: rgb(95, 95, 108),
+            text: rgb(230, 228, 224),     // warm off-white
+            text_dim: rgb(120, 120, 120), // dimmer but readable
 
             // ── Status ──────────────────────────────────────────────────────
             ok: rgb(65, 185, 75),
@@ -183,23 +182,19 @@ impl Theme {
             // ── Brand accent ────────────────────────────────────────────────
             accent: rgb(210, 160, 55),
 
-            // ── Border bevels ───────────────────────────────────────────────
-            bevel_hi: rgb(48, 48, 56),
-            bevel_lo: rgb(8, 8, 12),
-
             // ── Section grouping ────────────────────────────────────────────
-            section_border: rgb(38, 38, 46),
-            section_bg: rgb(18, 18, 24),
-            banner_bg: rgb(28, 28, 34),      // dark charcoal banner
-            banner_text: rgb(190, 190, 200), // primary text on dark banner
+            section_border: rgb(34, 34, 34),
+            section_bg: rgb(16, 16, 16),
+            banner_bg: rgb(22, 22, 22), // flat dark banner, one step up from bg
+            banner_text: rgb(230, 228, 224), // primary text on dark banner
 
             // ── Button fills ───────────────────────────────────────────────
-            enabled_bg: rgb(22, 65, 32), // dark green
-            error_bg: rgb(70, 18, 18),   // dark red
+            enabled_bg: rgb(25, 60, 35), // dark green, flattened
+            error_bg: rgb(65, 22, 22),   // dark red, flattened
 
             // ── Inset surfaces ──────────────────────────────────────────────
-            inset_border: rgb(22, 22, 30),
-            inset_bg: rgb(10, 10, 14),
+            inset_border: rgb(34, 34, 34),
+            inset_bg: rgb(7, 7, 7),
 
             // ── Standalone DAW-shell chrome ─────────────────────────────────
             #[cfg(feature = "standalone")]
@@ -224,7 +219,10 @@ const PULSE_MS: u64 = 100;
 
 // ─── Layout constants ─────────────────────────────────────────────────────────
 
-const BORDER_RADIUS: f32 = 4.0;
+// Inputs, picklists, modal/section cards, and the outer plugin frame.
+const BORDER_RADIUS: f32 = 5.0;
+// Buttons — larger, TE rounded-key feel.
+const BORDER_RADIUS_BTN: f32 = 8.0;
 const SPACING_BTN_BASELINE: u16 = 10;
 const SPACING_FX_ROW_GAP: u16 = 12;
 const SCAN_MODAL_W: u16 = 290;
@@ -235,6 +233,9 @@ const SECTION_GAP: u16 = 3;
 const SECTION_PAD: [u16; 4] = [2, 6, 4, 6];
 /// Title size of every section header (MIXER / EFFECTS / MIDI / SYNC).
 const SECTION_TITLE_SIZE: u16 = 9;
+/// Uniform inset between `PluginFrame`'s hairline border and its content,
+/// applied on all 4 sides in both render paths.
+const PLUGIN_FRAME_PAD: u16 = 3;
 
 // ─── Button stylesheet ───────────────────────────────────────────────────────
 
@@ -253,19 +254,19 @@ struct EtherBtn(BtnKind);
 impl button::StyleSheet for EtherBtn {
     fn active(&self) -> button::Style {
         match self.0 {
-            // Idle / raised surface — light top-edge bevel, filled with surface bg.
+            // Idle — flat fill, hairline border.
             BtnKind::Idle => button::Style {
                 background: Some(Background::Color(THEME.surface)),
-                border_radius: BORDER_RADIUS,
+                border_radius: BORDER_RADIUS_BTN,
                 border_width: 1.0,
-                border_color: THEME.bevel_hi,
+                border_color: THEME.surface_border,
                 text_color: THEME.muted,
                 ..Default::default()
             },
             // Active / selected — blue fill, no border (flat highlight).
             BtnKind::Active => button::Style {
                 background: Some(Background::Color(THEME.selected_bg)),
-                border_radius: BORDER_RADIUS,
+                border_radius: BORDER_RADIUS_BTN,
                 border_width: 0.0,
                 border_color: THEME.selected_border,
                 text_color: THEME.selected_text,
@@ -274,25 +275,25 @@ impl button::StyleSheet for EtherBtn {
             // Force / momentary action — amber fill, no border.
             BtnKind::Force => button::Style {
                 background: Some(Background::Color(THEME.danger_bg)),
-                border_radius: BORDER_RADIUS,
+                border_radius: BORDER_RADIUS_BTN,
                 border_width: 0.0,
                 border_color: THEME.danger_border,
                 text_color: THEME.accent,
                 ..Default::default()
             },
-            // Disabled / recessed — dark fill, dark bottom-edge bevel.
+            // Disabled / recessed — flat dark fill, hairline border.
             BtnKind::Disabled => button::Style {
                 background: Some(Background::Color(THEME.inset_bg)),
-                border_radius: BORDER_RADIUS,
+                border_radius: BORDER_RADIUS_BTN,
                 border_width: 1.0,
-                border_color: THEME.bevel_lo,
+                border_color: THEME.surface_border,
                 text_color: THEME.surface_border,
                 ..Default::default()
             },
             // Enabled / connected — green fill, no border.
             BtnKind::Enabled => button::Style {
                 background: Some(Background::Color(THEME.enabled_bg)),
-                border_radius: BORDER_RADIUS,
+                border_radius: BORDER_RADIUS_BTN,
                 border_width: 0.0,
                 border_color: THEME.ok,
                 text_color: THEME.ok,
@@ -301,7 +302,7 @@ impl button::StyleSheet for EtherBtn {
             // Error / disconnected — red fill, no border.
             BtnKind::Error => button::Style {
                 background: Some(Background::Color(THEME.error_bg)),
-                border_radius: BORDER_RADIUS,
+                border_radius: BORDER_RADIUS_BTN,
                 border_width: 0.0,
                 border_color: THEME.err,
                 text_color: THEME.err,
@@ -373,7 +374,7 @@ impl text_input::StyleSheet for EtherInputLocked {
                 background: Background::Color(THEME.inset_bg),
                 border_radius: BORDER_RADIUS,
                 border_width: 1.0,
-                border_color: THEME.section_border,
+                border_color: THEME.inset_border,
             },
         }
     }
@@ -417,9 +418,9 @@ impl pick_list::StyleSheet for PpqPickStyle {
     fn menu(&self) -> pick_list::Menu {
         pick_list::Menu {
             text_color: THEME.text,
-            background: Background::Color(THEME.surface),
+            background: Background::Color(THEME.inset_bg),
             border_width: 1.0,
-            border_color: THEME.surface_border,
+            border_color: THEME.inset_border,
             selected_text_color: THEME.selected_text,
             selected_background: Background::Color(THEME.selected_bg),
         }
@@ -429,10 +430,10 @@ impl pick_list::StyleSheet for PpqPickStyle {
         pick_list::Style {
             text_color: THEME.text,
             placeholder_color: THEME.muted,
-            background: Background::Color(THEME.surface),
+            background: Background::Color(THEME.inset_bg),
             border_radius: BORDER_RADIUS,
             border_width: 1.0,
-            border_color: THEME.bevel_hi,
+            border_color: THEME.inset_border,
             icon_size: 0.30,
         }
     }
@@ -641,6 +642,10 @@ pub struct EditorData {
     pub device_change_tx: crossbeam_channel::Sender<Option<String>>,
     /// Receives MIDI device hot-plug notifications from midi_watcher.
     pub midi_device_rx: Arc<crossbeam_channel::Receiver<Vec<String>>>,
+    /// Millisecond timestamp of the last MIDI device-list broadcast (0 = never).
+    pub midi_last_update_ts: Arc<AtomicU64>,
+    /// True once the initial MIDI device-list broadcast has landed.
+    pub midi_has_update: Arc<AtomicBool>,
     /// True when the worker has an active connection to the selected MIDI output.
     pub midi_bridge_connected: Arc<AtomicBool>,
     /// True while the worker is attempting to reconnect to the selected MIDI output.
@@ -1276,10 +1281,42 @@ impl IcedEditor for EtherTapEditor {
                     .resize_with(self.midi_out_ports.len(), Default::default);
             }
 
+            // ── Status row ──────────────────────────────────────────────────
+            //
+            // Mirrors the mixer scan modal's status-string style: "Xs ago" +
+            // a state-dependent color. macOS uses CoreMIDI notifications
+            // (event-driven, no polling); other platforms poll on a fixed
+            // interval, so show a countdown to the next scan.
+            let last_update = self.data.midi_last_update_ts.load(Ordering::Relaxed);
+            let (midi_status_str, midi_status_color) =
+                if !self.data.midi_has_update.load(Ordering::Relaxed) {
+                    ("waiting for devices\u{2026}".to_string(), THEME.warn)
+                } else {
+                    let age_s = now_ms().saturating_sub(last_update) as f32 / 1000.0;
+                    if cfg!(target_os = "macos") {
+                        (
+                            format!("updated {:.1}s ago \u{2022} live (event-driven)", age_s),
+                            THEME.text_dim,
+                        )
+                    } else {
+                        let next_in =
+                            (crate::midi_watcher::POLL_INTERVAL_SECS as f32 - age_s).max(0.0);
+                        (
+                            format!(
+                                "updated {:.1}s ago \u{2022} next scan in {:.1}s",
+                                age_s, next_in
+                            ),
+                            THEME.text_dim,
+                        )
+                    }
+                };
+
             let mut picker_col = Column::new()
                 .push(
                     Row::new()
                         .push(t!("MIDI OUTPUT").size(11).color(THEME.text))
+                        .push(Space::with_width(Length::Units(10)))
+                        .push(t!(&midi_status_str).size(9).color(midi_status_color))
                         .push(Space::with_width(Length::Fill))
                         .push(
                             Button::new(
@@ -2137,7 +2174,7 @@ impl IcedEditor for EtherTapEditor {
             ))
             .push(Space::with_height(Length::Units(SECTION_GAP)))
             .push(section("SYNC", rate_row.into()))
-            .padding([0, 4, 3, 4])
+            .padding([0, 5, 4, 5])
             .spacing(0);
 
         // One coherent plugin surface: banner (edge-to-edge) + all four
@@ -2165,6 +2202,7 @@ impl IcedEditor for EtherTapEditor {
         let result = Container::new(plugin_column)
             .width(Length::Fill)
             .height(Length::Fill)
+            .padding(PLUGIN_FRAME_PAD)
             .style(PluginFrame)
             .into();
 
@@ -2384,9 +2422,22 @@ fn daw_shell<'a>(
         .collect();
 
     // PARAMETERS OUT: read-only status the plugin writes back to the DAW.
+    let sync_status = data.params.sync_status.value();
+    let hardware_bpm = data.params.hardware_bpm.value();
+    let compatible_slot_count = data.params.compatible_slot_count.value();
+    let phase_reset_pending = data.params.phase_reset_pending.value();
+    let midi_bridge_connected = data.params.midi_bridge_connected.value();
     let params_out: Vec<Element<'_, Message>> = vec![
         daw_indicator_chip("is_connected", connected),
         daw_indicator_chip("is_matched", in_sync),
+        daw_value_chip("sync_status", sync_status_label(sync_status)),
+        daw_indicator_chip("phase_reset_pending", phase_reset_pending),
+        daw_value_chip("hardware_bpm", format!("{:.2}", hardware_bpm)),
+        daw_value_chip(
+            "compatible_slot_count",
+            format!("{}", compatible_slot_count),
+        ),
+        daw_indicator_chip("midi_bridge_connected", midi_bridge_connected),
     ];
 
     let footer = Container::new(
@@ -2421,6 +2472,7 @@ fn daw_shell<'a>(
     let framed_plugin = Container::new(inner)
         .width(Length::Units(360))
         .height(Length::Units(280))
+        .padding(PLUGIN_FRAME_PAD)
         .style(PluginFrame);
 
     // Dimension-ruler overlay: rulers sized to the frame's exact edges
@@ -2563,6 +2615,30 @@ fn daw_indicator_chip<'a>(label: &'static str, on: bool) -> Element<'a, Message>
         .push(t!(label).size(9).color(THEME.daw_chrome_text_dim))
         .align_items(Alignment::Center)
         .into()
+}
+
+/// Read-only label=value chip for the DAW parameters-out footer — for params
+/// whose host-visible state isn't a simple on/off LED (`sync_status`,
+/// `hardware_bpm`, `compatible_slot_count`).
+#[cfg(feature = "standalone")]
+fn daw_value_chip<'a>(label: &'static str, value: String) -> Element<'a, Message> {
+    Row::new()
+        .push(t!(label).size(9).color(THEME.daw_chrome_text_dim))
+        .push(Space::with_width(Length::Units(3)))
+        .push(t!(value).size(9).color(THEME.accent))
+        .align_items(Alignment::Center)
+        .into()
+}
+
+/// Maps `SyncStatus` to its DAW-shell footer label.
+#[cfg(feature = "standalone")]
+fn sync_status_label(status: SyncStatus) -> String {
+    match status {
+        SyncStatus::Offline => "offline".to_string(),
+        SyncStatus::Connected => "connected".to_string(),
+        SyncStatus::Syncing => "syncing".to_string(),
+        SyncStatus::Synced => "synced".to_string(),
+    }
 }
 
 /// Footer-scoped wrap/grid: chunks `items` into a `Column` of `Row`s, `per_row`
