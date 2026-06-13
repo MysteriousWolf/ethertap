@@ -1,0 +1,12 @@
+--- a/src/wrapper/clap/util.rs
++++ b/src/wrapper/clap/util.rs
+@@ -56,6 +56,9 @@
+ 
+ pub(crate) use check_null_ptr_msg;
+ pub(crate) use clap_call;
++// Only used by the CLAP wrapper (`wrapper.rs`); with the `clap` feature
++// disabled this re-export is unused.
++#[allow(unused_imports)]
+ pub(crate) use unsafe_clap_call;
+ 
+ /// Send+Sync wrapper around CLAP host extension pointers.

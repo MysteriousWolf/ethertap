@@ -73,6 +73,7 @@ stops working.
 | `context_process_set_song_position.patch` | Adds `Transport::set_song_position()` — the position fields (`pos_samples`/`pos_beats`/`bar_start_pos_beats`/`bar_number`/`loop_range_beats`) are `pub(crate)`, so the `vst-runtime` test harness cannot otherwise drive position-dependent plugin logic (beat crossings, bar-quantized hard resets) |
 | `params_internals_set_normalized_pub.patch` | Widens `ParamPtr::set_normalized_value` and `ParamPtr::update_smoother` from `pub(crate)` to `pub` — `vst-runtime`'s `Harness::set_param_normalized` automates params host-style through `Params::param_map()`'s type-erased pointers |
 | `src_lib_rs.patch` | Adds `#![allow(unexpected_cfgs)]` to the crate root — silences `unexpected cfg condition value: cargo-clippy` warnings from the macOS event loop's `objc` macros, same root cause as baseview's `src_lib_rs.patch` |
+| `src_wrapper_clap_util_rs.patch` | Adds `#[allow(unused_imports)]` to the `unsafe_clap_call` re-export — it's only consumed by the CLAP wrapper, so without the `clap` feature it triggers an `unused_imports` warning |
 
 ### Updating nih-plug
 
