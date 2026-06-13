@@ -16,6 +16,7 @@ use std::time::Duration;
 
 /// Minimum interval between device-list broadcasts — rate-limits flurries of
 /// CoreMIDI notifications during USB hub plug/unplug.
+#[cfg(target_os = "macos")]
 const BROADCAST_COOLDOWN_MS: u64 = 300;
 
 /// Polling interval for the non-macOS fallback. Not cfg-gated so the editor
