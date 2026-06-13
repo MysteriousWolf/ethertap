@@ -1,5 +1,5 @@
 ---
-generated_at: 2026-06-13T19:00:12Z
+generated_at: 2026-06-13T19:17:40Z
 atomic_version: 3.0.1
 ---
 # Deterministic signals
@@ -26,8 +26,8 @@ atomic_version: 3.0.1
 │   │   └── vst-host-runtime.md (8916bae, 159L, 10329ch, 10409B)
 │   └── spec/ (4)
 │       ├── daw-controls-overhaul.md (33e61b7, 282L, 21736ch, 21892B)
-│       ├── host-status-params.md (457252a, 83L, 5662ch, 5695B)
-│       ├── te-dark-reskin.md (e398e6f, 97L, 8489ch, 8543B)
+│       ├── host-status-params.md (91b01b0, 85L, 5709ch, 5744B)
+│       ├── te-dark-reskin.md (488d261, 99L, 8536ch, 8592B)
 │       └── vst-host-runtime.md (aa41ef7, 163L, 12940ch, 13042B)
 ├── mock-suite/ (3)
 │   ├── examples/ (2)
@@ -109,7 +109,7 @@ atomic_version: 3.0.1
 ## Languages
 
 - Rust: 12709 LOC (86%), 27 files (56%)
-- Markdown: 1292 LOC (8%), 9 files (18%)
+- Markdown: 1296 LOC (8%), 9 files (18%)
 - YAML: 286 LOC (1%), 3 files (6%)
 - Shell: 212 LOC (1%), 4 files (8%)
 - TOML: 107 LOC (0%), 4 files (8%)
