@@ -1,0 +1,11 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,3 +1,8 @@
++// The `objc`/`cocoa` crates' `class!`/`sel!`/`msg_send!` macros check
++// `cfg(feature = "cargo-clippy")`, which trips Rust's `unexpected_cfgs` lint
++// (stabilized after this crate was last updated). Harmless noise — silence it.
++#![allow(unexpected_cfgs)]
++
+ #[cfg(target_os = "macos")]
+ mod macos;
+ #[cfg(target_os = "windows")]

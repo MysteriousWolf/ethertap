@@ -1,0 +1,13 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -84,6 +84,10 @@
+ 
+ #![cfg_attr(feature = "docs", feature(doc_auto_cfg))]
+ #![cfg_attr(feature = "simd", feature(portable_simd))]
++// The macOS event loop's `objc` macros check `cfg(feature = "cargo-clippy")`, which
++// trips Rust's `unexpected_cfgs` lint (stabilized after this crate was last updated).
++// Harmless noise — silence it.
++#![allow(unexpected_cfgs)]
+ // Around Rust 1.64 Clippy started throwing this for all instances of `dyn Fn(...) -> ... + Send +
+ // Sync`. Creating type aliases for all of these callbacks probably won't make things easier to read.
+ #![allow(clippy::type_complexity)]

@@ -28,6 +28,7 @@ following forward-ports and fixes.
 | `src_macos_view_rs.patch` | Guards `become_first_responder` against `nil` from `[view window]` on ARM64 macOS before the view is attached — fixes a crash during `setContentView_` |
 | `src_x11_window_rs.patch` | Adds `open_as_if_parented` for X11 (creates the window as a child of the root window, returns immediately) — `iced_baseview` calls `baseview::Window::open_as_if_parented` unconditionally, so it must exist on every platform for the crate to compile |
 | `src_win_window_rs.patch` | Adds `open_as_if_parented` for Win32 (`Self::open(false, null_mut(), ...)`, no message loop) — same cross-platform compile requirement as above |
+| `src_lib_rs.patch` | Adds `#![allow(unexpected_cfgs)]` to the crate root — silences ~104 `unexpected cfg condition value: cargo-clippy` warnings from `objc`/`cocoa` macros (`class!`/`sel!`/`msg_send!`), which check a `cargo-clippy` feature flag that trips the `unexpected_cfgs` lint stabilized after this crate was last updated |
 
 ### Updating baseview
 
@@ -71,6 +72,7 @@ stops working.
 | `context_process_transport_visibility.patch` | Widens `Transport::new` from `pub(crate)` to `pub` — our unit tests (`src/lib.rs`) construct `Transport` directly to drive `process()` in isolation, which needs a public constructor outside the crate-internal call sites upstream restricts it to |
 | `context_process_set_song_position.patch` | Adds `Transport::set_song_position()` — the position fields (`pos_samples`/`pos_beats`/`bar_start_pos_beats`/`bar_number`/`loop_range_beats`) are `pub(crate)`, so the `vst-runtime` test harness cannot otherwise drive position-dependent plugin logic (beat crossings, bar-quantized hard resets) |
 | `params_internals_set_normalized_pub.patch` | Widens `ParamPtr::set_normalized_value` and `ParamPtr::update_smoother` from `pub(crate)` to `pub` — `vst-runtime`'s `Harness::set_param_normalized` automates params host-style through `Params::param_map()`'s type-erased pointers |
+| `src_lib_rs.patch` | Adds `#![allow(unexpected_cfgs)]` to the crate root — silences `unexpected cfg condition value: cargo-clippy` warnings from the macOS event loop's `objc` macros, same root cause as baseview's `src_lib_rs.patch` |
 
 ### Updating nih-plug
 
