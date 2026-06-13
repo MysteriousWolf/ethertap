@@ -81,3 +81,5 @@ Built across 2 iterations of /subagent-implementation on branch `host-status-and
 - none
 
 **Squashed to 2f92ada — 2026-06-13.** Per-iteration SHAs above are historical (unreachable from any branch).
+
+**Merged into main as 13c2265 — 2026-06-13.**
