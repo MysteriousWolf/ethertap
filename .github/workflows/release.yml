@@ -142,6 +142,7 @@ jobs:
     if: inputs.tag != ''
     permissions:
       contents: write
+      models: read
 
     steps:
       - name: Checkout
@@ -180,6 +181,37 @@ jobs:
             git log "${TAG}" --pretty='- %h %s' >> notes.md
           fi
 
+      # AI-written summary of the PRs/commits above. Best-effort: if GitHub
+      # Models is unavailable, the release still goes out with notes.md alone.
+      - name: Generate release highlights
+        id: highlights
+        continue-on-error: true
+        uses: actions/ai-inference@v1
+        with:
+          prompt-file: notes.md
+          system-prompt: |
+            You are writing the "Highlights" section at the top of a GitHub
+            release for EtherTap, a VST3 audio plugin. Given the PR list and
+            commit log below, write 2-4 sentences of plain technical prose
+            summarizing what changed for users. No marketing language, no
+            emoji, no headings, no restating the lists verbatim.
+          model: openai/gpt-4o
+
+      - name: Assemble final release notes
+        run: |
+          if [ -s "${{ steps.highlights.outputs.response-file }}" ]; then
+            {
+              echo "## Highlights"
+              echo ""
+              cat "${{ steps.highlights.outputs.response-file }}"
+              echo ""
+              echo ""
+              cat notes.md
+            } > final-notes.md
+          else
+            cp notes.md final-notes.md
+          fi
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -188,4 +220,4 @@ jobs:
           files: artifacts/**
           draft: ${{ inputs.draft || false }}
           prerelease: ${{ inputs.prerelease || false }}
-          body_path: notes.md
+          body_path: final-notes.md
