@@ -133,7 +133,8 @@ flowchart LR
 | 1 | New `midi-loopback` crate: process-global named-port registry (`register`/`connect`/`send`/`recv` over `crossbeam_channel::bounded::<Vec<u8>>`), unit tests for register/connect/send-recv/unregister/name-collision. Add to workspace `members` in root `Cargo.toml`. | `midi-loopback/Cargo.toml`, `midi-loopback/src/lib.rs`, root `Cargo.toml` (`members`) | atomic-builder | 3 | `cargo test -p midi-loopback` green; registry unit tests cover register/connect/send/recv/unregister/collision (criterion 1) |
 | 2 | `src/midi_clock.rs`: rename `run_unix` → `run_worker`, drop `#[cfg(not(target_os = "windows"))]`/`#[cfg(target_os = "windows")]` split so `run_worker` is unconditional and `MidiClockWorker::run()` calls it directly (Windows stub branch removed). Keep `virt_conn` block under `cfg(unix)`. `try_connect_out`/`try_connect_in` consult `midi-loopback` registry (by name) in addition to midir hardware enumeration — registry lookup first or merged into the port-name search, loopback ports interchangeable with hardware ports. `handle_port_scan` becomes unconditional too (drop its `cfg(not(target_os = "windows"))`). Add `midi-loopback` as a normal dep of `ethertap` in root `Cargo.toml`. | `src/midi_clock.rs`, root `Cargo.toml` (`[dependencies]`) | atomic-builder | 2 | `cargo test --workspace` green on macOS (existing unit tests `compute_stats_*`, `backoff_*`, `handle_port_scan_*` now run unconditionally — remove their `cfg(not(target_os = "windows"))` test-helper gates too); `cargo check --workspace --all-targets --target x86_64-pc-windows-gnu` succeeds (criterion 3); `cargo check ... --target x86_64-unknown-linux-gnu` succeeds (criterion 4) |
 | 3 | `mock-suite`: new ungated `loopback_sink` module with a sibling type `LoopbackClockSink` (e.g. `start_named`) that registers a named port in `midi-loopback` instead of opening `midir::os::unix::VirtualInput`, reusing the existing `SinkState`/stats accumulation logic against bytes received from the loopback `recv` side. `SinkState` is currently private and local to `clock_sink.rs` (`#![cfg(unix)]`), so it must first be extracted (with the 0xF8-counting/jitter-stat computation) into a small shared ungated location — e.g. a new `mock-suite/src/sink_state.rs` module, or alongside the already-shared `SinkStats` in `lib.rs` — that both `clock_sink.rs` and `loopback_sink.rs` depend on; no duplication. No `#![cfg(unix)]`, unconditional `pub mod loopback_sink` in `lib.rs` — compiles on all platforms, no `midir`/unix dependency. Existing OS-virtual-port `MidiClockSink` (`clock_sink.rs`, `cfg(unix)`) untouched apart from this extraction. Add `midi-loopback` as a normal dep of `mock-suite`. | `mock-suite/src/loopback_sink.rs` (new), `mock-suite/src/sink_state.rs` (new, or extraction target in `lib.rs`), `mock-suite/src/clock_sink.rs`, `mock-suite/src/lib.rs`, `mock-suite/Cargo.toml` | atomic-builder | 4 | `cargo build -p mock-suite` and `cargo test -p mock-suite` green; `loopback_sink` compiles on all platforms (no `cfg(unix)`); `clock_sink.rs` reuses the extracted `SinkState`/stats logic without duplication |
-| 4 | `tests/midi_clock_tests.rs`: drop `cfg(all(unix, not(feature = "standalone")))` to `cfg(not(feature = "standalone"))`; switch from `mock_suite::MidiClockSink::start_named` to `mock_suite::loopback_sink::LoopbackClockSink::start_named` (CP3) so the worker connects via `midi-loopback` registry instead of a real OS virtual port. | `tests/midi_clock_tests.rs` | atomic-builder | 1 | `cargo test --test midi_clock_tests` green on macOS via loopback path (criterion 2); `cargo check --workspace --all-targets --target x86_64-pc-windows-gnu` and `--target x86_64-unknown-linux-gnu` succeed with the test compiling (criteria 3, 4) |
+| 4 | `src/midi_clock.rs` + `midi-loopback`: CP2's loopback consult covers only the *connect* path (`try_connect_out`/`try_connect_in`). The periodic port-scan timer's presence check (`handle_port_scan`'s `ports_now`, built from `midir::MidiOutput::new("EtherTap-Scan").ports()`) cannot see loopback-registered names, so ~1s after a loopback connection succeeds, `handle_port_scan`'s `!present && phys_out.is_some()` branch disconnects it again. Add a names-listing fn to `midi-loopback` (e.g. `registered_names() -> Vec<String>`) and union it into `ports_now` (or have `handle_port_scan`'s presence check OR against it), so a connected loopback port is never reported as "disappeared" by the scan timer. | `midi-loopback/src/lib.rs`, `src/midi_clock.rs` | atomic-builder | 2 | `cargo test --workspace` green; a test exercising `handle_port_scan` (or the full select-loop) with a registered loopback port confirms `phys_out` stays connected across a scan tick |
+| 5 | `tests/midi_clock_tests.rs`: drop `cfg(all(unix, not(feature = "standalone")))` to `cfg(not(feature = "standalone"))`; switch from `mock_suite::MidiClockSink::start_named` to `mock_suite::loopback_sink::LoopbackClockSink::start_named` (CP3) so the worker connects via `midi-loopback` registry instead of a real OS virtual port. | `tests/midi_clock_tests.rs` | atomic-surgeon | 1 | `cargo test --test midi_clock_tests` green on macOS via loopback path (criterion 2); `cargo check --workspace --all-targets --target x86_64-pc-windows-gnu` and `--target x86_64-unknown-linux-gnu` succeed with the test compiling (criteria 3, 4) |
 
 Each checkpoint ends green: `cargo test --workspace` (or the scoped `-p`/`--test` variant shown) plus `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --check` on macOS.
 
@@ -149,4 +150,23 @@ Each checkpoint ends green: `cargo test --workspace` (or the scoped `-p`/`--test
 
 ## Change log
 
-(none yet)
+### 2026-06-14 — Insert CP4 (loopback presence-check fix)
+
+**What changed:** Inserted a new CP4 (`midi-loopback/src/lib.rs`,
+`src/midi_clock.rs`, atomic-builder, 2 files): add a names-listing fn to
+`midi-loopback` (e.g. `registered_names() -> Vec<String>`) and union it into
+`handle_port_scan`'s `ports_now` presence check. The former CP4 (test rewire
+of `tests/midi_clock_tests.rs`) is renumbered to CP5, with its `Agent` column
+changed from `atomic-builder` to `atomic-surgeon` (1-file mechanical edit,
+unchanged from its original scope).
+
+**Why:** CP5's edits (made first, ahead of the new CP4) failed at runtime —
+`clock_ticks_reach_virtual_sink_with_zero_drops` got "got 11" clocks instead
+of the required ≥48. Root cause: CP2's loopback-registry consult covers only
+the connect path (`try_connect_out`/`try_connect_in`); the periodic
+port-scan timer's presence check (`handle_port_scan`'s `ports_now`, built
+from real midir hardware enumeration only) cannot see loopback-registered
+names, so ~1s after a loopback connection succeeds, `handle_port_scan`'s
+`!present && phys_out.is_some()` branch disconnects it again. This blocks
+spec success criterion 2. No prior checkpoint covered this — CP4 is new
+work, not a correction of CP1-3.

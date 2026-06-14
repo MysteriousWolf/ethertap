@@ -645,6 +645,15 @@ fn handle_port_scan(
 
     known_ports.clear();
     known_ports.extend_from_slice(ports_now);
+    // Registered loopback ports are invisible to midir's hardware port
+    // enumeration (the source of `ports_now`), so union them in here — a
+    // connected loopback port must never be reported as "disappeared" by
+    // the presence check below.
+    for name in midi_loopback::registered_names() {
+        if !known_ports.contains(&name) {
+            known_ports.push(name);
+        }
+    }
 
     // ── Auto-connect guard: device present, none selected ─────────────────
     // Mirrors `connect_to_last`'s reconnect posture (params.rs `connect_to_last`).
@@ -1012,6 +1021,55 @@ mod tests {
             .try_recv()
             .expect("loopback port should receive the sent message");
         assert_eq!(received, vec![0xF8]);
+    }
+
+    /// A connected loopback `phys_out` must survive a periodic-scan
+    /// `handle_port_scan` call even when the scan's `ports_now` (built from
+    /// real midir hardware enumeration) does not list the loopback name —
+    /// `handle_port_scan` must union in `midi_loopback::registered_names()`
+    /// for its presence check, otherwise `!present && phys_out.is_some()`
+    /// disconnects the loopback ~1s after every successful connection.
+    #[test]
+    fn handle_port_scan_does_not_disconnect_present_loopback_port() {
+        let name = format!(
+            "EtherTap Test Loopback Scan {}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        );
+        let _port = midi_loopback::register(&name, midi_loopback::DEFAULT_CAPACITY)
+            .expect("register should succeed");
+
+        let worker = make_test_worker(false);
+        let mut known_ports: Vec<String> = Vec::new();
+        let mut current_device: Option<String> = Some(name.clone());
+        let mut phys_out = try_connect_out(&name);
+        assert!(
+            phys_out.is_some(),
+            "should connect to registered loopback port"
+        );
+        let mut phys_in = None;
+        let mut backoff = crate::reconnect::Backoff::new(1000, 10000);
+        let (pass_tx, _pass_rx) = crossbeam_channel::bounded::<Vec<u8>>(16);
+        let pass_drop_count = Arc::new(AtomicU32::new(0));
+
+        // Simulate a midir hardware scan tick that does NOT include the
+        // loopback-registered name (loopback ports are invisible to midir).
+        handle_port_scan(
+            &[],
+            &mut known_ports,
+            &mut current_device,
+            &mut phys_out,
+            &mut phys_in,
+            &mut backoff,
+            &pass_tx,
+            &pass_drop_count,
+            &worker,
+        );
+
+        assert!(
+            phys_out.is_some(),
+            "a connected loopback port must not be reported as disappeared by the scan timer"
+        );
     }
 
     /// `try_connect_in` recognizes a registered loopback port by name and

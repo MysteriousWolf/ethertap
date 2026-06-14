@@ -101,6 +101,15 @@ pub fn unregister(name: &str) {
     registry().lock().remove(name);
 }
 
+/// Return the names of all currently-registered ports.
+///
+/// Used by port-presence checks (e.g. `handle_port_scan`'s periodic-scan
+/// timer) so a connected loopback port is never reported as "disappeared"
+/// just because it's invisible to midir's hardware port enumeration.
+pub fn registered_names() -> Vec<String> {
+    registry().lock().keys().cloned().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,5 +198,23 @@ mod tests {
     fn connect_to_unknown_name_fails() {
         let name = unique_name("unknown");
         assert_eq!(connect(&name).err(), Some(LoopbackError::NotFound));
+    }
+
+    #[test]
+    fn registered_names_includes_registered_port_and_excludes_after_unregister() {
+        let name = unique_name("registered-names");
+        let port = register(&name, DEFAULT_CAPACITY).expect("register should succeed");
+
+        assert!(
+            registered_names().contains(&name),
+            "registered_names should include a freshly-registered port"
+        );
+
+        drop(port);
+
+        assert!(
+            !registered_names().contains(&name),
+            "registered_names should not include a port after it's dropped/unregistered"
+        );
     }
 }
