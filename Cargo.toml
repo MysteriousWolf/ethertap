@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "xtask", "vst-runtime", "mock-suite"]
+members = [".", "xtask", "vst-runtime", "mock-suite", "midi-loopback"]
 resolver = "2"
 
 [package]

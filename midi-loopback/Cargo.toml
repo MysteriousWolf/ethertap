@@ -1,0 +1,10 @@
+[package]
+name = "midi-loopback"
+version = "0.1.0"
+edition = "2021"
+description = "EtherTap in-process software MIDI loopback — process-global named-port registry for tests and cross-platform MIDI clock bridging."
+publish = false
+
+[dependencies]
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
