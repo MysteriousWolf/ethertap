@@ -14,6 +14,10 @@ pub use mixer::{
     ReceivedMsg, SlotState, DLY, EMPTY,
 };
 
+pub mod sink_state;
+
+pub mod loopback_sink;
+
 #[cfg(unix)]
 pub mod clock_sink;
 #[cfg(unix)]

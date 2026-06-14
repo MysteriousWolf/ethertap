@@ -8,43 +8,16 @@
 
 #![cfg(unix)]
 
-use std::collections::VecDeque;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use midir::os::unix::VirtualInput;
 use midir::{Ignore, MidiInput, MidiInputConnection};
 use parking_lot::Mutex;
 
+use crate::sink_state::SinkState;
 use crate::SinkStats;
 
 pub const SINK_PORT_NAME: &str = "EtherTap Mock MIDI Sink";
-
-const CLOCK_BYTE: u8 = 0xF8;
-/// Clocks per beat at the MIDI-standard 24 PPQ (BPM estimation only — the
-/// sink measures whatever EtherTap sends; jitter stats are PPQ-agnostic).
-const MIDI_CPB: usize = 24;
-/// Timestamps kept → `WINDOW - 1` intervals = 10 beats at 24 PPQ.
-const WINDOW: usize = 241;
-const BPM_HIST: usize = 180;
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-#[derive(Default)]
-struct SinkState {
-    clock_times: VecDeque<Instant>,
-    bpm_history: VecDeque<f64>,
-    total_clocks: u64,
-    other_msgs: u64,
-    last_hex: String,
-    last_ts_ms: u64,
-    last_clock_ts_ms: u64,
-}
 
 pub struct MidiClockSink {
     state: Arc<Mutex<SinkState>>,
@@ -75,41 +48,7 @@ impl MidiClockSink {
             .create_virtual(
                 port_name,
                 move |_timestamp_us, message, _| {
-                    let now = Instant::now();
-                    let mut s = cb_state.lock();
-                    s.last_hex = message
-                        .iter()
-                        .map(|b| format!("0x{b:02X}"))
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    s.last_ts_ms = now_ms();
-                    let Some(&first) = message.first() else {
-                        return;
-                    };
-                    if first == CLOCK_BYTE {
-                        s.total_clocks += 1;
-                        s.last_clock_ts_ms = s.last_ts_ms;
-                        s.clock_times.push_back(now);
-                        while s.clock_times.len() > WINDOW {
-                            s.clock_times.pop_front();
-                        }
-                        // Sample BPM once per beat from the last CPB+1 stamps.
-                        if s.total_clocks % MIDI_CPB as u64 == 0 && s.clock_times.len() > MIDI_CPB {
-                            let n = s.clock_times.len();
-                            let first_t = s.clock_times[n - 1 - MIDI_CPB];
-                            let last_t = s.clock_times[n - 1];
-                            let mean_iv =
-                                last_t.duration_since(first_t).as_secs_f64() / MIDI_CPB as f64;
-                            if mean_iv > 0.0 {
-                                s.bpm_history.push_back(60.0 / (mean_iv * MIDI_CPB as f64));
-                                while s.bpm_history.len() > BPM_HIST {
-                                    s.bpm_history.pop_front();
-                                }
-                            }
-                        }
-                    } else {
-                        s.other_msgs += 1;
-                    }
+                    cb_state.lock().on_message(message);
                 },
                 (),
             )
@@ -140,62 +79,13 @@ impl MidiClockSink {
 
     /// Total 0xF8 clock bytes received since start.
     pub fn total_clocks(&self) -> u64 {
-        self.state.lock().total_clocks
+        self.state.lock().total_clocks()
     }
 
     /// Compute interval/jitter statistics over the current window. Returns
     /// `None` until at least two clocks have arrived.
     pub fn stats(&self) -> Option<SinkStats> {
-        let s = self.state.lock();
-        if s.clock_times.len() < 2 {
-            return None;
-        }
-        let times: Vec<Instant> = s.clock_times.iter().copied().collect();
-        let intervals: Vec<f64> = times
-            .windows(2)
-            .map(|w| w[1].duration_since(w[0]).as_secs_f64())
-            .collect();
-        let mean_iv = intervals.iter().sum::<f64>() / intervals.len() as f64;
-        let bpm = if mean_iv > 0.0 {
-            60.0 / (mean_iv * MIDI_CPB as f64)
-        } else {
-            0.0
-        };
-        let var = intervals
-            .iter()
-            .map(|iv| (iv - mean_iv).powi(2))
-            .sum::<f64>()
-            / (intervals.len().max(2) - 1) as f64;
-
-        let mut abs_jitter_us: Vec<f64> = intervals
-            .iter()
-            .map(|iv| (iv - mean_iv).abs() * 1e6)
-            .collect();
-        abs_jitter_us.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let pct = |p: f64| -> f64 {
-            let idx = (p / 100.0) * (abs_jitter_us.len() - 1) as f64;
-            let lo = idx.floor() as usize;
-            let hi = (lo + 1).min(abs_jitter_us.len() - 1);
-            abs_jitter_us[lo] + (abs_jitter_us[hi] - abs_jitter_us[lo]) * (idx - lo as f64)
-        };
-
-        Some(SinkStats {
-            bpm,
-            bpm_history: s.bpm_history.iter().copied().collect(),
-            total_clocks: s.total_clocks,
-            other_msgs: s.other_msgs,
-            sample_count: intervals.len(),
-            mean_us: mean_iv * 1e6,
-            std_us: var.sqrt() * 1e6,
-            p50_us: pct(50.0),
-            p75_us: pct(75.0),
-            p95_us: pct(95.0),
-            p99_us: pct(99.0),
-            max_us: abs_jitter_us.last().copied().unwrap_or(0.0),
-            last_hex: s.last_hex.clone(),
-            last_ts_ms: s.last_ts_ms,
-            last_clock_ts_ms: s.last_clock_ts_ms,
-        })
+        self.state.lock().stats()
     }
 }
 
