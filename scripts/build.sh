@@ -92,11 +92,33 @@ fi
 
 # ── Export ─────────────────────────────────────────────────────────────────────
 mkdir -p dist
-DEST="$REPO_ROOT/dist/ethertap-${VERSION}-${PLATFORM}.vst3"
+EXPORT_NAME="ethertap-${VERSION}-${PLATFORM}.vst3"
+DEST="$REPO_ROOT/dist/$EXPORT_NAME"
 
 rm -rf "$DEST"
 cp -R "$BUNDLE_DIR/$BUNDLE_NAME" "$DEST"
-echo "==> Exported: dist/ethertap-${VERSION}-${PLATFORM}.vst3"
+echo "==> Exported: dist/$EXPORT_NAME"
+
+# ── Package ────────────────────────────────────────────────────────────────────
+# Archive the bundle so CI's upload-artifact step (dist/*.zip on macOS/Windows,
+# dist/*.tar.gz on Linux) has something to find.
+cd dist
+case "$OS" in
+  Darwin|MINGW*|MSYS*|CYGWIN*)
+    rm -f "${EXPORT_NAME}.zip"
+    zip -r -q "${EXPORT_NAME}.zip" "$EXPORT_NAME"
+    echo "==> Packaged: dist/${EXPORT_NAME}.zip"
+    ;;
+  Linux)
+    rm -f "${EXPORT_NAME}.tar.gz"
+    tar -czf "${EXPORT_NAME}.tar.gz" "$EXPORT_NAME"
+    echo "==> Packaged: dist/${EXPORT_NAME}.tar.gz"
+    ;;
+  *)
+    echo "Warning: no packaging defined for $OS" >&2
+    ;;
+esac
+cd "$REPO_ROOT"
 
 echo ""
 echo "Bundle: $BUNDLE_DIR/$BUNDLE_NAME"
