@@ -102,9 +102,18 @@ echo "==> Exported: dist/$EXPORT_NAME"
 # ── Package ────────────────────────────────────────────────────────────────────
 # VST3 is a directory bundle on every platform; zip it so CI's
 # upload-artifact step (dist/*.zip) has a single file to find.
+# GitHub's Windows runners don't have `zip` on PATH for bash, but do have
+# 7-Zip (`7z`), so fall back to that.
 cd dist
 rm -f "${EXPORT_NAME}.zip" "${EXPORT_NAME}.sha256"
-zip -r -q "${EXPORT_NAME}.zip" "$EXPORT_NAME"
+if command -v zip >/dev/null 2>&1; then
+  zip -r -q "${EXPORT_NAME}.zip" "$EXPORT_NAME"
+elif command -v 7z >/dev/null 2>&1; then
+  7z a -tzip -bd -bb0 "${EXPORT_NAME}.zip" "$EXPORT_NAME" >/dev/null
+else
+  echo "Error: neither 'zip' nor '7z' found for packaging" >&2
+  exit 1
+fi
 echo "==> Packaged: dist/${EXPORT_NAME}.zip"
 
 # ── Checksum ───────────────────────────────────────────────────────────────────
