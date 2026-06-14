@@ -203,11 +203,15 @@ impl MidiClockWorker {
 
     pub fn run(self) {
         use midir::MidiOutput;
+        // A MidiOutput handle is only needed for the macOS/Linux "publish our
+        // own virtual port" feature below. Its absence (e.g. no ALSA seq
+        // device) must not prevent the platform-independent phys_out /
+        // loopback bridge from starting.
         let output = match MidiOutput::new("EtherTap") {
-            Ok(o) => o,
+            Ok(o) => Some(o),
             Err(e) => {
-                log::error!("[EtherTap] MIDI clock: init failed: {e}");
-                return;
+                log::warn!("[EtherTap] MIDI clock: virtual port host init failed: {e}");
+                None
             }
         };
 
@@ -341,7 +345,7 @@ fn compute_stats(win: &[u32; STAT_WINDOW], n: usize) -> ClockStats {
 // ─── Worker implementation ─────────────────────────────────────────────────
 
 #[allow(unused_assignments)]
-fn run_worker(worker: MidiClockWorker, output: midir::MidiOutput) {
+fn run_worker(worker: MidiClockWorker, output: Option<midir::MidiOutput>) {
     use midir::MidiInputConnection;
 
     set_realtime_priority();
@@ -352,7 +356,7 @@ fn run_worker(worker: MidiClockWorker, output: midir::MidiOutput) {
     );
 
     #[cfg(unix)]
-    let mut virt_conn: Option<midir::MidiOutputConnection> = {
+    let mut virt_conn: Option<midir::MidiOutputConnection> = output.and_then(|output| {
         use midir::os::unix::VirtualOutput;
         match output.create_virtual("EtherTap MIDI Clock") {
             Ok(c) => Some(c),
@@ -366,7 +370,7 @@ fn run_worker(worker: MidiClockWorker, output: midir::MidiOutput) {
                 None
             }
         }
-    };
+    });
     #[cfg(not(unix))]
     {
         drop(output);

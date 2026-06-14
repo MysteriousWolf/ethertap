@@ -171,6 +171,32 @@ names, so ~1s after a loopback connection succeeds, `handle_port_scan`'s
 spec success criterion 2. No prior checkpoint covered this — CP4 is new
 work, not a correction of CP1-3.
 
+### 2026-06-14 — Correction: `run()` aborted the whole bridge when no ALSA seq device
+
+**What changed:** `MidiClockWorker::run()` (`src/midi_clock.rs`) no longer
+treats `midir::MidiOutput::new("EtherTap")` failure as fatal. `run_worker`'s
+`output` parameter is now `Option<midir::MidiOutput>`; `run()` maps an `Err`
+to `None` (logs a warning) instead of `return`ing early, and always calls
+`run_worker`. The `cfg(unix)` `virt_conn` block becomes
+`output.and_then(|output| ...)`, yielding `None` when no output handle is
+available.
+
+**Why:** Live CI on PR #6 (run `27498130572`, `Test / ubuntu-latest`) failed
+`clock_ticks_reach_loopback_sink_with_zero_drops` with "MIDI worker never
+connected to the loopback sink port". Root cause: ubuntu-latest GitHub
+runners have no `/dev/snd/seq`, so `MidiOutput::new("EtherTap")` returns
+`Err` and `run()` returned immediately — `run_worker` (containing the entire
+platform-independent `phys_out`/`midi-loopback` bridge from CP2-CP5) was
+never invoked. This was missed by local macOS verification because macOS
+always has a working CoreMIDI client.
+
+**Superseded:** Spec success criterion "midi_clock_tests.rs runs
+cross-platform via in-process loopback, independent of OS virtual-MIDI
+support" was not actually met by the CP1-CP5 implementation — the loopback
+path was unreachable on hosts without ALSA seq. This correction makes the
+bridge start independent of the macOS/Linux "publish our own virtual port"
+feature's host-side `MidiOutput` handle.
+
 ## Implementation log
 
 ### Shipped — 2026-06-14
