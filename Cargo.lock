@@ -934,6 +934,7 @@ dependencies = [
  "env_logger",
  "if-addrs",
  "log",
+ "midi-loopback",
  "midir",
  "mock-suite",
  "nih_plug",

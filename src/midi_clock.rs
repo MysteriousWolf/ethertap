@@ -211,13 +211,29 @@ impl MidiClockWorker {
             }
         };
 
-        #[cfg(not(target_os = "windows"))]
-        run_unix(self, output);
+        run_worker(self, output);
+    }
+}
 
-        #[cfg(target_os = "windows")]
-        {
-            drop(output);
-            log::warn!("[EtherTap] MIDI clock: virtual ports unsupported on Windows");
+// ─── Physical output: hardware midir port or in-process loopback ─────────────
+
+/// A connected `phys_out` device — either a real midir hardware port or a
+/// registered [`midi_loopback`] port. Loopback ports are interchangeable with
+/// hardware ports from the worker's point of view (see
+/// `docs/spec/cross-platform-midi-clock.md`, Approach C).
+enum PhysOutput {
+    Hardware(midir::MidiOutputConnection),
+    Loopback(Sender<Vec<u8>>),
+}
+
+impl PhysOutput {
+    /// Send a MIDI message. Mirrors `midir::MidiOutputConnection::send`'s
+    /// error-as-disconnect semantics: a loopback send failure (port full or
+    /// its receiver dropped) is treated the same as a hardware send failure.
+    fn send(&mut self, message: &[u8]) -> Result<(), ()> {
+        match self {
+            PhysOutput::Hardware(conn) => conn.send(message).map_err(|_| ()),
+            PhysOutput::Loopback(tx) => tx.try_send(message.to_vec()).map_err(|_| ()),
         }
     }
 }
@@ -322,13 +338,11 @@ fn compute_stats(win: &[u32; STAT_WINDOW], n: usize) -> ClockStats {
     }
 }
 
-// ─── Non-Windows implementation ───────────────────────────────────────────────
+// ─── Worker implementation ─────────────────────────────────────────────────
 
-#[cfg(not(target_os = "windows"))]
 #[allow(unused_assignments)]
-fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
-    use midir::os::unix::VirtualOutput;
-    use midir::{MidiInputConnection, MidiOutputConnection};
+fn run_worker(worker: MidiClockWorker, output: midir::MidiOutput) {
+    use midir::MidiInputConnection;
 
     set_realtime_priority();
 
@@ -337,22 +351,32 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
         worker.initial_device
     );
 
-    let mut virt_conn: Option<_> = match output.create_virtual("EtherTap MIDI Clock") {
-        Ok(c) => Some(c),
-        Err(e) => {
-            log::error!("[EtherTap] MIDI clock: virtual port failed: {e:?}");
-            log::error!("[EtherTap] The port may already exist from a previous run.");
-            log::error!("[EtherTap] Try: killall CoreMIDI 2>/dev/null; or reboot.");
-            log::error!("[EtherTap] MIDI clock will NOT be emitted until EtherTap is restarted.");
-            None
+    #[cfg(unix)]
+    let mut virt_conn: Option<midir::MidiOutputConnection> = {
+        use midir::os::unix::VirtualOutput;
+        match output.create_virtual("EtherTap MIDI Clock") {
+            Ok(c) => Some(c),
+            Err(e) => {
+                log::error!("[EtherTap] MIDI clock: virtual port failed: {e:?}");
+                log::error!("[EtherTap] The port may already exist from a previous run.");
+                log::error!("[EtherTap] Try: killall CoreMIDI 2>/dev/null; or reboot.");
+                log::error!(
+                    "[EtherTap] MIDI clock will NOT be emitted until EtherTap is restarted."
+                );
+                None
+            }
         }
     };
+    #[cfg(not(unix))]
+    {
+        drop(output);
+    }
 
     let (pass_tx, pass_rx) = crossbeam_channel::bounded::<Vec<u8>>(256);
     let pass_drop_count = Arc::new(AtomicU32::new(0));
 
     let mut current_device: Option<String> = worker.initial_device.clone();
-    let mut phys_out: Option<MidiOutputConnection> = None;
+    let mut phys_out: Option<PhysOutput> = None;
     // phys_in kept alive for its Drop impl (stops the CoreMIDI input callback).
     // unused_assignments: the compiler sees some stores as "unused" because the
     // value is never explicitly read — holding it IS the purpose (RAII guard).
@@ -366,13 +390,13 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
 
     // ── Initial physical device connection ────────────────────────────────────
     if let Some(ref name) = current_device {
-        log::info!("[EtherTap] run_unix: initial_device = {:?}", name);
+        log::info!("[EtherTap] run_worker: initial_device = {:?}", name);
         phys_out = try_connect_out(name);
         if phys_out.is_some() {
             phys_in = try_connect_in(name, pass_tx.clone(), pass_drop_count.clone());
         }
     } else {
-        log::info!("[EtherTap] run_unix: no initial_device (user must select)");
+        log::info!("[EtherTap] run_worker: no initial_device (user must select)");
     }
     worker
         .bridge_connected
@@ -491,6 +515,7 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
                                 if tick_count.is_multiple_of(DEBUG_LOG_INTERVAL_TICKS) {
                                     log::debug!("[EtherTap] tick #{} to virtual port, enabled={}", tick_count, worker.enabled.load(Ordering::Relaxed));
                                 }
+                                #[cfg(unix)]
                                 if let Some(ref mut vc) = virt_conn {
                                     if vc.send(CLOCK_BYTE).is_err() {
                                         log::warn!("[EtherTap] virtual port send failed — port may be disconnected");
@@ -514,9 +539,12 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
                             log::warn!("[EtherTap] MIDI passthrough: {drops} byte(s) dropped (pass channel full)");
                         }
                         if let Ok(bytes) = msg {
+                            #[cfg(unix)]
                             if let Some(ref mut vc) = virt_conn {
                                 let _ = vc.send(&bytes);
                             }
+                            #[cfg(not(unix))]
+                            let _ = bytes;
                         }
                     }
 
@@ -598,13 +626,12 @@ fn run_unix(worker: MidiClockWorker, output: midir::MidiOutput) {
 
 /// Shared port-scan logic used by both the notification callback (macOS) and
 /// the periodic timer (all platforms).
-#[cfg(not(target_os = "windows"))]
 #[allow(clippy::too_many_arguments)]
 fn handle_port_scan(
     ports_now: &[String],
     known_ports: &mut Vec<String>,
     current_device: &mut Option<String>,
-    phys_out: &mut Option<midir::MidiOutputConnection>,
+    phys_out: &mut Option<PhysOutput>,
     phys_in: &mut Option<midir::MidiInputConnection<()>>,
     backoff: &mut crate::reconnect::Backoff,
     pass_tx: &crossbeam_channel::Sender<Vec<u8>>,
@@ -684,8 +711,17 @@ fn handle_port_scan(
     }
 }
 
-#[cfg(not(target_os = "windows"))]
-fn try_connect_out(device_name: &str) -> Option<midir::MidiOutputConnection> {
+/// Try to connect `phys_out` to `device_name`. First consults the
+/// [`midi_loopback`] registry — a registered loopback port under this name is
+/// interchangeable with a hardware port (see
+/// `docs/spec/cross-platform-midi-clock.md`, Approach C). Falls back to midir
+/// hardware port enumeration if no loopback port is registered.
+fn try_connect_out(device_name: &str) -> Option<PhysOutput> {
+    if let Ok(tx) = midi_loopback::connect(device_name) {
+        log::info!("[EtherTap] try_connect_out: connected to loopback port '{device_name}'");
+        return Some(PhysOutput::Loopback(tx));
+    }
+
     let out = match midir::MidiOutput::new("EtherTap-PhysOut") {
         Ok(o) => o,
         Err(e) => {
@@ -707,7 +743,7 @@ fn try_connect_out(device_name: &str) -> Option<midir::MidiOutputConnection> {
     match out.connect(&port, "EtherTap-PhysOut") {
         Ok(c) => {
             log::info!("[EtherTap] try_connect_out: connected to '{device_name}'");
-            Some(c)
+            Some(PhysOutput::Hardware(c))
         }
         Err(e) => {
             log::warn!("[EtherTap] try_connect_out: connect to '{device_name}' failed: {e}");
@@ -719,12 +755,23 @@ fn try_connect_out(device_name: &str) -> Option<midir::MidiOutputConnection> {
 /// Open a MIDI input on `device_name` and forward every non-clock byte to
 /// `pass_tx`.  0xF8 bytes are dropped — EtherTap is the clock master.
 /// `drop_count` is incremented when the pass channel is full (silent drop).
-#[cfg(not(target_os = "windows"))]
+///
+/// If `device_name` is registered in the [`midi_loopback`] registry, input
+/// passthrough is unavailable for it (loopback ports are output-only sinks
+/// from the worker's point of view) — this returns `None`, which the caller
+/// already logs as "passthrough unavailable".
 fn try_connect_in(
     device_name: &str,
     pass_tx: Sender<Vec<u8>>,
     drop_count: Arc<AtomicU32>,
 ) -> Option<midir::MidiInputConnection<()>> {
+    if midi_loopback::connect(device_name).is_ok() {
+        log::info!(
+            "[EtherTap] try_connect_in: '{device_name}' is a loopback port — no input passthrough"
+        );
+        return None;
+    }
+
     use midir::MidiInput;
     let inp = match MidiInput::new("EtherTap-PhysIn") {
         Ok(i) => i,
@@ -850,11 +897,6 @@ mod tests {
 
     /// Builds a `MidiClockWorker` with dummy channels/atomics for exercising
     /// `handle_port_scan` directly — no real MIDI I/O involved.
-    ///
-    /// `handle_port_scan` itself is `cfg(not(target_os = "windows"))` (port
-    /// scanning is part of the unix/macOS-style worker loop), so this helper
-    /// and its callers are gated the same way.
-    #[cfg(not(target_os = "windows"))]
     fn make_test_worker(auto_connect: bool) -> MidiClockWorker {
         let (_clock_tx, clock_rx) = crossbeam_channel::bounded(1);
         let (_dc_tx, device_change_rx) = crossbeam_channel::bounded(1);
@@ -878,7 +920,6 @@ mod tests {
     /// selected" guard). The actual `try_connect_out` will fail in CI (no real
     /// port named "Fake Device 1"), but the auto-pick of `current_device`
     /// itself is the deterministic, testable signal that the guard fired.
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn handle_port_scan_auto_connect_on_picks_first_device_when_none_selected() {
         let worker = make_test_worker(true);
@@ -911,7 +952,6 @@ mod tests {
 
     /// OFF (default) → zero behavior change: no auto-pick, `current_device`
     /// stays `None`, connection remains fully manual.
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn handle_port_scan_auto_connect_off_is_a_no_op() {
         let worker = make_test_worker(false);
@@ -950,5 +990,49 @@ mod tests {
         assert_eq!(stats.p99_us, 0);
         assert_eq!(stats.max_us, 0);
         assert_eq!(stats.sample_n, 0);
+    }
+
+    /// `try_connect_out` consults the `midi_loopback` registry by name before
+    /// falling back to midir hardware enumeration — a registered loopback
+    /// port is interchangeable with a hardware port.
+    #[test]
+    fn try_connect_out_finds_registered_loopback_port() {
+        let name = format!(
+            "EtherTap Test Loopback Out {}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        );
+        let port = midi_loopback::register(&name, midi_loopback::DEFAULT_CAPACITY)
+            .expect("register should succeed");
+
+        let mut out = try_connect_out(&name).expect("should connect to registered loopback port");
+        out.send(&[0xF8]).expect("send to loopback should succeed");
+
+        let received = port
+            .try_recv()
+            .expect("loopback port should receive the sent message");
+        assert_eq!(received, vec![0xF8]);
+    }
+
+    /// `try_connect_in` recognizes a registered loopback port by name and
+    /// returns `None` (no input passthrough for loopback-backed devices)
+    /// rather than falling through to a hardware port search.
+    #[test]
+    fn try_connect_in_returns_none_for_registered_loopback_port() {
+        let name = format!(
+            "EtherTap Test Loopback In {}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        );
+        let _port = midi_loopback::register(&name, midi_loopback::DEFAULT_CAPACITY)
+            .expect("register should succeed");
+
+        let (pass_tx, _pass_rx) = crossbeam_channel::bounded::<Vec<u8>>(16);
+        let drop_count = Arc::new(AtomicU32::new(0));
+
+        assert!(
+            try_connect_in(&name, pass_tx, drop_count).is_none(),
+            "loopback-backed devices have no input passthrough"
+        );
     }
 }
