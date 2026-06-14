@@ -20,12 +20,12 @@ use mock_suite::loopback_sink::LoopbackClockSink;
 use vst_runtime::Harness;
 
 #[test]
-fn clock_ticks_reach_virtual_sink_with_zero_drops() {
+fn clock_ticks_reach_loopback_sink_with_zero_drops() {
     let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     // Sink must exist before the plugin scans for devices. Unique name:
-    // CoreMIDI can surface phantom stale destinations under a reused name,
-    // and the worker connects to the first name match.
+    // the loopback registry can collide on a reused name across concurrent
+    // test runs / processes, and the worker connects to the first name match.
     let sink_name = format!("EtherTap Test Sink {}", std::process::id());
     let sink = LoopbackClockSink::start_named(&sink_name).expect("loopback sink should register");
 
@@ -46,7 +46,7 @@ fn clock_ticks_reach_virtual_sink_with_zero_drops() {
     while !handles.midi_bridge_connected.load(Ordering::Acquire) {
         assert!(
             Instant::now() < bridge_deadline,
-            "MIDI worker never connected to the virtual sink port"
+            "MIDI worker never connected to the loopback sink port"
         );
         std::thread::sleep(Duration::from_millis(20));
     }
