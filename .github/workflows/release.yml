@@ -144,11 +144,41 @@ jobs:
       contents: write
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+
       - name: Download all platform artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts/
           merge-multiple: true
+
+      # Auto-generated PR notes + raw commit log since the previous tag, so
+      # the release covers both squash-merged PRs and any direct commits.
+      - name: Build release notes
+        id: notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          prev_tag=$(git tag --sort=-creatordate | grep -v "^${TAG}$" | head -1)
+
+          if [ -n "$prev_tag" ]; then
+            gh api "repos/${{ github.repository }}/releases/generate-notes" \
+              -f tag_name="$TAG" -f previous_tag_name="$prev_tag" --jq .body > notes.md
+            echo "" >> notes.md
+            echo "## Commits" >> notes.md
+            git log "${prev_tag}..${TAG}" --pretty='- %h %s' >> notes.md
+          else
+            gh api "repos/${{ github.repository }}/releases/generate-notes" \
+              -f tag_name="$TAG" --jq .body > notes.md
+            echo "" >> notes.md
+            echo "## Commits" >> notes.md
+            git log "${TAG}" --pretty='- %h %s' >> notes.md
+          fi
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -158,4 +188,4 @@ jobs:
           files: artifacts/**
           draft: ${{ inputs.draft || false }}
           prerelease: ${{ inputs.prerelease || false }}
-          generate_release_notes: true
+          body_path: notes.md
