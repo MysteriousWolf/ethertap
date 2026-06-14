@@ -850,6 +850,11 @@ mod tests {
 
     /// Builds a `MidiClockWorker` with dummy channels/atomics for exercising
     /// `handle_port_scan` directly — no real MIDI I/O involved.
+    ///
+    /// `handle_port_scan` itself is `cfg(not(target_os = "windows"))` (port
+    /// scanning is part of the unix/macOS-style worker loop), so this helper
+    /// and its callers are gated the same way.
+    #[cfg(not(target_os = "windows"))]
     fn make_test_worker(auto_connect: bool) -> MidiClockWorker {
         let (_clock_tx, clock_rx) = crossbeam_channel::bounded(1);
         let (_dc_tx, device_change_rx) = crossbeam_channel::bounded(1);
@@ -873,6 +878,7 @@ mod tests {
     /// selected" guard). The actual `try_connect_out` will fail in CI (no real
     /// port named "Fake Device 1"), but the auto-pick of `current_device`
     /// itself is the deterministic, testable signal that the guard fired.
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn handle_port_scan_auto_connect_on_picks_first_device_when_none_selected() {
         let worker = make_test_worker(true);
@@ -905,6 +911,7 @@ mod tests {
 
     /// OFF (default) → zero behavior change: no auto-pick, `current_device`
     /// stays `None`, connection remains fully manual.
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn handle_port_scan_auto_connect_off_is_a_no_op() {
         let worker = make_test_worker(false);

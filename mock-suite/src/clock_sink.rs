@@ -16,6 +16,8 @@ use midir::os::unix::VirtualInput;
 use midir::{Ignore, MidiInput, MidiInputConnection};
 use parking_lot::Mutex;
 
+use crate::SinkStats;
+
 pub const SINK_PORT_NAME: &str = "EtherTap Mock MIDI Sink";
 
 const CLOCK_BYTE: u8 = 0xF8;
@@ -42,27 +44,6 @@ struct SinkState {
     last_hex: String,
     last_ts_ms: u64,
     last_clock_ts_ms: u64,
-}
-
-/// Snapshot of computed statistics. `None`-like when fewer than 2 clocks have
-/// arrived (see [`MidiClockSink::stats`]).
-#[derive(Debug, Clone, Default)]
-pub struct SinkStats {
-    pub bpm: f64,
-    pub bpm_history: Vec<f64>,
-    pub total_clocks: u64,
-    pub other_msgs: u64,
-    pub sample_count: usize,
-    pub mean_us: f64,
-    pub std_us: f64,
-    pub p50_us: f64,
-    pub p75_us: f64,
-    pub p95_us: f64,
-    pub p99_us: f64,
-    pub max_us: f64,
-    pub last_hex: String,
-    pub last_ts_ms: u64,
-    pub last_clock_ts_ms: u64,
 }
 
 pub struct MidiClockSink {

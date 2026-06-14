@@ -1,9 +1,18 @@
 //! Loopback diagnostic: open the sink, connect a MidiOutput to it directly,
 //! send 0xF8 bytes, report what the sink counted.
+//!
+//! Virtual MIDI ports are a CoreMIDI/ALSA feature — unix-only, matching
+//! `mock_suite::clock_sink`.
 
-use std::time::Duration;
-
+#[cfg(not(unix))]
 fn main() {
+    eprintln!("sink_loopback: unix-only (virtual MIDI ports)");
+}
+
+#[cfg(unix)]
+fn main() {
+    use std::time::Duration;
+
     let sink = mock_suite::MidiClockSink::start().expect("open sink");
     std::thread::sleep(Duration::from_millis(300));
 
