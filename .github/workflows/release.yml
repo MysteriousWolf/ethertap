@@ -1,17 +1,46 @@
 name: Release
 
-# Triggered automatically when a version tag is pushed (e.g. v1.0.0),
-# or manually via the Actions tab with an optional version label.
+# Two ways to run this:
+# - Manually via the Actions tab with an optional version label — a dev
+#   build with no GitHub Release.
+# - As a reusable workflow called by tag-release.yml (the "Tag Release"
+#   button), which supplies `tag`/`prerelease`/`draft` and publishes a
+#   GitHub Release. Not triggered directly by tag pushes — tag-release.yml
+#   is the single path to a release, so a tag push doesn't double-run this.
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version label (e.g. v1.0.0) — defaults to dev'
+        description: 'Version label for a dev build (e.g. v1.0.0) — defaults to dev. Ignored if tag is set.'
         required: false
         default: 'dev'
+      tag:
+        description: 'Tag to build and release (internal — set by Tag Release)'
+        required: false
+        default: ''
+      prerelease:
+        description: 'Mark as pre-release'
+        type: boolean
+        default: false
+      draft:
+        description: 'Create as draft (not published)'
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Tag to build and release'
+        type: string
+        required: false
+        default: ''
+      prerelease:
+        description: 'Mark as pre-release'
+        type: boolean
+        default: false
+      draft:
+        description: 'Create as draft (not published)'
+        type: boolean
+        default: false
 
 jobs:
   # ── Full CI gate: a release never ships untested code ───────────────────────
@@ -43,6 +72,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
@@ -85,7 +116,7 @@ jobs:
 
       - name: Build and package
         env:
-          VERSION: ${{ github.ref_type == 'tag' && github.ref_name || inputs.version || 'dev' }}
+          VERSION: ${{ inputs.tag || inputs.version || 'dev' }}
         run: bash ./scripts/build.sh ${{ matrix.build_args }}
         shell: bash
 
@@ -103,7 +134,7 @@ jobs:
     name: Publish Release
     needs: build
     runs-on: ubuntu-latest
-    if: github.ref_type == 'tag'
+    if: inputs.tag != ''
     permissions:
       contents: write
 
@@ -117,7 +148,9 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: EtherTap ${{ github.ref_name }}
+          tag_name: ${{ inputs.tag }}
+          name: EtherTap ${{ inputs.tag }}
           files: artifacts/**
-          draft: false
+          draft: ${{ inputs.draft || false }}
+          prerelease: ${{ inputs.prerelease || false }}
           generate_release_notes: true
