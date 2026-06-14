@@ -934,6 +934,7 @@ dependencies = [
  "env_logger",
  "if-addrs",
  "log",
+ "midi-loopback",
  "midir",
  "mock-suite",
  "nih_plug",
@@ -1682,6 +1683,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6f2dd5c7f8aaf48a76e389068ab25ed80bdbc226b887f9013844c415698c9952"
 
 [[package]]
+name = "midi-loopback"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "parking_lot 0.12.5",
+]
+
+[[package]]
 name = "midir"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1729,7 +1738,9 @@ name = "mock-suite"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "crossbeam-channel",
  "crossterm",
+ "midi-loopback",
  "midir",
  "parking_lot 0.12.5",
  "ratatui",

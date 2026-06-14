@@ -1,0 +1,79 @@
+name: Tag Release
+
+# Manual button (Actions tab → Tag Release → Run workflow). Computes the next
+# version number, tags HEAD, pushes the tag, then calls release.yml to build
+# for all platforms and publish the GitHub Release.
+#
+# Versioning scheme: <YY>.<N> — YY = two-digit year, N = release sequence
+# within that year, starting at 1. E.g. 26.1, 26.2, ..., 28.33.
+on:
+  workflow_dispatch:
+    inputs:
+      prerelease:
+        description: 'Mark as pre-release'
+        type: boolean
+        default: false
+      draft:
+        description: 'Create as draft (not published, review before publishing)'
+        type: boolean
+        default: false
+      version_override:
+        description: 'Override the computed version (e.g. 26.5) — leave empty to auto-increment'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    name: Create release tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute next version
+        id: version
+        run: |
+          override="${{ inputs.version_override }}"
+          if [ -n "$override" ]; then
+            tag="v${override#v}"
+          else
+            year_suffix=$(date +%y)
+            last=$(git tag -l "v${year_suffix}.*" | sed "s/^v${year_suffix}\.//" | sort -n | tail -1)
+            if [ -z "$last" ]; then
+              next=1
+            else
+              next=$((last + 1))
+            fi
+            tag="v${year_suffix}.${next}"
+          fi
+
+          if git rev-parse "$tag" >/dev/null 2>&1; then
+            echo "Tag $tag already exists." >&2
+            exit 1
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "==> Next version: $tag"
+
+      - name: Create and push tag
+        run: |
+          git tag "${{ steps.version.outputs.tag }}"
+          git push origin "${{ steps.version.outputs.tag }}"
+
+  release:
+    name: Build & Release
+    needs: tag
+    uses: ./.github/workflows/release.yml
+    permissions:
+      contents: write
+    with:
+      tag: ${{ needs.tag.outputs.tag }}
+      prerelease: ${{ inputs.prerelease }}
+      draft: ${{ inputs.draft }}

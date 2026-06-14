@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "xtask", "vst-runtime", "mock-suite"]
+members = [".", "xtask", "vst-runtime", "mock-suite", "midi-loopback"]
 resolver = "2"
 
 [package]
@@ -30,6 +30,7 @@ log = "0.4"
 env_logger = "0.11"
 if-addrs = "0.10"
 midir = "0.9"
+midi-loopback = { path = "midi-loopback" }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

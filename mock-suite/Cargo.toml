@@ -13,6 +13,8 @@ clap = { version = "4", features = ["derive"] }
 ratatui = "0.29"
 crossterm = "0.28"
 serde_json = "1"
+crossbeam-channel = "0.5"
+midi-loopback = { path = "../midi-loopback" }
 
 [[bin]]
 name = "mock-suite"

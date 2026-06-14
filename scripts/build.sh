@@ -8,7 +8,7 @@
 #                 Requires both targets:
 #                   rustup target add aarch64-apple-darwin x86_64-apple-darwin
 #
-# Output: dist/ethertap-{version}-{platform}.vst3
+# Output: dist/ethertap-{version}-{platform}.vst3.zip
 #
 # Set VERSION in the environment to override the value from Cargo.toml
 # (CI sets it from the git tag).
@@ -92,11 +92,31 @@ fi
 
 # ── Export ─────────────────────────────────────────────────────────────────────
 mkdir -p dist
-DEST="$REPO_ROOT/dist/ethertap-${VERSION}-${PLATFORM}.vst3"
+EXPORT_NAME="ethertap-${VERSION}-${PLATFORM}.vst3"
+DEST="$REPO_ROOT/dist/$EXPORT_NAME"
 
 rm -rf "$DEST"
 cp -R "$BUNDLE_DIR/$BUNDLE_NAME" "$DEST"
-echo "==> Exported: dist/ethertap-${VERSION}-${PLATFORM}.vst3"
+echo "==> Exported: dist/$EXPORT_NAME"
+
+# ── Package ────────────────────────────────────────────────────────────────────
+# VST3 is a directory bundle on every platform; zip it so CI's
+# upload-artifact step (dist/*.zip) has a single file to find.
+cd dist
+rm -f "${EXPORT_NAME}.zip" "${EXPORT_NAME}.sha256"
+zip -r -q "${EXPORT_NAME}.zip" "$EXPORT_NAME"
+echo "==> Packaged: dist/${EXPORT_NAME}.zip"
+
+# ── Checksum ───────────────────────────────────────────────────────────────────
+# Named after the .vst3 bundle (not the .zip) so it's obvious which plugin
+# build the checksum verifies.
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256sum "${EXPORT_NAME}.zip" > "${EXPORT_NAME}.sha256"
+else
+  shasum -a 256 "${EXPORT_NAME}.zip" > "${EXPORT_NAME}.sha256"
+fi
+echo "==> Checksum: dist/${EXPORT_NAME}.sha256"
+cd "$REPO_ROOT"
 
 echo ""
 echo "Bundle: $BUNDLE_DIR/$BUNDLE_NAME"
