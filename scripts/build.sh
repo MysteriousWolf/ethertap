@@ -8,7 +8,7 @@
 #                 Requires both targets:
 #                   rustup target add aarch64-apple-darwin x86_64-apple-darwin
 #
-# Output: dist/ethertap-{version}-{platform}.vst3
+# Output: dist/ethertap-{version}-{platform}.vst3.zip
 #
 # Set VERSION in the environment to override the value from Cargo.toml
 # (CI sets it from the git tag).
@@ -100,24 +100,12 @@ cp -R "$BUNDLE_DIR/$BUNDLE_NAME" "$DEST"
 echo "==> Exported: dist/$EXPORT_NAME"
 
 # ── Package ────────────────────────────────────────────────────────────────────
-# Archive the bundle so CI's upload-artifact step (dist/*.zip on macOS/Windows,
-# dist/*.tar.gz on Linux) has something to find.
+# VST3 is a directory bundle on every platform; zip it so CI's
+# upload-artifact step (dist/*.zip) has a single file to find.
 cd dist
-case "$OS" in
-  Darwin|MINGW*|MSYS*|CYGWIN*)
-    rm -f "${EXPORT_NAME}.zip"
-    zip -r -q "${EXPORT_NAME}.zip" "$EXPORT_NAME"
-    echo "==> Packaged: dist/${EXPORT_NAME}.zip"
-    ;;
-  Linux)
-    rm -f "${EXPORT_NAME}.tar.gz"
-    tar -czf "${EXPORT_NAME}.tar.gz" "$EXPORT_NAME"
-    echo "==> Packaged: dist/${EXPORT_NAME}.tar.gz"
-    ;;
-  *)
-    echo "Warning: no packaging defined for $OS" >&2
-    ;;
-esac
+rm -f "${EXPORT_NAME}.zip"
+zip -r -q "${EXPORT_NAME}.zip" "$EXPORT_NAME"
+echo "==> Packaged: dist/${EXPORT_NAME}.zip"
 cd "$REPO_ROOT"
 
 echo ""

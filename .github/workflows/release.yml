@@ -41,7 +41,7 @@ jobs:
           - os: ubuntu-latest
             build_args: ''
             rust_targets: ''
-            artifact_pattern: dist/*.tar.gz
+            artifact_pattern: dist/*.zip
 
     steps:
       - name: Checkout
@@ -114,6 +114,10 @@ jobs:
         with:
           path: artifacts/
           merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: artifacts
+        run: sha256sum * > SHA256SUMS.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
