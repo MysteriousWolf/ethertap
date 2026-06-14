@@ -103,9 +103,19 @@ echo "==> Exported: dist/$EXPORT_NAME"
 # VST3 is a directory bundle on every platform; zip it so CI's
 # upload-artifact step (dist/*.zip) has a single file to find.
 cd dist
-rm -f "${EXPORT_NAME}.zip"
+rm -f "${EXPORT_NAME}.zip" "${EXPORT_NAME}.sha256"
 zip -r -q "${EXPORT_NAME}.zip" "$EXPORT_NAME"
 echo "==> Packaged: dist/${EXPORT_NAME}.zip"
+
+# ── Checksum ───────────────────────────────────────────────────────────────────
+# Named after the .vst3 bundle (not the .zip) so it's obvious which plugin
+# build the checksum verifies.
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256sum "${EXPORT_NAME}.zip" > "${EXPORT_NAME}.sha256"
+else
+  shasum -a 256 "${EXPORT_NAME}.zip" > "${EXPORT_NAME}.sha256"
+fi
+echo "==> Checksum: dist/${EXPORT_NAME}.sha256"
 cd "$REPO_ROOT"
 
 echo ""

@@ -1,0 +1,43 @@
+name: Tag Release
+
+# Manual button (Actions tab → Tag Release → Run workflow). Computes the next
+# version number, tags HEAD, and pushes the tag. The tag push triggers
+# release.yml, which builds for all platforms and publishes the GitHub
+# Release with auto-generated notes.
+#
+# Versioning scheme: <YY>.<N> — YY = two-digit year, N = release sequence
+# within that year, starting at 1. E.g. 26.1, 26.2, ..., 28.33.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    name: Create release tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute next version
+        id: version
+        run: |
+          year_suffix=$(date +%y)
+          last=$(git tag -l "v${year_suffix}.*" | sed "s/^v${year_suffix}\.//" | sort -n | tail -1)
+          if [ -z "$last" ]; then
+            next=1
+          else
+            next=$((last + 1))
+          fi
+          tag="v${year_suffix}.${next}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "==> Next version: $tag"
+
+      - name: Create and push tag
+        run: |
+          git tag "${{ steps.version.outputs.tag }}"
+          git push origin "${{ steps.version.outputs.tag }}"

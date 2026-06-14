@@ -31,17 +31,14 @@ jobs:
           - os: macos-latest
             build_args: --universal
             rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
-            artifact_pattern: dist/*.zip
 
           - os: windows-latest
             build_args: ''
             rust_targets: ''
-            artifact_pattern: dist/*.zip
 
           - os: ubuntu-latest
             build_args: ''
             rust_targets: ''
-            artifact_pattern: dist/*.zip
 
     steps:
       - name: Checkout
@@ -96,7 +93,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ethertap-${{ matrix.os }}
-          path: ${{ matrix.artifact_pattern }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
           if-no-files-found: error
 
   # ── GitHub Release (tag builds only) ────────────────────────────────────────
@@ -114,10 +113,6 @@ jobs:
         with:
           path: artifacts/
           merge-multiple: true
-
-      - name: Generate checksums
-        working-directory: artifacts
-        run: sha256sum * > SHA256SUMS.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
