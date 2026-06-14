@@ -170,3 +170,39 @@ names, so ~1s after a loopback connection succeeds, `handle_port_scan`'s
 `!present && phys_out.is_some()` branch disconnects it again. This blocks
 spec success criterion 2. No prior checkpoint covered this — CP4 is new
 work, not a correction of CP1-3.
+
+## Implementation log
+
+### Shipped — 2026-06-14
+
+Built across 6 iterations of `/subagent-implementation`. Commits (chronological):
+
+- `eadfc8d` — CP1: new `midi-loopback` crate (named-port registry over `crossbeam_channel`, 7 unit tests)
+- `6298713` — CP2: `run_unix`→`run_worker` unconditional, `PhysOutput` enum, `try_connect_out`/`try_connect_in` consult `midi-loopback`
+- `a1d4364` — CP3: extract `SinkState`, add ungated `mock-suite::loopback_sink::LoopbackClockSink`
+- `26649e1` — CP4 (inserted): `midi_loopback::registered_names()` + union into `handle_port_scan`'s presence check
+- `1467a69` — CP5: rewire `tests/midi_clock_tests.rs` to `LoopbackClockSink`, drop `cfg(unix)`
+- `b3e7243` — polish: reword stale CoreMIDI/"virtual sink" comments in `tests/midi_clock_tests.rs` (FOLLOWUPS F-5/F-6)
+
+**Out-of-scope work performed during this build:**
+- none
+
+**Unforeseens — surprises that emerged during implementation:**
+- CP2's loopback-registry consult only covered the connect path, not the
+  periodic port-scan's presence check — caused CP5's e2e test to fail
+  ("got 11" clocks, need ≥48) because `handle_port_scan` disconnected the
+  loopback `phys_out` ~1s after connecting. Required inserting a new CP4
+  (`midi_loopback::registered_names()` + `ports_now` union) ahead of CP5;
+  see Change log entry above.
+
+**Deferred items still open:**
+- FOLLOWUPS F-1 (`midi-loopback` `send()` collapses `NotFound` variants),
+  F-2 (`try_connect_in` returns `None` for loopback devices — no
+  passthrough), F-3 (`LoopbackClockSink::start_named` loses `LoopbackError`
+  structure), F-4 (`loopback_sink` drain-loop `Disconnected` branch leaves
+  `is_running()` stale) — all dropped by user at finalization triage
+  (2026-06-14): low-priority, consistent with current scope, no current
+  caller needs the distinctions.
+- F-5/F-6 (stale wording in `tests/midi_clock_tests.rs`) — fixed, commit `b3e7243`.
+- Separate, deferred: Windows `harness_e2e::force_sync_rate_dispatches_osc_to_compatible_slots`
+  failure — unrelated OSC-sync timing issue, out of scope per this spec's Non-goals, not started.
