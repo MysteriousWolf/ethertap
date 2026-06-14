@@ -19,12 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # windows-latest/ubuntu-latest disabled: MIDI is only exercised on
-        # macOS in practice, and the Linux/Windows builds currently fail on
-        # unrelated pre-existing issues (missing xcb link libs on Linux;
-        # cfg(unix)-gated mock-suite/midi_clock items referenced
-        # unconditionally on Windows). Re-enable once those are fixed.
-        os: [macos-latest]
+        os: [macos-latest, ubuntu-latest, windows-latest]
 
     steps:
       - name: Checkout
@@ -63,7 +58,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             libasound2-dev libgl1-mesa-dev libx11-dev libx11-xcb-dev \
-            libxcb-icccm4-dev libxcb-dri2-0-dev libxcursor-dev
+            libxcb-icccm4-dev libxcb-dri2-0-dev libxcursor-dev libjack-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
 
       - name: Set up vendor
         run: bash ./scripts/setup.sh
