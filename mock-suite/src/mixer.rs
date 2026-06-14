@@ -311,7 +311,11 @@ fn run_mock_mixer(
                 }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(_) => break,
+            // On Windows, an unsolicited send to a now-closed peer port can
+            // surface here as ECONNRESET on the *next* recv_from (ICMP port
+            // unreachable). It's transient and unrelated to this socket's own
+            // health -- keep listening instead of exiting the receive loop.
+            Err(_) => {}
         }
     }
 }
