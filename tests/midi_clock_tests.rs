@@ -1,12 +1,13 @@
-//! MIDI clock verification through the mock-suite virtual sink.
+//! MIDI clock verification through the mock-suite loopback sink.
 //!
-//! EtherTap's clock worker connects to the sink's virtual input port
-//! ("EtherTap Mock MIDI Sink"); the harness drives playing buffers with
-//! advancing song position so the DAW-mode tick scheduler emits 0xF8 bytes.
-//! Virtual MIDI ports are CoreMIDI/ALSA features — these tests are unix-only.
+//! EtherTap's clock worker connects to the sink's registered loopback port
+//! ("EtherTap Test Sink {pid}") via the in-process `midi-loopback` registry;
+//! the harness drives playing buffers with advancing song position so the
+//! DAW-mode tick scheduler emits 0xF8 bytes. The loopback registry has no
+//! OS virtual-MIDI dependency, so these tests run cross-platform.
 //! Standalone builds derive ticks from UI atomics, not the transport these
-//! tests drive, so they're VST3-build-only too.
-#![cfg(all(unix, not(feature = "standalone")))]
+//! tests drive, so they're VST3-build-only.
+#![cfg(not(feature = "standalone"))]
 
 mod common;
 
@@ -15,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use common::harness_util::{step_at, E2E_LOCK};
 use ethertap::EtherTap;
-use mock_suite::MidiClockSink;
+use mock_suite::loopback_sink::LoopbackClockSink;
 use vst_runtime::Harness;
 
 #[test]
@@ -26,7 +27,7 @@ fn clock_ticks_reach_virtual_sink_with_zero_drops() {
     // CoreMIDI can surface phantom stale destinations under a reused name,
     // and the worker connects to the first name match.
     let sink_name = format!("EtherTap Test Sink {}", std::process::id());
-    let sink = MidiClockSink::start_named(&sink_name).expect("virtual MIDI sink should open");
+    let sink = LoopbackClockSink::start_named(&sink_name).expect("loopback sink should register");
 
     let mut harness = Harness::<EtherTap>::new(44_100.0, 256).expect("EtherTap should initialize");
     let params = harness.plugin().ethertap_params();
@@ -53,7 +54,7 @@ fn clock_ticks_reach_virtual_sink_with_zero_drops() {
     // midi_clock_enabled defaults true. Drive playing buffers with advancing
     // position at 120 BPM / 24 PPQ: one tick every 91.875 samples → ~2.8
     // ticks per 256-sample buffer. Sleep between steps so the worker thread
-    // forwards ticks to the (real) CoreMIDI/ALSA port.
+    // forwards ticks to the loopback port.
     let deadline = Instant::now() + Duration::from_secs(8);
     let mut pos: i64 = 0;
     while sink.total_clocks() < 48 && Instant::now() < deadline {
