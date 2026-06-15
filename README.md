@@ -30,6 +30,15 @@ bundle to your plugin folder:
 | Windows | `C:\Program Files\Common Files\VST3\` |
 | Linux | `~/.vst3/` |
 
+### macOS: "EtherTap.vst3 is damaged and can't be opened"
+
+Builds aren't notarized, so Gatekeeper quarantines the downloaded bundle. Remove
+the quarantine flag after copying it into place:
+
+```sh
+xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/VST3/EtherTap.vst3
+```
+
 ---
 
 ## Connecting
