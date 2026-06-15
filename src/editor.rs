@@ -2243,6 +2243,7 @@ fn section<'a>(
                     .width(Length::Fill),
             )
             .height(Length::Fill)
+            .center_y()
             .style(ModSection),
         )
         .height(height)
