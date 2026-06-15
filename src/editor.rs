@@ -2150,7 +2150,7 @@ impl IcedEditor for EtherTapEditor {
                 "MIXER",
                 Column::new()
                     .push(net_row)
-                    .push(Space::with_height(4.into()))
+                    .push(Space::with_height(6.into()))
                     .push(telem_row)
                     .into(),
                 Length::FillPortion(2),
