@@ -24,6 +24,7 @@ on:
 
 permissions:
   contents: write
+  models: read
 
 jobs:
   tag:
@@ -73,6 +74,7 @@ jobs:
     uses: ./.github/workflows/release.yml
     permissions:
       contents: write
+      models: read
     with:
       tag: ${{ needs.tag.outputs.tag }}
       prerelease: ${{ inputs.prerelease }}
