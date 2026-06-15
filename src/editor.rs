@@ -2153,6 +2153,7 @@ impl IcedEditor for EtherTapEditor {
                     .push(Space::with_height(4.into()))
                     .push(telem_row)
                     .into(),
+                Length::FillPortion(1),
             ))
             .push(Space::with_height(Length::Units(SECTION_GAP)))
             .push(section(
@@ -2162,6 +2163,7 @@ impl IcedEditor for EtherTapEditor {
                     .push(Space::with_height(3.into()))
                     .push(fx_line2)
                     .into(),
+                Length::FillPortion(1),
             ))
             .push(Space::with_height(Length::Units(SECTION_GAP)))
             .push(section(
@@ -2171,20 +2173,24 @@ impl IcedEditor for EtherTapEditor {
                     .push(Space::with_height(3.into()))
                     .push(clock_stats_row)
                     .into(),
+                Length::FillPortion(1),
             ))
             .push(Space::with_height(Length::Units(SECTION_GAP)))
-            .push(section("SYNC", rate_row.into()))
+            .push(section("SYNC", rate_row.into(), Length::FillPortion(1)))
             .padding([0, 5, 4, 5])
-            .spacing(0);
+            .spacing(0)
+            .height(Length::Fill);
 
         // One coherent plugin surface: banner (edge-to-edge) + all four
         // sections inside a single outer frame.  Identical column in both
         // modes; each cfg block below wraps it in a `PluginFrame` container
-        // at its mode's dimensions.
+        // at its mode's dimensions. `content` is the only `Length::Fill`
+        // child, so it absorbs all space left over after the banner.
         let plugin_column = Column::new()
             .push(banner)
             .push(Space::with_height(Length::Units(4)))
-            .push(content);
+            .push(content)
+            .height(Length::Fill);
 
         // ── Standalone DAW frame (compiled only with --features standalone) ──
         // The shell is a free function over `&mut self.daw` (one field borrow)
@@ -2223,7 +2229,11 @@ impl IcedEditor for EtherTapEditor {
 /// (MIXER / EFFECTS / MIDI / SYNC) uses: dim uppercase title sitting on the
 /// frame's top edge, content inside a `ModSection`-styled container with the
 /// shared `SECTION_PAD` inset.
-fn section<'a>(title: &'static str, content: Element<'a, Message>) -> Element<'a, Message> {
+fn section<'a>(
+    title: &'static str,
+    content: Element<'a, Message>,
+    height: Length,
+) -> Element<'a, Message> {
     Column::new()
         .push(t!(title).size(SECTION_TITLE_SIZE).color(THEME.text_dim))
         .push(
@@ -2232,8 +2242,10 @@ fn section<'a>(title: &'static str, content: Element<'a, Message>) -> Element<'a
                     .padding(SECTION_PAD)
                     .width(Length::Fill),
             )
+            .height(Length::Fill)
             .style(ModSection),
         )
+        .height(height)
         .into()
 }
 
