@@ -2153,7 +2153,7 @@ impl IcedEditor for EtherTapEditor {
                     .push(Space::with_height(4.into()))
                     .push(telem_row)
                     .into(),
-                Length::FillPortion(1),
+                Length::FillPortion(2),
             ))
             .push(Space::with_height(Length::Units(SECTION_GAP)))
             .push(section(
@@ -2163,7 +2163,7 @@ impl IcedEditor for EtherTapEditor {
                     .push(Space::with_height(3.into()))
                     .push(fx_line2)
                     .into(),
-                Length::FillPortion(1),
+                Length::FillPortion(2),
             ))
             .push(Space::with_height(Length::Units(SECTION_GAP)))
             .push(section(
@@ -2173,7 +2173,7 @@ impl IcedEditor for EtherTapEditor {
                     .push(Space::with_height(3.into()))
                     .push(clock_stats_row)
                     .into(),
-                Length::FillPortion(1),
+                Length::FillPortion(2),
             ))
             .push(Space::with_height(Length::Units(SECTION_GAP)))
             .push(section("SYNC", rate_row.into(), Length::FillPortion(1)))
