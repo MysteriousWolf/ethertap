@@ -8,7 +8,7 @@ publish = false
 [dependencies]
 rosc = "0.10"
 parking_lot = "0.12"
-midir = "0.9"
+midir = "0.11"
 clap = { version = "4", features = ["derive"] }
 ratatui = "0.29"
 crossterm = "0.28"

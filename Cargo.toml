@@ -29,7 +29,7 @@ parking_lot = "0.12"
 log = "0.4"
 env_logger = "0.11"
 if-addrs = "0.10"
-midir = "0.9"
+midir = "0.11"
 midi-loopback = { path = "midi-loopback" }
 
 [dev-dependencies]
