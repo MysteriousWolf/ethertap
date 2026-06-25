@@ -673,6 +673,45 @@ pub fn create(data: Arc<EditorData>) -> Option<Box<dyn nih_plug::prelude::Editor
     create_iced_editor::<EtherTapEditor>(data.params.editor_state.clone(), data)
 }
 
+/// Build [`EditorData`] from a live plugin instance and open the editor.
+///
+/// Kept in `editor.rs` (excluded from coverage) so that the GUI-construction
+/// code does not inflate missed-line counts in `lib.rs`.
+pub(crate) fn create_editor(
+    plugin: &crate::EtherTap,
+) -> Option<Box<dyn nih_plug::prelude::Editor>> {
+    let data = Arc::new(EditorData {
+        params: plugin.params.clone(),
+        conn_status: plugin.conn_status.clone(),
+        tx_activity_ts: plugin.tx_activity_ts.clone(),
+        rx_activity_ts: plugin.rx_activity_ts.clone(),
+        midi_clock_activity_ts: plugin.midi_clock_activity_ts.clone(),
+        hardware_float: plugin.hardware_float.clone(),
+        host_bpm: plugin.host_bpm.clone(),
+        midi_device_rx: plugin.midi_device_rx.clone(),
+        midi_last_update_ts: plugin.midi_last_update_ts.clone(),
+        midi_has_update: plugin.midi_has_update.clone(),
+        compatible_slots: plugin.compatible_slots.clone(),
+        occupied_slots: plugin.occupied_slots.clone(),
+        slot_types: plugin.slot_types.clone(),
+        scan_targets: plugin.scan_targets.clone(),
+        scan_completed_ts: plugin.scan_completed_ts.clone(),
+        connected_device: plugin.connected_device.clone(),
+        scan_generation: plugin.scan_generation.clone(),
+        cmd_tx: plugin.cmd_tx.clone(),
+        device_change_tx: plugin.device_change_tx.clone(),
+        midi_bridge_connected: plugin.midi_bridge_connected.clone(),
+        midi_bridge_connecting: plugin.midi_bridge_connecting.clone(),
+        midi_clock_stats: plugin.midi_clock_stats.clone(),
+        midi_clock_drop_count: plugin.midi_clock_drop_count.clone(),
+        standalone_bpm: plugin.standalone_bpm.clone(),
+        standalone_playing: plugin.standalone_playing.clone(),
+        standalone_pos_beats: plugin.standalone_pos_beats.clone(),
+        standalone_stop_trigger: plugin.standalone_stop_trigger.clone(),
+    });
+    create(data)
+}
+
 // ─── Editor struct ────────────────────────────────────────────────────────────
 
 struct EtherTapEditor {

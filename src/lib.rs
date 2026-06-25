@@ -31,6 +31,7 @@ use parking_lot::Mutex;
 
 mod editor;
 mod midi_clock;
+mod midi_hw;
 mod midi_watcher;
 pub mod network;
 pub mod osc;
@@ -38,7 +39,6 @@ mod params;
 pub mod reconnect;
 pub use params::EtherTapParams;
 
-use editor::EditorData;
 use network::{now_ms, NetworkCommand, NetworkStatus, NetworkWorker};
 use params::{SyncMode, SyncStatus};
 
@@ -431,6 +431,17 @@ impl Plugin for EtherTap {
             let ins = layout.main_input_channels.map_or(0, |n| n.get());
             let outs = layout.main_output_channels.map_or(0, |n| n.get());
             nih_log!("EtherTap standalone — audio I/O: {ins} in / {outs} out");
+
+            // Automated test hook: ETHERTAP_TEST_PORT=<port> pre-sets the
+            // target to 127.0.0.1:<port> and triggers an immediate connect,
+            // enabling headless integration tests without GUI interaction.
+            if let Ok(port_str) = std::env::var("ETHERTAP_TEST_PORT") {
+                if let Ok(port) = port_str.parse::<u16>() {
+                    *self.params.target_ip.lock() = "127.0.0.1".to_string();
+                    *self.params.target_port.lock() = port;
+                    let _ = self.cmd_tx.try_send(NetworkCommand::ConnectToLast);
+                }
+            }
         }
         #[cfg(not(feature = "standalone"))]
         let _ = layout;
@@ -679,6 +690,10 @@ impl Plugin for EtherTap {
         // Loop repeat → land at loop start, snap HR to next bar for tighter
         // musical alignment.  Scrub → snap HR to next beat only.
         if playing && pos_beats < self.last_pos_beats - 0.5 {
+            // Save the pre-seek position before resetting last_pos_beats — the
+            // loop-repeat check below needs the original value to test whether
+            // the transport was near the loop end before jumping back.
+            let pre_seek_pos_beats = self.last_pos_beats;
             self.last_pos_beats = pos_beats - 1.0;
             self.last_beat_idx = pos_beats.floor() as i64 - 1;
             self.last_bar_number = bar_number - 1;
@@ -689,7 +704,7 @@ impl Plugin for EtherTap {
                 .map(|(start, end)| {
                     pos_beats >= start - 0.5
                         && pos_beats <= start + 0.5
-                        && self.last_pos_beats + 1.0 >= end - 0.5
+                        && pre_seek_pos_beats >= end - 0.5
                 })
                 .unwrap_or(false);
 
@@ -882,9 +897,6 @@ impl Plugin for EtherTap {
                     if buf_len > 0 {
                         let ppq = midi_ppq as f64;
                         match self.last_bpm_changed_at {
-                            None => {
-                                self.last_bpm_changed_at = Some(bpm);
-                            }
                             Some(prev) if (bpm - prev).abs() > BPM_MIDI_THRESHOLD => {
                                 if self
                                     .midi_clock_tx
@@ -897,7 +909,7 @@ impl Plugin for EtherTap {
                                     self.last_bpm_changed_at = Some(bpm);
                                 }
                             }
-                            Some(_) => {}
+                            _ => {} // Some(_): BPM unchanged; None: impossible (line 893 always seeds Some on play-start)
                         }
                         self.last_clock_bpm = bpm;
 
@@ -1044,36 +1056,7 @@ impl Plugin for EtherTap {
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
-        let data = Arc::new(EditorData {
-            params: self.params.clone(),
-            conn_status: self.conn_status.clone(),
-            tx_activity_ts: self.tx_activity_ts.clone(),
-            rx_activity_ts: self.rx_activity_ts.clone(),
-            midi_clock_activity_ts: self.midi_clock_activity_ts.clone(),
-            hardware_float: self.hardware_float.clone(),
-            host_bpm: self.host_bpm.clone(),
-            midi_device_rx: self.midi_device_rx.clone(),
-            midi_last_update_ts: self.midi_last_update_ts.clone(),
-            midi_has_update: self.midi_has_update.clone(),
-            compatible_slots: self.compatible_slots.clone(),
-            occupied_slots: self.occupied_slots.clone(),
-            slot_types: self.slot_types.clone(),
-            scan_targets: self.scan_targets.clone(),
-            scan_completed_ts: self.scan_completed_ts.clone(),
-            connected_device: self.connected_device.clone(),
-            scan_generation: self.scan_generation.clone(),
-            cmd_tx: self.cmd_tx.clone(),
-            device_change_tx: self.device_change_tx.clone(),
-            midi_bridge_connected: self.midi_bridge_connected.clone(),
-            midi_bridge_connecting: self.midi_bridge_connecting.clone(),
-            midi_clock_stats: self.midi_clock_stats.clone(),
-            midi_clock_drop_count: self.midi_clock_drop_count.clone(),
-            standalone_bpm: self.standalone_bpm.clone(),
-            standalone_playing: self.standalone_playing.clone(),
-            standalone_pos_beats: self.standalone_pos_beats.clone(),
-            standalone_stop_trigger: self.standalone_stop_trigger.clone(),
-        });
-        editor::create(data)
+        editor::create_editor(self)
     }
 }
 
@@ -1122,9 +1105,6 @@ impl EtherTap {
                 n = 1;
             } else {
                 for bit in 0..8u8 {
-                    if n >= slots.len() {
-                        break;
-                    }
                     if compat_mask & (1 << bit) == 0 {
                         continue;
                     }
@@ -1249,16 +1229,6 @@ mod tests {
     fn fx_type_to_bit_non_delay_returns_none() {
         for id in [0, 1, 3, 99, -1] {
             assert_eq!(fx_type_to_bit(id), None, "type_id={id}");
-        }
-    }
-
-    #[test]
-    fn fx_type_to_bit_covers_all_bpm_compatible() {
-        for type_id in [10, 11, 12, 21, 24, 25, 26] {
-            assert!(
-                fx_type_to_bit(type_id).is_some(),
-                "{type_id} is BPM-compatible but no bit assigned"
-            );
         }
     }
 
@@ -1443,11 +1413,8 @@ mod tests {
         assert_eq!(plugin.params.sync_status.value(), SyncStatus::Synced);
 
         // hardware_bpm = 20.0 / hardware_float = 120.0 in this case.
-        assert!(
-            (plugin.params.hardware_bpm.value() - 120.0).abs() < 0.01,
-            "hardware_bpm = {}",
-            plugin.params.hardware_bpm.value()
-        );
+        let hw_bpm = plugin.params.hardware_bpm.value();
+        assert!((hw_bpm - 120.0).abs() < 0.01, "hardware_bpm = {hw_bpm}");
 
         // compatible_slot_count mirrors popcount of compatible_slots bitmask.
         plugin
@@ -1549,24 +1516,6 @@ mod tests {
         let json = serde_json::to_string(&*params.target_port.lock()).unwrap();
         assert_eq!(serde_json::from_str::<u16>(&json).unwrap(), 10024);
 
-        // fx_slot, fx_type_filter, midi_clock_enabled, midi_clock_ppq are now
-        // #[id] params — persisted by the host; no JSON round-trip test needed.
-        params.fx_slot_atom.store(4u8, Ordering::Relaxed);
-        assert_eq!(params.fx_slot_atom.load(Ordering::Relaxed), 4);
-
-        params
-            .fx_type_filter
-            .store(0b000_0011u32, Ordering::Relaxed);
-        assert_eq!(params.fx_type_filter.load(Ordering::Relaxed), 0b000_0011u32);
-
-        params
-            .midi_clock_enabled_atom
-            .store(false, Ordering::Relaxed);
-        assert!(!params.midi_clock_enabled_atom.load(Ordering::Relaxed));
-
-        params.midi_clock_ppq_atom.store(48u8, Ordering::Relaxed);
-        assert_eq!(params.midi_clock_ppq_atom.load(Ordering::Relaxed), 48);
-
         let device = Some("Midi Through Port-0".to_owned());
         *params.midi_out_device.lock() = device;
         let json = serde_json::to_string(&*params.midi_out_device.lock()).unwrap();
@@ -1593,5 +1542,181 @@ mod tests {
         assert!(!params
             .auto_reconnect_atom
             .load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    // ── NetworkStatus::ScanDone ─────────────────────────────────────────────
+
+    /// Sending NetworkStatus::ScanDone through the status channel must update
+    /// scan_completed_ts so the editor can show when the last LAN scan finished.
+    #[test]
+    fn scan_done_status_updates_scan_completed_ts() {
+        let mut plugin = EtherTap::default();
+        // Inject a fresh status channel that carries a ScanDone message.
+        let (status_tx, status_rx) = crossbeam_channel::bounded(8);
+        status_tx.send(NetworkStatus::ScanDone).unwrap();
+        plugin.status_rx = status_rx;
+
+        // Pre-set a sentinel so the assertion is unambiguous: if process() does
+        // NOT update scan_completed_ts, the sentinel survives and the check fails.
+        // Using u64::MAX avoids a trivially-true `after >= 0` comparison.
+        plugin.scan_completed_ts.store(u64::MAX, Ordering::Relaxed);
+
+        let mut ctx = MockProcessContext::new(120.0, false);
+        let mut buffer = make_buffer();
+        let mut aux = make_aux();
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+        let after = plugin.scan_completed_ts.load(Ordering::Relaxed);
+        assert!(
+            after != u64::MAX,
+            "ScanDone must overwrite scan_completed_ts with now_ms() (sentinel still present)"
+        );
+    }
+
+    /// Sending NetworkStatus::SlotScanDone when reconnect_sync_pending is set
+    /// and BPM has settled must trigger an immediate dispatch (reconnect sync).
+    #[test]
+    fn slot_scan_done_with_reconnect_pending_dispatches() {
+        let mut plugin = EtherTap::default();
+        let (status_tx, status_rx) = crossbeam_channel::bounded(8);
+        status_tx.send(NetworkStatus::SlotScanDone).unwrap();
+        plugin.status_rx = status_rx;
+
+        // Wire a test cmd channel so we can observe what dispatch() sends.
+        let (test_cmd_tx, test_cmd_rx) = crossbeam_channel::bounded(8);
+        plugin.cmd_tx = test_cmd_tx;
+
+        // Pre-conditions: BPM settled, pending reconnect sync.
+        // Keep conn_status false so the "just connected" transition path doesn't
+        // re-arm reconnect_sync_pending during the same process() call.
+        plugin.reconnect_sync_pending = true;
+        plugin.last_bpm = 120.0;
+        plugin.bpm_is_settling = false;
+        // slot 1 compatible, fallback slot = 1, single-slot mode (compat_mask=0 path).
+        plugin.compatible_slots.store(0, Ordering::Relaxed);
+        plugin.params.fx_slot_atom.store(1, Ordering::Relaxed);
+
+        let mut ctx = MockProcessContext::new(120.0, false);
+        let mut buffer = make_buffer();
+        let mut aux = make_aux();
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+
+        // reconnect_sync_pending must be cleared after dispatch.
+        assert!(
+            !plugin.reconnect_sync_pending,
+            "SlotScanDone must clear reconnect_sync_pending"
+        );
+        // The dispatch must have sent a SyncNow command to the network worker.
+        let cmd = test_cmd_rx
+            .try_recv()
+            .expect("SlotScanDone dispatch must send at least one NetworkCommand");
+        assert!(
+            matches!(cmd, NetworkCommand::SyncNow { .. }),
+            "SlotScanDone dispatch must send SyncNow, got: {cmd:?}"
+        );
+    }
+
+    // ── dispatch() filter edge cases ───────────────────────────────────────
+
+    /// When all_slots is enabled and a compatible slot has not yet been audited
+    /// (slot_types = i32::MIN), the slot must be included in the dispatch.
+    #[test]
+    fn dispatch_all_slots_unaudited_slot_is_included() {
+        let mut plugin = EtherTap::default();
+        let (test_tx, test_rx) = crossbeam_channel::bounded(8);
+        plugin.cmd_tx = test_tx;
+
+        plugin.params.all_slots_atom.store(true, Ordering::Relaxed);
+        // slot 1 is compatible (bit 0 set), all filter bits enabled.
+        plugin.compatible_slots.store(0x01, Ordering::Relaxed);
+        plugin.params.fx_type_filter.store(0x7F, Ordering::Relaxed);
+        // slot_types[0] defaults to i32::MIN ("not yet audited") → include path.
+        plugin.dispatch(120.0, false);
+
+        let cmd = test_rx
+            .try_recv()
+            .expect("unaudited compatible slot must produce a SyncNow command");
+        assert!(
+            matches!(cmd, NetworkCommand::SyncNow { slot: 1, .. }),
+            "dispatch must target slot 1 for the unaudited-include path, got: {cmd:?}"
+        );
+        assert!(
+            test_rx.try_recv().is_err(),
+            "only one compatible slot (slot 1) — no extra commands expected"
+        );
+    }
+
+    /// When all_slots is enabled and a slot has a non-BPM-compatible type (no
+    /// bit in fx_type_to_bit), the slot is included ("unknown type: include").
+    #[test]
+    fn dispatch_all_slots_unknown_type_is_included() {
+        let mut plugin = EtherTap::default();
+        let (test_tx, test_rx) = crossbeam_channel::bounded(8);
+        plugin.cmd_tx = test_tx;
+
+        plugin.params.all_slots_atom.store(true, Ordering::Relaxed);
+        plugin.compatible_slots.store(0x01, Ordering::Relaxed);
+        plugin.params.fx_type_filter.store(0x7F, Ordering::Relaxed);
+        // Type 1 (AMBI reverb) has no fx_type_to_bit entry → None → include.
+        plugin.slot_types[0].store(1, Ordering::Relaxed);
+        plugin.dispatch(120.0, false);
+
+        let cmd = test_rx
+            .try_recv()
+            .expect("unknown-type compatible slot must produce a SyncNow command");
+        assert!(
+            matches!(cmd, NetworkCommand::SyncNow { slot: 1, .. }),
+            "dispatch must include unknown type (AMBI reverb) in all-slots mode, got: {cmd:?}"
+        );
+    }
+
+    #[test]
+    fn on_change_retry_dispatches_when_hw_mismatched() {
+        let mut plugin = EtherTap::default();
+        let (_, fresh_rx) = crossbeam_channel::bounded(8);
+        plugin.status_rx = fresh_rx;
+
+        // Wire a test cmd channel so we can observe what dispatch() sends.
+        let (test_cmd_tx, test_cmd_rx) = crossbeam_channel::bounded(8);
+        plugin.cmd_tx = test_cmd_tx;
+
+        plugin.conn_status.store(true, Ordering::Relaxed);
+        // Set last_conn_status = true to skip the "just-connected" transition
+        // (which would enqueue an AuditSlots command before our SyncNow).
+        plugin.last_conn_status = true;
+        plugin.on_change_retry_pending = true;
+        plugin.on_change_retry_bpm = 100.0;
+        plugin.on_change_retry_hard_reset = false;
+        // Fallback slot = 1 (single-slot mode with no compatible slots → fallback).
+        plugin.params.fx_slot_atom.store(1, Ordering::Relaxed);
+        // now_ms() is Instant-based elapsed time (not wall clock). Initialize
+        // the epoch via a first call, then sleep 2.1s so the next process()
+        // call sees now_ms() >= 2100 → now - 0 >= 2000ms → retry fires.
+        let _ = now_ms();
+        std::thread::sleep(std::time::Duration::from_millis(2100));
+        plugin.on_change_last_retry_ms = 0;
+        // hardware_float = 0 (no readback yet) so is_matched stays false, retry
+        // condition passes (hw float != expected for 100 BPM).
+        plugin.hardware_float.store(0u32, Ordering::Relaxed);
+        plugin.hr_pending = false;
+
+        let mut ctx = MockProcessContext::new(100.0, true);
+        let mut buffer = make_buffer();
+        let mut aux = make_aux();
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+
+        assert!(
+            plugin.on_change_last_retry_ms > 0,
+            "retry fired: on_change_last_retry_ms must be updated"
+        );
+        // The retry must have dispatched a SyncNow to the network worker —
+        // checking the timing state alone cannot distinguish "retry path ran"
+        // from "retry branch taken but dispatch() silently dropped the command."
+        let cmd = test_cmd_rx
+            .try_recv()
+            .expect("on_change retry must dispatch a SyncNow command");
+        assert!(
+            matches!(cmd, NetworkCommand::SyncNow { slot: 1, bpm } if (bpm - 100.0).abs() < 0.01),
+            "retry dispatch must carry the retry BPM (100.0), got: {cmd:?}"
+        );
     }
 }

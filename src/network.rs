@@ -1257,6 +1257,39 @@ mod tests {
         assert_eq!(parse_fx_delay_response(b"garbage"), None);
     }
 
+    #[test]
+    fn parse_fx_delay_response_malformed_packets_return_none() {
+        // rosc is lenient with null type-tag area; ethertap must still return None
+        // because the packet carries no float arg.
+        let truncated_type_tag = &[
+            0x2f, 0x66, 0x78, 0x00, // "/fx\0"
+            0x00, 0x00, 0x00, 0x00, // null type tag area
+            0x2c, 0x66, 0x00, // trailing ",f\0" (ignored by rosc)
+        ];
+        assert_eq!(parse_fx_delay_response(truncated_type_tag), None);
+
+        let garbage_after_header = &[
+            0x2f, 0x69, 0x6e, 0x66, 0x6f, 0x00, 0x00, 0x00, // "/info\0\0\0"
+            0x00, 0x00, 0x00, 0x00, // null type tag area
+            0xff, 0xff, 0xff, 0xff, // garbage
+        ];
+        assert_eq!(parse_fx_delay_response(garbage_after_header), None);
+    }
+
+    #[test]
+    fn parse_fx_type_unknown_address_still_extracts_int() {
+        // parse_fx_type does not validate the address — it extracts the first Int
+        // arg from any valid OSC message. This is the current design: the network
+        // worker uses request/response pairing and never passes a stray-address
+        // packet to parse_fx_type. Document that behavior here.
+        let data = make_osc_msg("/wrong/address", vec![OscType::Int(10)]);
+        assert_eq!(parse_fx_type(&data), Some(10));
+
+        // No-arg packet: returns None regardless of address.
+        let data_no_args = make_osc_msg("/wrong/address", vec![]);
+        assert_eq!(parse_fx_type(&data_no_args), None);
+    }
+
     // ── Backoff fuzz: full cycle ──────────────────────────────────────────
 
     #[test]
@@ -1297,31 +1330,265 @@ mod tests {
 
     #[test]
     fn scan_sort_prefers_same_subnet() {
-        // RawEntry = (ip, latency_ms, name, model, same_subnet)
-        type RawEntry = (String, f32, String, String, bool);
+        // Mirrors production sort: (ip, latency_ms, name, model, same_subnet, is_loopback)
+        // Tier order: loopback > same-subnet > other, ties broken by ascending latency.
+        type RawEntry = (String, f32, String, String, bool, bool);
         let mut entries: Vec<RawEntry> = vec![
-            ("10.0.0.1".into(), 5.0, "A".into(), "X32".into(), false),
-            ("192.168.1.100".into(), 2.0, "B".into(), "X32".into(), true),
-            ("172.16.0.1".into(), 1.0, "C".into(), "X32".into(), false),
+            (
+                "10.0.0.1".into(),
+                5.0,
+                "A".into(),
+                "X32".into(),
+                false,
+                false,
+            ),
+            (
+                "192.168.1.100".into(),
+                2.0,
+                "B".into(),
+                "X32".into(),
+                true,
+                false,
+            ),
+            (
+                "172.16.0.1".into(),
+                1.0,
+                "C".into(),
+                "X32".into(),
+                false,
+                false,
+            ),
+            (
+                "127.0.0.1".into(),
+                0.5,
+                "D".into(),
+                "X32".into(),
+                false,
+                true,
+            ),
         ];
-        entries.sort_by(|a, b| match (a.4, b.4) {
+        let sort_fn = |a: &RawEntry, b: &RawEntry| match (a.5, b.5) {
             (true, false) => std::cmp::Ordering::Less,
             (false, true) => std::cmp::Ordering::Greater,
-            _ => a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal),
-        });
-        assert!(entries[0].4, "first entry should be same-subnet");
-        assert_eq!(entries[0].0, "192.168.1.100");
-        // non-subnet entries sorted ascending by latency
-        assert!(entries[1].1 <= entries[2].1);
+            _ => match (a.4, b.4) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal),
+            },
+        };
+        entries.sort_by(sort_fn);
+        // Loopback sorts first regardless of latency or subnet.
+        assert!(entries[0].5, "loopback must be first");
+        assert_eq!(entries[0].0, "127.0.0.1");
+        // Same-subnet sorts before routed.
+        assert!(entries[1].4, "same-subnet must precede routed");
+        assert_eq!(entries[1].0, "192.168.1.100");
+        // Remaining entries sorted ascending by latency.
+        assert!(
+            entries[2].1 <= entries[3].1,
+            "routed entries sorted by latency"
+        );
+
+        // A 2-element sort with loopback FIRST makes Rust call cmp(data[1], data[0])
+        // = cmp(non-loopback, loopback), exercising the (false, true) arm.
+        let mut two = [
+            (
+                "127.0.0.1".into(),
+                0.5f32,
+                "".into(),
+                "".into(),
+                false,
+                true,
+            ), // loopback at [0]
+            (
+                "192.168.1.1".into(),
+                1.0f32,
+                "".into(),
+                "".into(),
+                false,
+                false,
+            ), // non-loopback at [1]
+        ];
+        two.sort_by(sort_fn);
+        assert!(
+            two[0].5,
+            "loopback remains first in a 2-element already-sorted list"
+        );
     }
 
     #[test]
     fn backoff_immutable_queries() {
-        let b = crate::reconnect::Backoff::new(1000, 10000);
-        assert!(!b.is_cooling_down());
-        assert_eq!(b.next_delay_ms(), 1000);
-        // These don't mutate
-        let b2 = crate::reconnect::Backoff::new(500, 1000);
-        assert_eq!(b2.next_delay_ms(), 500);
+        // Prove is_cooling_down() and next_delay_ms() don't consume or mutate state.
+        let mut b = crate::reconnect::Backoff::new(1000, 10000);
+        b.record_failure();
+
+        let cooling1 = b.is_cooling_down();
+        let delay1 = b.next_delay_ms();
+        let cooling2 = b.is_cooling_down();
+        let delay2 = b.next_delay_ms();
+
+        assert_eq!(cooling1, cooling2, "is_cooling_down() must be idempotent");
+        assert_eq!(delay1, delay2, "next_delay_ms() must be idempotent");
+    }
+
+    fn make_test_worker() -> NetworkWorker {
+        let (_cmd_tx, cmd_rx) = crossbeam_channel::bounded(8);
+        let (status_tx, _status_rx) = crossbeam_channel::bounded(8);
+        NetworkWorker::new(
+            cmd_rx,
+            status_tx,
+            Arc::new(Mutex::new("192.168.1.100".to_string())),
+            Arc::new(Mutex::new(10023u16)),
+            Arc::new(AtomicU8::new(1)),
+            WorkerShared {
+                hardware_float_out: Arc::new(AtomicU32::new(0)),
+                compatible_slots: Arc::new(AtomicU8::new(0)),
+                occupied_slots: Arc::new(AtomicU8::new(0)),
+                slot_types: Arc::new(std::array::from_fn(|_| AtomicI32::new(i32::MIN))),
+                scan_targets: Arc::new(Mutex::new(Vec::new())),
+                connected_device: Arc::new(Mutex::new((String::new(), String::new()))),
+                scan_generation: Arc::new(AtomicU64::new(0)),
+                auto_reconnect: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                last_device: Arc::new(Mutex::new((String::new(), String::new()))),
+            },
+        )
+    }
+
+    /// Passing an unparseable IP string to connect() must record a backoff failure
+    /// instead of panicking. Covers the Err branch of SocketAddr::parse.
+    #[test]
+    fn connect_invalid_address_records_backoff_failure() {
+        let mut worker = make_test_worker();
+        assert!(!worker.backoff.is_cooling_down());
+        // "256.256.256.256" is an invalid IPv4 address — parse() returns Err.
+        worker.connect("256.256.256.256".to_string(), 10023);
+        assert!(
+            worker.backoff.is_cooling_down(),
+            "invalid address must trigger backoff record_failure"
+        );
+    }
+
+    /// maybe_auto_connect skips a second attempt within the backoff delay window.
+    /// Uses an unparseable address so connect() takes the Err branch (doesn't set
+    /// self.target), ensuring the SECOND call is throttled by last_auto_attempt
+    /// (line 347-348) rather than the earlier `target.is_some()` guard.
+    #[test]
+    fn maybe_auto_connect_throttled_by_backoff() {
+        let mut worker = make_test_worker();
+        worker.auto_reconnect.store(true, Ordering::Relaxed);
+        // Invalid address: parse() returns Err → connect() doesn't set self.target.
+        *worker.target_ip.lock() = "256.256.256.256".to_string();
+        *worker.target_port.lock() = 10023;
+        // First call: last_auto_attempt is None → proceeds past throttle → connect fails.
+        worker.maybe_auto_connect();
+        assert!(
+            worker.last_auto_attempt.is_some(),
+            "last_auto_attempt must be set after first call"
+        );
+        assert!(
+            worker.target.is_none(),
+            "target stays None when address is invalid"
+        );
+        // Capture backoff delay after first call (connect() recorded one failure).
+        let delay_after_first = worker.backoff.next_delay_ms();
+        assert!(
+            delay_after_first > 2000,
+            "first failed connect must have incremented backoff delay"
+        );
+
+        // Immediately call again: elapsed ≈ 0ms < delay_after_first → throttle.
+        // The throttled path must NOT call connect() again, so backoff must not grow.
+        worker.maybe_auto_connect();
+        assert_eq!(
+            worker.backoff.next_delay_ms(),
+            delay_after_first,
+            "throttled second call must not increment backoff (connect() must be skipped)"
+        );
+    }
+
+    /// rescan_for_last_device returns immediately when last_device identity is empty.
+    /// Covers the early-return guard at line 585-586.
+    #[test]
+    fn rescan_for_last_device_returns_early_for_empty_identity() {
+        let mut worker = make_test_worker();
+        // last_device defaults to ("", "") in make_test_worker — rescan must return early.
+        worker.rescan_for_last_device();
+        // If it didn't return early it would block for RESCAN_WINDOW scanning the LAN.
+        // Verify no connection was attempted: backoff must remain idle (no failures recorded).
+        assert!(
+            !worker.backoff.is_cooling_down(),
+            "rescan with empty identity must not attempt connection (backoff must stay idle)"
+        );
+        assert!(
+            worker.target.is_none(),
+            "rescan with empty identity must not retarget the worker"
+        );
+    }
+
+    /// maybe_auto_connect returns early when the target IP is empty.
+    #[test]
+    fn maybe_auto_connect_skips_empty_ip() {
+        let mut worker = make_test_worker();
+        worker.auto_reconnect.store(true, Ordering::Relaxed);
+        *worker.target_ip.lock() = String::new(); // empty → early return
+        worker.maybe_auto_connect();
+        // No connection attempt must have been recorded.
+        assert!(
+            worker.last_auto_attempt.is_none(),
+            "empty IP must not record an auto-connect attempt"
+        );
+        assert!(
+            !worker.backoff.is_cooling_down(),
+            "empty IP early-return must not trigger a backoff failure"
+        );
+    }
+
+    /// A valid OSC bundle must not be decoded as a Message.
+    /// Exercises the `_ => None` arm in `decode_osc_message`.
+    #[test]
+    fn decode_osc_bundle_returns_none() {
+        use rosc::{encoder, OscBundle, OscPacket, OscTime};
+        let bundle_bytes = encoder::encode(&OscPacket::Bundle(OscBundle {
+            timetag: OscTime {
+                seconds: 0,
+                fractional: 1,
+            },
+            content: vec![],
+        }))
+        .unwrap_or_default();
+        assert!(
+            decode_osc_message(&bundle_bytes).is_none(),
+            "OSC bundle must not decode as a Message"
+        );
+    }
+
+    /// An OSC message whose args are all non-String values must yield empty
+    /// name and model strings. Exercises the `else { None }` arm of the
+    /// filter_map inside `parse_info_strings`.
+    #[test]
+    fn parse_info_strings_non_string_arg_filtered_out() {
+        use rosc::{encoder, OscMessage, OscPacket, OscType};
+        let msg_bytes = encoder::encode(&OscPacket::Message(OscMessage {
+            addr: "/info".to_string(),
+            args: vec![OscType::Int(42), OscType::Int(99)],
+        }))
+        .unwrap();
+        let (name, model) = parse_info_strings(&msg_bytes);
+        assert!(name.is_empty(), "int args should produce empty name");
+        assert!(model.is_empty(), "int args should produce empty model");
+    }
+
+    /// Slot index above 8 (out-of-bounds) must return the DLY fallback (10).
+    /// Exercises the `i32::MIN` path in `slot_type_for` (idx >= 8).
+    #[test]
+    fn slot_type_for_above_8_returns_default() {
+        let w = make_test_worker();
+        // slot 9 → idx = 8 → out of the [AtomicI32; 8] bounds → raw = i32::MIN
+        // → defaults to DLY type (10).
+        let ty = w.slot_type_for(9);
+        assert_eq!(
+            ty, 10,
+            "slot 9 (out of range) should default to DLY type 10"
+        );
     }
 }

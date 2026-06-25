@@ -51,8 +51,8 @@ fn exponential_backoff_increases_on_failure() {
 
     assert!(matches!(second, Some(NetworkStatus::Disconnected)));
     assert!(
-        elapsed >= Duration::from_secs(1),
-        "Backoff should delay retries; elapsed was {:?}",
+        elapsed >= Duration::from_millis(1_500),
+        "Backoff must delay retries by at least 1.5s (base delay is 2s); elapsed was {:?}",
         elapsed
     );
 
@@ -106,6 +106,13 @@ fn sync_now_sets_delay_on_mock() {
     assert!(
         (value - expected).abs() < 0.001,
         "Delay value should be ~{expected}, got {value}"
+    );
+    // DLY (type 10) uses par/02 (mix is par/01, time is par/02 — confirmed X32Tap.c).
+    // A wrong par address here silently writes the delay time into the mix level.
+    assert!(
+        set_msgs[0].addr.ends_with("/par/02"),
+        "DLY slot delay must use /par/02, got {}",
+        set_msgs[0].addr
     );
 
     drop(cmd_tx);
@@ -191,6 +198,15 @@ fn hard_reset_mutes_sets_unmutes() {
         "Should receive 2 delay-set messages, got {}",
         sets.len()
     );
+    // Verify the encoded delay value is correct for 120 BPM: 20/120 ≈ 0.1667.
+    let expected_delay = 20.0_f32 / 120.0;
+    for s in &sets {
+        let (slot, value) = s.is_set_delay().unwrap();
+        assert!(
+            (value - expected_delay).abs() < 0.001,
+            "slot {slot} delay should be {expected_delay:.4} (120 BPM → 20/120), got {value:.4}"
+        );
+    }
 
     let unmutes: Vec<_> = all_msgs
         .iter()
@@ -459,6 +475,73 @@ fn scan_discovers_mock_on_custom_scan_port() {
         found.port,
         mixer.port(),
         "DeviceInfo must carry the scan port"
+    );
+
+    drop(cmd_tx);
+    handle.join().expect("worker thread panicked");
+}
+
+/// SyncNow on a 3TAP slot must arrive at /fx/{slot}/par/01, not par/02.
+///
+/// DLY (type 10) is the only effect that uses par/02 (mix is par/01, time is
+/// par/02).  Every other BPM-compatible effect (3TAP, 4TAP, MODD, D/RV, D/CR,
+/// D/FL) uses par/01.  This test catches a regression where the routing logic
+/// ignores the effect type and always sends to par/02.
+#[test]
+fn sync_now_routes_3tap_to_par01() {
+    // All slots are 3TAP (type 11) — par/01 for delay time.
+    let slots: [SlotState; 8] = std::array::from_fn(|_| SlotState::other(11));
+    let mixer = MockMixer::start_with_slots(slots);
+
+    // Build a worker that knows slot 1 is type 11 (3TAP).
+    let slot_types: [Option<i32>; 8] = [Some(11); 8];
+    let hardware_float = Arc::new(AtomicU32::new(0));
+    let (worker, cmd_tx, status_rx, _shared) = create_worker(1, slot_types, hardware_float);
+    let handle = std::thread::Builder::new()
+        .name("ethertap-net-3tap-test".into())
+        .spawn(move || worker.run())
+        .expect("spawn worker");
+
+    cmd_tx
+        .send(NetworkCommand::UpdateTarget {
+            ip: "127.0.0.1".to_string(),
+            port: mixer.port(),
+        })
+        .unwrap();
+
+    assert!(wait_for_status(&status_rx, Duration::from_secs(5))
+        .is_some_and(|s| matches!(s, NetworkStatus::Connected)));
+
+    mixer.clear_msgs();
+
+    cmd_tx
+        .send(NetworkCommand::SyncNow {
+            slot: 1,
+            bpm: 120.0,
+        })
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+
+    let set_msgs: Vec<_> = mixer.received_filtered(|m| m.is_set_delay().is_some());
+    assert_eq!(
+        set_msgs.len(),
+        1,
+        "Expected exactly 1 delay-set message for 3TAP slot, got {}",
+        set_msgs.len()
+    );
+    let (slot, value) = set_msgs[0].is_set_delay().unwrap();
+    assert_eq!(slot, 1, "Should target slot 1");
+    let expected = 20.0_f32 / 120.0;
+    assert!(
+        (value - expected).abs() < 0.001,
+        "3TAP delay value should be ~{expected} (120 BPM), got {value}"
+    );
+    // 3TAP (type 11) uses par/01 — time is the first parameter.
+    // par/02 would write the delay time into the wrong register on the X32.
+    assert!(
+        set_msgs[0].addr.ends_with("/par/01"),
+        "3TAP slot delay must use /par/01, got {}",
+        set_msgs[0].addr
     );
 
     drop(cmd_tx);

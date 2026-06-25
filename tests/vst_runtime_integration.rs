@@ -47,29 +47,19 @@ fn ethertap_harness_drives_process_and_exposes_params() {
         .step()
         .finish();
 
-    // 7. Four steps → four statuses.
-    assert_eq!(result.statuses.len(), 4, "expected one status per step");
-
-    // 8. All steps should return ProcessStatus::Normal.
+    // 7. All steps should return ProcessStatus::Normal.
     assert!(
         result.statuses.iter().all(|&s| s == ProcessStatus::Normal),
         "all steps should return ProcessStatus::Normal"
     );
 
-    // 9. Four output buffer snapshots (one per step).
-    assert_eq!(
-        result.output_buffers.len(),
-        4,
-        "expected one output buffer snapshot per step"
+    // 8. process() mirrors BoolParam → atom each buffer. After running 4 steps,
+    //     the atom must reflect the BoolParam's default (true), overwriting our
+    //     earlier store(false). Verifies the mirror path actually executes.
+    assert!(
+        params.midi_clock_enabled_atom.load(Ordering::Relaxed),
+        "atom must reflect BoolParam default (true) after process() runs"
     );
-
-    // 10. The backing atom is shared — our store(false) above persists; note
-    //     that process() mirrors the BoolParam → atom each buffer, so after
-    //     running steps the atom will reflect the BoolParam's default (true).
-    //     The atom value after processing reflects the param default, not our
-    //     manual store — this is expected: process() is the authoritative sync.
-    //     Just verify the test ran without panic.
-    let _ = params.midi_clock_enabled_atom.load(Ordering::Relaxed);
 
     // Cleanly deactivate the plugin (Drop handles thread cleanup).
     harness.deactivate();

@@ -140,3 +140,82 @@ impl SinkState {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn on_message_empty_slice_is_no_op() {
+        let mut s = SinkState::default();
+        s.on_message(&[]);
+        assert_eq!(s.total_clocks(), 0);
+        assert!(s.stats().is_none());
+    }
+
+    #[test]
+    fn on_message_non_clock_byte_increments_other_msgs() {
+        let mut s = SinkState::default();
+        // 0x90 = Note On — not a clock byte
+        s.on_message(&[0x90, 0x3C, 0x64]);
+        assert_eq!(s.total_clocks(), 0);
+        // stats() needs ≥2 clock timestamps so it returns None here
+        assert!(s.stats().is_none());
+    }
+
+    #[test]
+    fn on_message_clock_byte_increments_total_clocks() {
+        let mut s = SinkState::default();
+        s.on_message(&[CLOCK_BYTE]);
+        assert_eq!(s.total_clocks(), 1);
+    }
+
+    #[test]
+    fn stats_returns_none_with_fewer_than_two_clocks() {
+        let mut s = SinkState::default();
+        s.on_message(&[CLOCK_BYTE]);
+        assert!(s.stats().is_none(), "need ≥2 clocks for stats");
+    }
+
+    #[test]
+    fn stats_returns_some_with_two_or_more_clocks() {
+        let mut s = SinkState::default();
+        s.on_message(&[CLOCK_BYTE]);
+        // Small sleep so Instant::now() advances between messages
+        std::thread::sleep(std::time::Duration::from_micros(100));
+        s.on_message(&[CLOCK_BYTE]);
+        let stats = s.stats().expect("two clocks → stats must be Some");
+        assert_eq!(stats.total_clocks, 2);
+        assert!(stats.mean_us > 0.0, "mean interval must be positive");
+    }
+
+    #[test]
+    fn stats_computes_percentiles_with_many_clocks() {
+        let mut s = SinkState::default();
+        // Send enough clocks that all percentile paths are exercised.
+        for _ in 0..10 {
+            s.on_message(&[CLOCK_BYTE]);
+            std::thread::sleep(std::time::Duration::from_micros(100));
+        }
+        let stats = s.stats().expect("10 clocks → stats must be Some");
+        assert!(stats.sample_count >= 9, "9 intervals from 10 timestamps");
+        assert!(stats.p50_us >= 0.0);
+        assert!(stats.p95_us >= stats.p50_us);
+        assert!(stats.max_us >= 0.0);
+    }
+
+    #[test]
+    fn bpm_sampling_fires_after_midi_cpb_clocks() {
+        let mut s = SinkState::default();
+        // Send MIDI_CPB+1 clocks (25 for 24 PPQ) so the BPM-sample path fires.
+        for _ in 0..=(MIDI_CPB) {
+            s.on_message(&[CLOCK_BYTE]);
+            std::thread::sleep(std::time::Duration::from_micros(500));
+        }
+        // After MIDI_CPB clocks the bpm_history may have a sample if the
+        // clock_times window is large enough. The main thing to verify is
+        // no panic and stats still work.
+        let stats = s.stats().expect("stats must be Some after many clocks");
+        assert!(stats.total_clocks > MIDI_CPB as u64);
+    }
+}

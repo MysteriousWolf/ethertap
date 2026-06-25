@@ -58,6 +58,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn backoff_initial_state() {
+        let b = Backoff::new(1000, 10000);
+        assert!(!b.is_cooling_down());
+        assert_eq!(b.next_delay_ms(), 1000);
+    }
+
+    #[test]
+    fn backoff_exponential_growth() {
+        let mut b = Backoff::new(1000, 10000);
+        assert_eq!(b.next_delay_ms(), 1000);
+        b.record_failure();
+        assert_eq!(b.next_delay_ms(), 2000);
+        b.record_failure();
+        assert_eq!(b.next_delay_ms(), 4000);
+        b.record_failure();
+        assert_eq!(b.next_delay_ms(), 8000);
+        b.record_failure();
+        assert_eq!(b.next_delay_ms(), 10000, "capped at max");
+    }
+
+    #[test]
+    fn backoff_reset_on_success() {
+        let mut b = Backoff::new(1000, 10000);
+        b.record_failure();
+        b.record_failure();
+        assert!(b.is_cooling_down());
+        b.record_success();
+        assert!(!b.is_cooling_down());
+        assert_eq!(b.next_delay_ms(), 1000, "back to base after success");
+    }
+
+    #[test]
     fn backoff_no_overflow_after_many_failures() {
         let mut b = Backoff::new(1000, 10000);
         for _ in 0..100 {

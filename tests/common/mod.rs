@@ -223,6 +223,29 @@ pub mod harness_util {
         step_at(harness, tempo, 0);
     }
 
+    /// Drive one STOPPED `process()` call at `tempo` BPM, 4/4, WITH a DAW
+    /// song position. Unlike `step_stopped`, this sets `pos_beats` so that
+    /// lib.rs enters the DAW-mode MIDI clock branch (`if let Some(beat_start)`)
+    /// even though `playing = false`, covering the transport-stop code path.
+    pub fn step_at_stopped_with_pos(harness: &mut Harness<EtherTap>, tempo: f64, pos_samples: i64) {
+        let mut t = harness.new_transport();
+        t.playing = false;
+        t.tempo = Some(tempo);
+        t.time_sig_numerator = Some(4);
+        t.time_sig_denominator = Some(4);
+        let pos_beats = pos_samples as f64 / 44_100.0 / 60.0 * tempo;
+        let bar_number = (pos_beats / 4.0).floor() as i32;
+        t.set_song_position(
+            Some(pos_samples),
+            Some(pos_beats),
+            Some(bar_number as f64 * 4.0),
+            Some(bar_number),
+            None,
+        );
+        let mut io = vec![vec![0.0f32; 256]; 2];
+        let _ = harness.process(&mut io, t, &[]);
+    }
+
     /// Step the plugin until `pred` holds or `timeout` elapses. Sleeps between
     /// steps so the worker threads get scheduled (their UDP round trips are
     /// real).
@@ -243,6 +266,84 @@ pub mod harness_util {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// Drive `n` complete beat boundaries at `tempo` BPM, advancing transport
+    /// position from `start_pos_samples`. Returns the sample position after the
+    /// last step. Sleeps 5 ms between steps so worker threads get scheduled.
+    pub fn step_n_beats(
+        harness: &mut Harness<EtherTap>,
+        n: usize,
+        tempo: f64,
+        start_pos_samples: i64,
+    ) -> i64 {
+        let samples_per_beat = (44_100.0 * 60.0 / tempo) as i64;
+        // +256: ensures the loop steps *through* the n-th beat boundary so that
+        // beat-crossing detectors (Continuous mode, last_beat_idx) actually see
+        // all n crossings.  Without this, the end position is the beat boundary
+        // itself and the last step arrives one buffer short of it.
+        let end = start_pos_samples + n as i64 * samples_per_beat + 256;
+        let mut pos = start_pos_samples;
+        while pos < end {
+            step_at(harness, tempo, pos);
+            pos += 256;
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        pos
+    }
+
+    /// Drive one stopped (non-playing) `process()` call at the given tempo.
+    /// Used to advance time without triggering beat-crossing logic.
+    pub fn step_stopped(harness: &mut Harness<EtherTap>, tempo: f64) {
+        let mut t = harness.new_transport();
+        t.playing = false;
+        t.tempo = Some(tempo);
+        let mut io = vec![vec![0.0f32; 256]; 2];
+        let _ = harness.process(&mut io, t, &[]);
+    }
+
+    /// Drive one playing `process()` call at `tempo` BPM with **no DAW
+    /// transport position** (pos_beats = None). Simulates a VST3 host that
+    /// does not provide song-position information. The MIDI clock worker
+    /// falls through to the sample-count tick accumulator path instead of
+    /// the position-derived path.
+    pub fn step_no_pos(harness: &mut Harness<EtherTap>, tempo: f64) {
+        let mut t = harness.new_transport();
+        t.playing = true;
+        t.tempo = Some(tempo);
+        // Intentionally leave song position unset — transport.pos_beats() → None.
+        let mut io = vec![vec![0.0f32; 256]; 2];
+        let _ = harness.process(&mut io, t, &[]);
+    }
+
+    /// Like [`step_at`] but allows custom time signature and loop range.
+    /// `bar_start_pos_beats` is derived from the time signature.
+    pub fn step_at_opts(
+        harness: &mut Harness<EtherTap>,
+        tempo: f64,
+        pos_samples: i64,
+        ts_num: i32,
+        ts_den: i32,
+        loop_range: Option<(f64, f64)>,
+    ) {
+        let mut t = harness.new_transport();
+        t.playing = true;
+        t.tempo = Some(tempo);
+        t.time_sig_numerator = Some(ts_num);
+        t.time_sig_denominator = Some(ts_den);
+        let pos_beats = pos_samples as f64 / 44_100.0 / 60.0 * tempo;
+        let bar_len_qn = ts_num as f64 * (4.0 / ts_den as f64);
+        let bar_number = (pos_beats / bar_len_qn).floor() as i32;
+        let bar_start = bar_number as f64 * bar_len_qn;
+        t.set_song_position(
+            Some(pos_samples),
+            Some(pos_beats),
+            Some(bar_start),
+            Some(bar_number),
+            loop_range,
+        );
+        let mut io = vec![vec![0.0f32; 256]; 2];
+        let _ = harness.process(&mut io, t, &[]);
     }
 
     /// Build a harness pointed at `mock` and connect via the

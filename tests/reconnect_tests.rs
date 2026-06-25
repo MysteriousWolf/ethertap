@@ -108,12 +108,18 @@ fn no_auto_reconnect_when_disabled() {
         mixer.port(),
     );
 
-    thread::sleep(Duration::from_millis(1500));
-    assert_eq!(
-        mixer.count_addr("/info"),
-        0,
-        "auto_reconnect=OFF must not probe the mixer on startup"
-    );
+    // Poll for 1 500 ms: we want to confirm no /info ever arrives, not just that
+    // it hasn't arrived yet.  Fixed sleep risks a race where the worker hasn't
+    // started yet; polling with early-exit catches any probe that does sneak through.
+    let deadline = std::time::Instant::now() + Duration::from_millis(1_500);
+    while std::time::Instant::now() < deadline {
+        assert_eq!(
+            mixer.count_addr("/info"),
+            0,
+            "auto_reconnect=OFF must not probe the mixer on startup"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
 
     drop(fx.cmd_tx);
     fx.handle.join().expect("worker thread panicked");

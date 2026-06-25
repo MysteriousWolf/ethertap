@@ -728,41 +728,14 @@ fn handle_port_scan(
 /// [`midi_loopback`] registry — a registered loopback port under this name is
 /// interchangeable with a hardware port (see
 /// `docs/spec/cross-platform-midi-clock.md`, Approach C). Falls back to midir
-/// hardware port enumeration if no loopback port is registered.
+/// hardware port enumeration via [`crate::midi_hw::try_hw_out`] if no loopback
+/// port is registered.
 fn try_connect_out(device_name: &str) -> Option<PhysOutput> {
     if let Ok(tx) = midi_loopback::connect(device_name) {
         log::info!("[EtherTap] try_connect_out: connected to loopback port '{device_name}'");
         return Some(PhysOutput::Loopback(tx));
     }
-
-    let out = match midir::MidiOutput::new("EtherTap-PhysOut") {
-        Ok(o) => o,
-        Err(e) => {
-            log::warn!("[EtherTap] try_connect_out: MidiOutput::new failed: {e}");
-            return None;
-        }
-    };
-    let port = match out
-        .ports()
-        .into_iter()
-        .find(|p| out.port_name(p).map(|n| n == device_name).unwrap_or(false))
-    {
-        Some(p) => p,
-        None => {
-            log::warn!("[EtherTap] try_connect_out: port '{device_name}' not found");
-            return None;
-        }
-    };
-    match out.connect(&port, "EtherTap-PhysOut") {
-        Ok(c) => {
-            log::info!("[EtherTap] try_connect_out: connected to '{device_name}'");
-            Some(PhysOutput::Hardware(c))
-        }
-        Err(e) => {
-            log::warn!("[EtherTap] try_connect_out: connect to '{device_name}' failed: {e}");
-            None
-        }
-    }
+    crate::midi_hw::try_hw_out(device_name).map(PhysOutput::Hardware)
 }
 
 /// Open a MIDI input on `device_name` and forward every non-clock byte to
@@ -784,45 +757,7 @@ fn try_connect_in(
         );
         return None;
     }
-
-    use midir::MidiInput;
-    let inp = match MidiInput::new("EtherTap-PhysIn") {
-        Ok(i) => i,
-        Err(e) => {
-            log::warn!("[EtherTap] try_connect_in: MidiInput::new failed: {e}");
-            return None;
-        }
-    };
-    let port = match inp
-        .ports()
-        .into_iter()
-        .find(|p| inp.port_name(p).map(|n| n == device_name).unwrap_or(false))
-    {
-        Some(p) => p,
-        None => {
-            log::warn!("[EtherTap] try_connect_in: port '{device_name}' not found");
-            return None;
-        }
-    };
-    match inp.connect(
-        &port,
-        "EtherTap-PhysIn",
-        move |_ts, msg, _| {
-            if msg.first().copied() != Some(0xF8) && pass_tx.try_send(msg.to_vec()).is_err() {
-                drop_count.fetch_add(1, Ordering::Relaxed);
-            }
-        },
-        (),
-    ) {
-        Ok(c) => {
-            log::info!("[EtherTap] try_connect_in: connected input to '{device_name}'");
-            Some(c)
-        }
-        Err(e) => {
-            log::warn!("[EtherTap] try_connect_in: connect to '{device_name}' failed: {e}");
-            None
-        }
-    }
+    crate::midi_hw::try_hw_in(device_name, pass_tx, drop_count)
 }
 
 #[cfg(test)]
@@ -847,11 +782,19 @@ mod tests {
 
     #[test]
     fn compute_stats_mixed_jitter() {
+        // 63 samples at 20833 µs, 1 outlier at 21333 µs.
+        // Mean = (63*20833 + 21333) / 64 = 20840 µs (integer truncation).
+        // Deviation of majority: abs(20833 - 20840) = 7 µs → p50 = 7.
+        // Deviation of outlier:  abs(21333 - 20840) = 493 µs → max = 493.
         let mut win = [20833u32; STAT_WINDOW];
         win[0] = 21333;
         let stats = compute_stats(&win, 64);
-        assert!(stats.p50_us <= 500);
-        assert!(stats.max_us >= 200);
+        assert_eq!(stats.p50_us, 7, "p50 should be 7 µs, got {}", stats.p50_us);
+        assert_eq!(
+            stats.max_us, 493,
+            "max should be 493 µs, got {}",
+            stats.max_us
+        );
     }
 
     #[test]
@@ -866,46 +809,6 @@ mod tests {
         assert_eq!(stats.p99_us, 0);
         assert_eq!(stats.max_us, 0);
         assert_eq!(stats.interval_us, 20833);
-    }
-
-    #[test]
-    fn backoff_initial_state() {
-        let b = crate::reconnect::Backoff::new(1000, 10000);
-        assert!(!b.is_cooling_down());
-        assert_eq!(b.next_delay_ms(), 1000);
-    }
-
-    #[test]
-    fn backoff_exponential_growth() {
-        let mut b = crate::reconnect::Backoff::new(1000, 10000);
-        assert_eq!(b.next_delay_ms(), 1000);
-        b.record_failure();
-        assert_eq!(b.next_delay_ms(), 2000);
-        b.record_failure();
-        assert_eq!(b.next_delay_ms(), 4000);
-        b.record_failure();
-        assert_eq!(b.next_delay_ms(), 8000);
-        b.record_failure();
-        assert_eq!(b.next_delay_ms(), 10000, "capped at max");
-    }
-
-    #[test]
-    fn backoff_reset_on_success() {
-        let mut b = crate::reconnect::Backoff::new(1000, 10000);
-        b.record_failure();
-        b.record_failure();
-        assert!(b.is_cooling_down());
-        b.record_success();
-        assert!(!b.is_cooling_down());
-        assert_eq!(b.next_delay_ms(), 1000, "back to base after success");
-    }
-
-    #[test]
-    fn backoff_cooling_down() {
-        let mut b = crate::reconnect::Backoff::new(1000, 10000);
-        b.record_failure();
-        assert!(b.is_cooling_down());
-        std::hint::black_box(&b);
     }
 
     /// Builds a `MidiClockWorker` with dummy channels/atomics for exercising
@@ -1096,5 +999,336 @@ mod tests {
             try_connect_in(&name, pass_tx, drop_count).is_none(),
             "loopback-backed devices have no input passthrough"
         );
+    }
+
+    #[test]
+    fn atomic_clock_stats_store_and_load_roundtrip() {
+        let atomic = AtomicClockStats::default();
+        let written = ClockStats {
+            interval_us: 20833,
+            p50_us: 7,
+            p95_us: 42,
+            p99_us: 100,
+            max_us: 493,
+            sample_n: 64,
+        };
+        atomic.store(&written);
+        let loaded = atomic.load();
+        assert_eq!(loaded.interval_us, 20833);
+        assert_eq!(loaded.p50_us, 7);
+        assert_eq!(loaded.p95_us, 42);
+        assert_eq!(loaded.p99_us, 100);
+        assert_eq!(loaded.max_us, 493);
+        assert_eq!(loaded.sample_n, 64);
+    }
+
+    /// When the selected device is present in the port list but phys_out is None
+    /// (not yet connected), handle_port_scan must attempt to connect and, on
+    /// success, record a backoff success and call try_connect_in for passthrough.
+    /// Uses a loopback port so try_connect_out succeeds deterministically.
+    #[test]
+    fn handle_port_scan_connects_when_device_present_unconnected() {
+        let name = format!(
+            "EtherTap Test Connect {}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        );
+        let _port = midi_loopback::register(&name, midi_loopback::DEFAULT_CAPACITY)
+            .expect("register loopback for connect test");
+
+        let worker = make_test_worker(false);
+        let mut known_ports: Vec<String> = Vec::new();
+        let mut current_device: Option<String> = Some(name.clone());
+        let mut phys_out: Option<PhysOutput> = None; // not yet connected
+        let mut phys_in = None;
+        let mut backoff = crate::reconnect::Backoff::new(1000, 10000);
+        let (pass_tx, _pass_rx) = crossbeam_channel::bounded::<Vec<u8>>(16);
+        let pass_drop_count = Arc::new(AtomicU32::new(0));
+
+        handle_port_scan(
+            &[], // loopback port present via registered_names() union
+            &mut known_ports,
+            &mut current_device,
+            &mut phys_out,
+            &mut phys_in,
+            &mut backoff,
+            &pass_tx,
+            &pass_drop_count,
+            &worker,
+        );
+
+        assert!(
+            phys_out.is_some(),
+            "loopback port should be connected after scan"
+        );
+        assert!(
+            worker
+                .bridge_connected
+                .load(std::sync::atomic::Ordering::Acquire),
+            "bridge_connected must be true after successful connect"
+        );
+        assert!(
+            !backoff.is_cooling_down(),
+            "backoff must reset (record_success) after a successful connect"
+        );
+    }
+
+    /// When the backoff is cooling down, `handle_port_scan` must return early
+    /// without mutating any state — otherwise it would hammer a just-failed
+    /// device at full scan-timer rate instead of respecting the backoff delay.
+    #[test]
+    fn handle_port_scan_skips_when_backoff_cooling_down() {
+        let worker = make_test_worker(false);
+        let mut known_ports: Vec<String> = Vec::new();
+        let mut current_device: Option<String> = Some("FakeDevice".to_string());
+        let mut phys_out: Option<PhysOutput> = None;
+        let mut phys_in = None;
+        let mut backoff = crate::reconnect::Backoff::new(100, 10000);
+        backoff.record_failure(); // puts it in cooling-down state
+        assert!(backoff.is_cooling_down());
+
+        let (pass_tx, _pass_rx) = crossbeam_channel::bounded::<Vec<u8>>(16);
+        let pass_drop_count = Arc::new(AtomicU32::new(0));
+
+        handle_port_scan(
+            &["FakeDevice".to_string()],
+            &mut known_ports,
+            &mut current_device,
+            &mut phys_out,
+            &mut phys_in,
+            &mut backoff,
+            &pass_tx,
+            &pass_drop_count,
+            &worker,
+        );
+
+        // Still None — the early-return prevented the connect attempt.
+        assert!(
+            phys_out.is_none(),
+            "backoff cooling must prevent connect attempt"
+        );
+    }
+
+    /// When a connected device disappears from the port list, `handle_port_scan`
+    /// must clear `phys_out` / `phys_in` and update the bridge-connected atom.
+    #[test]
+    fn handle_port_scan_device_disappears_disconnects() {
+        let name = format!(
+            "EtherTap Test Disappear {}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        );
+        let _port = midi_loopback::register(&name, midi_loopback::DEFAULT_CAPACITY)
+            .expect("register loopback for disappear test");
+
+        let worker = make_test_worker(false);
+        let mut known_ports: Vec<String> = Vec::new();
+        let mut current_device: Option<String> = Some(name.clone());
+        // Connect to the loopback port so phys_out is Some.
+        let mut phys_out = try_connect_out(&name);
+        assert!(phys_out.is_some());
+        let mut phys_in = None;
+        let mut backoff = crate::reconnect::Backoff::new(1000, 10000);
+        let (pass_tx, _pass_rx) = crossbeam_channel::bounded::<Vec<u8>>(16);
+        let pass_drop_count = Arc::new(AtomicU32::new(0));
+
+        // Drop the registered port so it disappears from loopback_names().
+        drop(_port);
+
+        // Simulate a scan where the device is no longer listed anywhere.
+        handle_port_scan(
+            &[], // no hardware ports
+            &mut known_ports,
+            &mut current_device,
+            &mut phys_out,
+            &mut phys_in,
+            &mut backoff,
+            &pass_tx,
+            &pass_drop_count,
+            &worker,
+        );
+
+        assert!(
+            phys_out.is_none(),
+            "disappeared device must disconnect phys_out"
+        );
+        assert!(!worker
+            .bridge_connected
+            .load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    /// When a selected device is present AND already connected (`phys_out.is_some()`),
+    /// `handle_port_scan` must set `bridge_connecting = false` and leave the
+    /// connection intact — no reconnect attempt, no state mutation.
+    #[test]
+    fn handle_port_scan_device_present_and_already_connected() {
+        let name = format!(
+            "EtherTap Test AlreadyConn {}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        );
+        let _port = midi_loopback::register(&name, midi_loopback::DEFAULT_CAPACITY)
+            .expect("register loopback");
+
+        let worker = make_test_worker(false);
+        worker
+            .bridge_connecting
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        let mut known_ports: Vec<String> = Vec::new();
+        let mut current_device: Option<String> = Some(name.clone());
+        let mut phys_out = try_connect_out(&name);
+        assert!(phys_out.is_some());
+        let mut phys_in = None;
+        let mut backoff = crate::reconnect::Backoff::new(1000, 10000);
+        let (pass_tx, _pass_rx) = crossbeam_channel::bounded::<Vec<u8>>(16);
+        let pass_drop_count = Arc::new(AtomicU32::new(0));
+
+        handle_port_scan(
+            &[], // loopback port is still registered, so it IS present via loopback union
+            &mut known_ports,
+            &mut current_device,
+            &mut phys_out,
+            &mut phys_in,
+            &mut backoff,
+            &pass_tx,
+            &pass_drop_count,
+            &worker,
+        );
+
+        assert!(phys_out.is_some(), "connected port must remain connected");
+        assert!(
+            !worker
+                .bridge_connecting
+                .load(std::sync::atomic::Ordering::Acquire),
+            "bridge_connecting must be cleared when already connected"
+        );
+    }
+
+    /// When no device is selected at all, `handle_port_scan` must set
+    /// `bridge_connecting = false` regardless of the port list — there is
+    /// nothing to connect to.
+    #[test]
+    fn handle_port_scan_no_device_selected_clears_connecting() {
+        let worker = make_test_worker(false);
+        worker
+            .bridge_connecting
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        let mut known_ports: Vec<String> = Vec::new();
+        let mut current_device: Option<String> = None;
+        let mut phys_out: Option<PhysOutput> = None;
+        let mut phys_in = None;
+        let mut backoff = crate::reconnect::Backoff::new(1000, 10000);
+        let (pass_tx, _pass_rx) = crossbeam_channel::bounded::<Vec<u8>>(16);
+        let pass_drop_count = Arc::new(AtomicU32::new(0));
+
+        handle_port_scan(
+            &["SomeDevice".to_string()],
+            &mut known_ports,
+            &mut current_device,
+            &mut phys_out,
+            &mut phys_in,
+            &mut backoff,
+            &pass_tx,
+            &pass_drop_count,
+            &worker,
+        );
+
+        assert!(
+            !worker
+                .bridge_connecting
+                .load(std::sync::atomic::Ordering::Acquire),
+            "bridge_connecting must be cleared when no device is selected"
+        );
+    }
+
+    /// When initial_device is nonexistent at startup, bridge_connecting=true.
+    /// Covers run_worker lines 396-398 (enter the if-let branch, log, try_connect_out)
+    /// and line 410 (connecting=true when phys_out=None but device is Some).
+    #[test]
+    fn run_worker_nonexistent_initial_device_sets_bridge_connecting() {
+        let (clock_tx, clock_rx) = crossbeam_channel::bounded(1);
+        let (_dc_tx, device_change_rx) = crossbeam_channel::bounded(1);
+        let (_dw_tx, device_watch_rx) = crossbeam_channel::bounded(1);
+        let bridge_connected = Arc::new(AtomicBool::new(false));
+        let bridge_connecting = Arc::new(AtomicBool::new(false));
+
+        let worker = MidiClockWorker::new(
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicBool::new(false)),
+            clock_rx,
+            device_change_rx,
+            device_watch_rx,
+            Some("EtherTap Test NonExistent Port 9999999".to_string()),
+            bridge_connected.clone(),
+            bridge_connecting.clone(),
+            Arc::new(AtomicClockStats::default()),
+            24,
+        );
+
+        let bc = bridge_connected.clone();
+        let bconn = bridge_connecting.clone();
+        let handle = std::thread::spawn(move || worker.run());
+
+        // Give the worker time to process initial_device and enter the main loop.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        assert!(
+            bconn.load(std::sync::atomic::Ordering::Acquire),
+            "bridge_connecting must be set when device is selected but port not found"
+        );
+        assert!(
+            !bc.load(std::sync::atomic::Ordering::Acquire),
+            "bridge_connected must remain false for a nonexistent port"
+        );
+
+        drop(clock_tx);
+        let _ = handle.join();
+    }
+
+    /// When initial_device IS connectable at startup, bridge_connected=true.
+    /// Covers run_worker line 400 (phys_in = try_connect_in) — the `if phys_out.is_some()` body.
+    #[test]
+    fn run_worker_existing_initial_device_sets_bridge_connected() {
+        let port_name = format!(
+            "EtherTap Test InitDev {} {:?}",
+            std::process::id(),
+            std::thread::current().id()
+        );
+        let _port = midi_loopback::register(&port_name, midi_loopback::DEFAULT_CAPACITY)
+            .expect("register loopback port");
+
+        let (clock_tx, clock_rx) = crossbeam_channel::bounded(1);
+        let (_dc_tx, device_change_rx) = crossbeam_channel::bounded(1);
+        let (_dw_tx, device_watch_rx) = crossbeam_channel::bounded(1);
+        let bridge_connected = Arc::new(AtomicBool::new(false));
+        let bridge_connecting = Arc::new(AtomicBool::new(false));
+
+        let worker = MidiClockWorker::new(
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicBool::new(false)),
+            clock_rx,
+            device_change_rx,
+            device_watch_rx,
+            Some(port_name),
+            bridge_connected.clone(),
+            bridge_connecting.clone(),
+            Arc::new(AtomicClockStats::default()),
+            24,
+        );
+
+        let bc = bridge_connected.clone();
+        let handle = std::thread::spawn(move || worker.run());
+
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        assert!(
+            bc.load(std::sync::atomic::Ordering::Acquire),
+            "bridge_connected must be true when initial device is connectable"
+        );
+
+        drop(clock_tx);
+        let _ = handle.join();
     }
 }

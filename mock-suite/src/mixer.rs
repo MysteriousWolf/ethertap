@@ -454,6 +454,30 @@ pub fn parse_slots_spec(spec: &str) -> Result<[SlotState; 8], String> {
 mod tests {
     use super::*;
 
+    fn make_msg(addr: &str, args: Vec<OscType>) -> ReceivedMsg {
+        ReceivedMsg {
+            addr: addr.to_string(),
+            args,
+            ts_ms: 0,
+            peer: String::new(),
+        }
+    }
+
+    #[test]
+    fn received_msg_is_set_delay_happy_path() {
+        let msg = make_msg("/fx/3/par/02", vec![OscType::Float(0.1667)]);
+        assert_eq!(msg.is_set_delay(), Some((3u8, 0.1667)));
+    }
+
+    #[test]
+    fn received_msg_is_mute_happy_path() {
+        let muted = make_msg("/fxrtn/2/mix/on", vec![OscType::Int(0)]);
+        assert_eq!(muted.is_mute(), Some((2u8, true)));
+
+        let unmuted = make_msg("/fxrtn/4/mix/on", vec![OscType::Int(1)]);
+        assert_eq!(unmuted.is_mute(), Some((4u8, false)));
+    }
+
     #[test]
     fn parse_slots_spec_roundtrip() {
         let slots = parse_slots_spec("dly:120,other:1,empty,dly:90").unwrap();
@@ -526,6 +550,28 @@ mod tests {
             .collect();
         assert_eq!(strings.get(1), Some(&"Console A"));
         assert_eq!(strings.get(2), Some(&"M32"));
+    }
+
+    #[test]
+    fn type_name_known_bpm_compatible_types() {
+        assert_eq!(type_name(10), "DLY");
+        assert_eq!(type_name(11), "3TAP");
+        assert_eq!(type_name(12), "4TAP");
+        assert_eq!(type_name(21), "D/RV");
+        assert_eq!(type_name(24), "D/CR");
+        assert_eq!(type_name(25), "D/FL");
+        assert_eq!(type_name(26), "MODD");
+    }
+
+    #[test]
+    fn type_name_empty_and_non_bpm_types() {
+        assert_eq!(type_name(EMPTY), "---");
+        assert_eq!(type_name(1), "REV");
+        assert_eq!(type_name(2), "PIT");
+        assert_eq!(type_name(3), "CHO");
+        // Unknown type falls back.
+        assert_eq!(type_name(99), "FX?");
+        assert_eq!(type_name(-99), "FX?");
     }
 
     /// Default identity stays the historical "Mock Console"/"X32" so existing

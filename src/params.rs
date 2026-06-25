@@ -346,3 +346,64 @@ impl Default for EtherTapParams {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ppq_to_u8_covers_all_variants() {
+        let cases = [
+            (Ppq::P3, 3u8),
+            (Ppq::P4, 4),
+            (Ppq::P6, 6),
+            (Ppq::P8, 8),
+            (Ppq::P12, 12),
+            (Ppq::P16, 16),
+            (Ppq::P24, 24),
+            (Ppq::P32, 32),
+            (Ppq::P48, 48),
+            (Ppq::P96, 96),
+        ];
+        for (variant, expected) in cases {
+            assert_eq!(variant.to_u8(), expected);
+        }
+    }
+
+    #[test]
+    fn ppq_from_u8_covers_all_variants() {
+        let known: &[(u8, Ppq)] = &[
+            (3, Ppq::P3),
+            (4, Ppq::P4),
+            (6, Ppq::P6),
+            (8, Ppq::P8),
+            (12, Ppq::P12),
+            (16, Ppq::P16),
+            (24, Ppq::P24),
+            (32, Ppq::P32),
+            (48, Ppq::P48),
+            (96, Ppq::P96),
+        ];
+        for &(v, expected) in known {
+            assert_eq!(Ppq::from_u8(v), expected);
+        }
+        // Unknown value defaults to P24.
+        assert_eq!(Ppq::from_u8(0), Ppq::P24);
+        assert_eq!(Ppq::from_u8(255), Ppq::P24);
+    }
+
+    #[test]
+    fn ppq_roundtrip_to_u8_from_u8() {
+        for &v in &[3u8, 4, 6, 8, 12, 16, 24, 32, 48, 96] {
+            assert_eq!(Ppq::from_u8(v).to_u8(), v);
+        }
+    }
+
+    #[test]
+    fn ppq_display_matches_to_u8() {
+        for v in [3u8, 4, 6, 8, 12, 16, 24, 32, 48, 96] {
+            let p = Ppq::from_u8(v);
+            assert_eq!(format!("{p}"), format!("{v}"));
+        }
+    }
+}

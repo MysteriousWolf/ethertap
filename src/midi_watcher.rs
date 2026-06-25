@@ -267,21 +267,7 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("initial device-list broadcast was never sent within 5s of spawn()");
 
-        // The last_update_ts / has_update stores happen just after the send
-        // above — poll until has_update flips true instead of guessing a
-        // fixed sleep duration.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            if channels.has_update.load(Ordering::Relaxed) {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "has_update never became true within 5s of the initial broadcast"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-
+        // has_update is set synchronously before the recv_timeout returns above.
         assert!(
             channels.has_update.load(Ordering::Relaxed),
             "has_update must be true after the initial device-list broadcast"

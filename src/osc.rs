@@ -262,13 +262,7 @@ pub fn float_to_bpm(f: f32) -> f64 {
 
 fn msg(addr: String, args: Vec<OscType>) -> Vec<u8> {
     let packet = OscPacket::Message(OscMessage { addr, args });
-    match encoder::encode(&packet) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            log::error!("[EtherTap] OSC encode failed (this is a bug): {e}");
-            vec![]
-        }
-    }
+    encoder::encode(&packet).expect("rosc encode: unreachable with valid address and arg types")
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -311,64 +305,44 @@ mod tests {
 
     #[test]
     fn bpm_scaling_never_negative() {
+        // 9999 BPM → 20/9999 ≈ 0.002001
         let f = bpm_to_float(9_999.0);
-        assert!(f >= 0.0, "result must not be negative");
-        assert!(f <= 1.0, "result must not exceed 1.0");
+        let expected = 20.0_f32 / 9_999.0;
+        assert!(
+            (f - expected).abs() < 0.001,
+            "9999 BPM → {f}, expected ~{expected}"
+        );
     }
 
     #[test]
     fn set_fx_delay_dly_uses_par02() {
         // DLY (type 10): mix=par/01, time=par/02
         let bytes = set_fx_delay(3, 10, 0.25);
-        let packet = match rosc::decoder::decode_udp(&bytes) {
-            Ok(p) => p.1,
-            Err(e) => {
-                log::warn!("decode_udp failed (DLY): {e}");
-                return;
-            }
+        let Ok((_, rosc::OscPacket::Message(m))) = rosc::decoder::decode_udp(&bytes) else {
+            panic!("osc encode produced invalid bytes or non-Message packet");
         };
-        if let rosc::OscPacket::Message(m) = packet {
-            assert_eq!(m.addr, "/fx/3/par/02");
-            assert_eq!(m.args, vec![rosc::OscType::Float(0.25)]);
-        } else {
-            panic!("expected a message");
-        }
+        assert_eq!(m.addr, "/fx/3/par/02");
+        assert_eq!(m.args, vec![rosc::OscType::Float(0.25)]);
     }
 
     #[test]
     fn set_fx_delay_drv_uses_par01() {
         // D/RV (type 21): time is first param = par/01
         let bytes = set_fx_delay(3, 21, 0.25);
-        let packet = match rosc::decoder::decode_udp(&bytes) {
-            Ok(p) => p.1,
-            Err(e) => {
-                log::warn!("decode_udp failed (D/RV): {e}");
-                return;
-            }
+        let Ok((_, rosc::OscPacket::Message(m))) = rosc::decoder::decode_udp(&bytes) else {
+            panic!("osc encode produced invalid bytes or non-Message packet");
         };
-        if let rosc::OscPacket::Message(m) = packet {
-            assert_eq!(m.addr, "/fx/3/par/01");
-            assert_eq!(m.args, vec![rosc::OscType::Float(0.25)]);
-        } else {
-            panic!("expected a message");
-        }
+        assert_eq!(m.addr, "/fx/3/par/01");
+        assert_eq!(m.args, vec![rosc::OscType::Float(0.25)]);
     }
 
     #[test]
     fn heartbeat_is_valid_osc() {
         let bytes = heartbeat();
-        let packet = match rosc::decoder::decode_udp(&bytes) {
-            Ok(p) => p.1,
-            Err(e) => {
-                log::warn!("decode_udp failed (heartbeat): {e}");
-                return;
-            }
+        let Ok((_, rosc::OscPacket::Message(m))) = rosc::decoder::decode_udp(&bytes) else {
+            panic!("osc encode produced invalid bytes or non-Message packet");
         };
-        if let rosc::OscPacket::Message(m) = packet {
-            assert_eq!(m.addr, "/info");
-        } else {
-            panic!("expected a message");
-        }
+        assert_eq!(m.addr, "/info");
     }
 
     #[test]
@@ -394,49 +368,31 @@ mod tests {
     fn query_fx_delay_is_get_message() {
         // A query (no args) should decode to a message with empty args
         let bytes = query_fx_delay(2, 10);
-        let packet = match rosc::decoder::decode_udp(&bytes) {
-            Ok(p) => p.1,
-            Err(e) => {
-                log::warn!("decode_udp failed (query): {e}");
-                return;
-            }
+        let Ok((_, rosc::OscPacket::Message(m))) = rosc::decoder::decode_udp(&bytes) else {
+            panic!("osc encode produced invalid bytes or non-Message packet");
         };
-        if let rosc::OscPacket::Message(m) = packet {
-            assert_eq!(m.addr, "/fx/2/par/02");
-            assert!(m.args.is_empty(), "query must have no args");
-        } else {
-            panic!("expected a message");
-        }
+        assert_eq!(m.addr, "/fx/2/par/02");
+        assert!(m.args.is_empty(), "query must have no args");
     }
 
     #[test]
     fn set_fxrtn_mute_encode() {
         let bytes = set_fxrtn_mute(1, true);
-        let packet = match rosc::decoder::decode_udp(&bytes) {
-            Ok(p) => p.1,
-            Err(_) => panic!("decode failed"),
+        let Ok((_, rosc::OscPacket::Message(m))) = rosc::decoder::decode_udp(&bytes) else {
+            panic!("osc encode produced invalid bytes or non-Message packet");
         };
-        if let rosc::OscPacket::Message(m) = packet {
-            assert_eq!(m.addr, "/fxrtn/1/mix/on");
-            assert_eq!(m.args, vec![rosc::OscType::Int(0)]);
-        } else {
-            panic!("expected a message");
-        }
+        assert_eq!(m.addr, "/fxrtn/1/mix/on");
+        assert_eq!(m.args, vec![rosc::OscType::Int(0)]);
     }
 
     #[test]
     fn query_fx_type_encode() {
         let bytes = query_fx_type(3);
-        let packet = match rosc::decoder::decode_udp(&bytes) {
-            Ok(p) => p.1,
-            Err(_) => panic!("decode failed"),
+        let Ok((_, rosc::OscPacket::Message(m))) = rosc::decoder::decode_udp(&bytes) else {
+            panic!("osc encode produced invalid bytes or non-Message packet");
         };
-        if let rosc::OscPacket::Message(m) = packet {
-            assert_eq!(m.addr, "/fx/3/type");
-            assert!(m.args.is_empty());
-        } else {
-            panic!("expected a message");
-        }
+        assert_eq!(m.addr, "/fx/3/type");
+        assert!(m.args.is_empty());
     }
 
     #[test]
@@ -446,7 +402,11 @@ mod tests {
         assert_eq!(super::delay_par(12), 1, "4TAP uses par/01");
         assert_eq!(super::delay_par(21), 1, "D/RV uses par/01");
         assert_eq!(super::delay_par(26), 1, "MODD uses par/01");
-        assert_eq!(super::delay_par(0), 2, "unknown uses fallback par/02");
+        assert_eq!(
+            super::delay_par(0),
+            2,
+            "non-BPM type (Hall Reverb, type 0) exercises fallback to par/02"
+        );
     }
 
     #[test]
