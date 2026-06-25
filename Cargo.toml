@@ -59,6 +59,12 @@ baseview = { path = "vendor/baseview" }
 nih_plug      = { path = "vendor/nih-plug" }
 nih_plug_iced = { path = "vendor/nih-plug/nih_plug_iced" }
 
+# Replace copypasta 0.7.1 (pulled in by iced_baseview) with an arboard-backed
+# shim. copypasta 0.7.1 depends on objc-foundation → block 0.1.6, which will
+# become a hard error in a future Rust release. arboard 3.x uses objc2 only.
+[patch.crates-io]
+copypasta = { path = "vendor/copypasta" }
+
 [profile.release]
 lto = "thin"
 strip = "symbols"

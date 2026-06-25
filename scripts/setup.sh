@@ -10,10 +10,10 @@
 set -euo pipefail
 
 BASEVIEW_URL="https://github.com/RustAudio/baseview.git"
-BASEVIEW_REV="579130e"   # update this when upgrading baseview (see PATCHES.md)
+BASEVIEW_REV="91e3b4a"   # update this when upgrading baseview (see PATCHES.md)
 
 NIH_PLUG_URL="https://github.com/robbert-vdh/nih-plug.git"
-NIH_PLUG_REV="28b149ec4d62757d0b448809148a0c3ca6e09a95"   # update this when upgrading nih-plug (see PATCHES.md)
+NIH_PLUG_REV="f36931f7af4646065488a9845d8f8c2f95252c23"   # update this when upgrading nih-plug (see PATCHES.md)
 
 DRY_RUN=false
 

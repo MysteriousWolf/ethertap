@@ -1,41 +1,27 @@
+diff --git a/src/window.rs b/src/window.rs
+index 2ac3660..c3bae90 100644
 --- a/src/window.rs
 +++ b/src/window.rs
-@@ -3,6 +3,10 @@
+@@ -1,5 +1,7 @@
+ use std::marker::PhantomData;
+ 
++extern crate rwh04;
++
  use raw_window_handle::{
      HasRawDisplayHandle, HasRawWindowHandle, RawDisplayHandle, RawWindowHandle,
  };
-+// rwh04 alias: allows iced_baseview (which pins raw-window-handle 0.4) to
-+// use this crate through the workspace [patch] override while nih-plug's
-+// standalone wrapper continues to use the 0.5 API.
-+extern crate rwh04;
- 
- use crate::event::{Event, EventStatus};
- use crate::window_open_options::WindowOpenOptions;
-@@ -44,6 +48,13 @@
-     }
- }
- 
-+// raw-window-handle 0.4 compatibility — needed by iced_baseview.
-+unsafe impl rwh04::HasRawWindowHandle for WindowHandle {
-+    fn raw_window_handle(&self) -> rwh04::RawWindowHandle {
-+        rwh05_to_rwh04(<Self as HasRawWindowHandle>::raw_window_handle(self))
-+    }
-+}
-+
- pub trait WindowHandler {
-     fn on_frame(&mut self, window: &mut Window);
-     fn on_event(&mut self, window: &mut Window, event: Event) -> EventStatus;
-@@ -69,7 +80,7 @@
+@@ -62,7 +64,8 @@ impl<'a> Window<'a> {
  
      pub fn open_parented<P, H, B>(parent: &P, options: WindowOpenOptions, build: B) -> WindowHandle
      where
 -        P: HasRawWindowHandle,
++        // Accept rwh 0.4 so that iced_baseview (which pins 0.4) can call this.
 +        P: rwh04::HasRawWindowHandle,
          H: WindowHandler + 'static,
          B: FnOnce(&mut Window) -> H,
          B: Send + 'static,
-@@ -87,6 +98,20 @@
-         platform::Window::open_blocking::<H, B>(options, build)
+@@ -71,6 +74,19 @@ impl<'a> Window<'a> {
+         WindowHandle::new(window_handle)
      }
  
 +    /// Create an embedded view without attaching it to a real parent window.
@@ -47,20 +33,25 @@
 +        B: FnOnce(&mut Window) -> H,
 +        B: Send + 'static,
 +    {
-+        let window_handle =
-+            platform::Window::open_as_if_parented::<H, B>(options, build);
++        let window_handle = platform::Window::open_as_if_parented::<H, B>(options, build);
 +        WindowHandle::new(window_handle)
 +    }
 +
-     /// Close the window
-     pub fn close(&mut self) {
-         self.window.close();
-@@ -129,3 +154,52 @@
+     pub fn open_blocking<H, B>(options: WindowOpenOptions, build: B)
+     where
+         H: WindowHandler + 'static,
+@@ -122,3 +138,51 @@ unsafe impl<'a> HasRawDisplayHandle for Window<'a> {
          self.window.raw_display_handle()
      }
  }
 +
 +// raw-window-handle 0.4 compatibility — needed by iced_baseview.
++unsafe impl rwh04::HasRawWindowHandle for WindowHandle {
++    fn raw_window_handle(&self) -> rwh04::RawWindowHandle {
++        rwh05_to_rwh04(<Self as HasRawWindowHandle>::raw_window_handle(self))
++    }
++}
++
 +unsafe impl<'a> rwh04::HasRawWindowHandle for Window<'a> {
 +    fn raw_window_handle(&self) -> rwh04::RawWindowHandle {
 +        rwh05_to_rwh04(<Self as HasRawWindowHandle>::raw_window_handle(self))
@@ -68,10 +59,6 @@
 +}
 +
 +/// Convert a raw-window-handle 0.5 handle to its 0.4 equivalent.
-+///
-+/// Most platforms carry the same underlying pointer fields across both
-+/// versions; the rename is purely a crate-version-boundary artefact. The
-+/// Xlib case is the exception — see the comment on that arm below.
 +#[allow(unused_variables)]
 +fn rwh05_to_rwh04(h: RawWindowHandle) -> rwh04::RawWindowHandle {
 +    match h {
@@ -90,9 +77,6 @@
 +        }
 +        #[cfg(target_os = "linux")]
 +        RawWindowHandle::Xlib(h) => {
-+            // rwh 0.5's XlibWindowHandle dropped the `display` pointer (it now
-+            // lives on XlibDisplayHandle via HasRawDisplayHandle); rwh04's
-+            // XlibHandle::empty() already zero-inits `display` to null.
 +            let mut out = rwh04::XlibHandle::empty();
 +            out.window = h.window;
 +            out.visual_id = h.visual_id;

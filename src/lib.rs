@@ -1669,6 +1669,74 @@ mod tests {
         );
     }
 
+    /// `SlotScanDone` fires while `bpm_is_settling=true` — reconnect auto-sync must
+    /// NOT dispatch because the current BPM is still mid-transition. Dispatching at
+    /// this point would set the mixer to a stale (wrong) tempo. The pending flag must
+    /// stay set so the settle handler picks it up once the BPM stabilises.
+    #[test]
+    fn slot_scan_done_does_not_dispatch_while_settling() {
+        let mut plugin = EtherTap::default();
+        let (status_tx, status_rx) = crossbeam_channel::bounded(8);
+        status_tx.send(NetworkStatus::SlotScanDone).unwrap();
+        plugin.status_rx = status_rx;
+
+        let (test_cmd_tx, test_cmd_rx) = crossbeam_channel::bounded(8);
+        plugin.cmd_tx = test_cmd_tx;
+
+        plugin.reconnect_sync_pending = true;
+        plugin.last_bpm = 120.0;
+        plugin.bpm_is_settling = true; // ← BPM still changing: stale dispatch would be wrong
+        plugin.last_conn_status = true; // skip just-connected transition
+
+        let mut ctx = MockProcessContext::new(120.0, false);
+        let mut buffer = make_buffer();
+        let mut aux = make_aux();
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+
+        assert!(
+            plugin.reconnect_sync_pending,
+            "reconnect_sync_pending must stay set while BPM is still settling"
+        );
+        assert!(
+            test_cmd_rx.try_recv().is_err(),
+            "SlotScanDone must not dispatch while BPM is settling (stale-BPM guard)"
+        );
+    }
+
+    /// `SlotScanDone` fires before any BPM has been seen (`last_bpm == 0.0`) — the
+    /// reconnect auto-sync must NOT dispatch because we have nothing valid to send.
+    /// The pending flag stays set and the settle or next-process path will dispatch
+    /// once `last_bpm` is populated.
+    #[test]
+    fn slot_scan_done_does_not_dispatch_when_no_bpm_known() {
+        let mut plugin = EtherTap::default();
+        let (status_tx, status_rx) = crossbeam_channel::bounded(8);
+        status_tx.send(NetworkStatus::SlotScanDone).unwrap();
+        plugin.status_rx = status_rx;
+
+        let (test_cmd_tx, test_cmd_rx) = crossbeam_channel::bounded(8);
+        plugin.cmd_tx = test_cmd_tx;
+
+        plugin.reconnect_sync_pending = true;
+        plugin.last_bpm = 0.0; // ← no BPM seen yet
+        plugin.bpm_is_settling = false;
+        plugin.last_conn_status = true;
+
+        let mut ctx = MockProcessContext::new(120.0, false);
+        let mut buffer = make_buffer();
+        let mut aux = make_aux();
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+
+        assert!(
+            plugin.reconnect_sync_pending,
+            "reconnect_sync_pending must stay set when no BPM is known"
+        );
+        assert!(
+            test_cmd_rx.try_recv().is_err(),
+            "SlotScanDone must not dispatch when last_bpm is zero (no BPM known)"
+        );
+    }
+
     #[test]
     fn on_change_retry_dispatches_when_hw_mismatched() {
         let mut plugin = EtherTap::default();

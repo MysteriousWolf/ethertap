@@ -1,0 +1,38 @@
+diff --git a/src/wrappers/appkit.rs b/src/wrappers/appkit.rs
+index 0db5d6c..0d754b7 100644
+--- a/src/wrappers/appkit.rs
++++ b/src/wrappers/appkit.rs
+@@ -3,8 +3,6 @@ mod timer;
+ mod view;
+ mod window;
+ 
+-use objc2::rc::Retained;
+-use objc2_app_kit::{NSView, NSWindow};
+ use objc2_core_foundation::CFUUID;
+ use std::ffi::CString;
+ 
+@@ -13,8 +11,6 @@ pub use timer::TimerHandle;
+ pub use view::*;
+ pub use window::*;
+ 
+-use raw_window_handle::RawWindowHandle;
+-
+ fn new_class_name(prefix: &str) -> CString {
+     // PANIC: CFUUIDCreate is not documented to return NULL.
+     let uuid = CFUUID::new(None).unwrap();
+@@ -26,15 +22,3 @@ fn new_class_name(prefix: &str) -> CString {
+     CString::new(class_name).unwrap()
+ }
+ 
+-pub fn extract_raw_window_handle(
+-    handle: RawWindowHandle,
+-) -> (Option<Retained<NSWindow>>, Option<Retained<NSView>>) {
+-    let RawWindowHandle::AppKit(handle) = handle else {
+-        panic!("Not a macOS window");
+-    };
+-
+-    let parent_window = unsafe { Retained::retain(handle.ns_window as *mut NSWindow) };
+-    let parent_view = unsafe { Retained::retain(handle.ns_view as *mut NSView) };
+-
+-    (parent_window, parent_view)
+-}

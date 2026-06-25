@@ -1591,4 +1591,35 @@ mod tests {
             "slot 9 (out of range) should default to DLY type 10"
         );
     }
+
+    /// When `scan_targets_bg` runs but the scan generation has advanced (editor
+    /// cleared and restarted a new scan before this thread finished), the stale
+    /// results must be discarded and no `ScanDone` sentinel must be sent to the
+    /// audio thread. Without this guard, the audio thread would stamp
+    /// `scan_completed_ts` for a scan that was already superseded, confusing the
+    /// editor's "scan finished" display.
+    #[test]
+    fn scan_targets_bg_discards_stale_generation() {
+        let scan_targets = Arc::new(Mutex::new(Vec::<DeviceInfo>::new()));
+        let (status_tx, status_rx) = crossbeam_channel::bounded(8);
+        let scan_generation = Arc::new(AtomicU64::new(2)); // advanced past expected_gen
+
+        // Call with expected_gen=1 but current generation is 2 → stale.
+        NetworkWorker::scan_targets_bg(
+            scan_targets.clone(),
+            status_tx,
+            scan_generation,
+            1, // expected_gen — outdated
+            10023,
+        );
+
+        assert!(
+            scan_targets.lock().is_empty(),
+            "stale scan results must not be merged into scan_targets"
+        );
+        assert!(
+            status_rx.try_recv().is_err(),
+            "stale scan must not send ScanDone to the audio thread"
+        );
+    }
 }
