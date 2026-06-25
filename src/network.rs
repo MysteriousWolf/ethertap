@@ -13,14 +13,14 @@
 /// Exits automatically when the audio-thread's `Sender` is dropped.
 use std::{
     net::{SocketAddr, UdpSocket},
-    sync::atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicU8, Ordering},
     sync::Arc,
+    sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use parking_lot::Mutex;
-use rosc::{decoder, OscMessage, OscPacket, OscType};
+use rosc::{OscMessage, OscPacket, OscType, decoder};
 
 use crate::osc;
 use crate::reconnect::Backoff;
@@ -663,19 +663,21 @@ impl NetworkWorker {
                 interrupted = true;
                 break 'audit;
             };
-            if let Ok((len, _)) = sock.recv_from(&mut buf) {
-                if let Some(type_id) = parse_fx_type(&buf[..len]) {
-                    slot_types[(slot - 1) as usize] = Some(type_id);
-                    if osc::is_bpm_compatible(type_id, slot) {
-                        compatible.push(slot);
-                    }
-                    occupied.push(slot);
+            if let Ok((len, _)) = sock.recv_from(&mut buf)
+                && let Some(type_id) = parse_fx_type(&buf[..len])
+            {
+                slot_types[(slot - 1) as usize] = Some(type_id);
+                if osc::is_bpm_compatible(type_id, slot) {
+                    compatible.push(slot);
                 }
+                occupied.push(slot);
             }
         }
 
         if interrupted {
-            log::info!("[EtherTap] audit_slots: interrupted (disconnect mid-audit), discarding partial results");
+            log::info!(
+                "[EtherTap] audit_slots: interrupted (disconnect mid-audit), discarding partial results"
+            );
             return;
         }
 
@@ -913,17 +915,16 @@ impl NetworkWorker {
             let has_id = !name.is_empty() || !model.is_empty();
 
             // Try to find an existing entry with the same identity.
-            if has_id {
-                if let Some(existing) = result
+            if has_id
+                && let Some(existing) = result
                     .iter_mut()
                     .find(|d| d.name == name && d.model == model)
-                {
-                    // Same physical device reachable via another IP — append.
-                    if !existing.all_addrs.iter().any(|(a, _, _)| *a == ip) {
-                        existing.all_addrs.push((ip, Some(latency_ms), same_subnet));
-                    }
-                    continue;
+            {
+                // Same physical device reachable via another IP — append.
+                if !existing.all_addrs.iter().any(|(a, _, _)| *a == ip) {
+                    existing.all_addrs.push((ip, Some(latency_ms), same_subnet));
                 }
+                continue;
             }
 
             // New device.
@@ -1076,7 +1077,7 @@ pub fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rosc::{encoder, OscMessage};
+    use rosc::{OscMessage, encoder};
 
     #[test]
     fn display_name_name_and_model() {
@@ -1547,7 +1548,7 @@ mod tests {
     /// Exercises the `_ => None` arm in `decode_osc_message`.
     #[test]
     fn decode_osc_bundle_returns_none() {
-        use rosc::{encoder, OscBundle, OscPacket, OscTime};
+        use rosc::{OscBundle, OscPacket, OscTime, encoder};
         let bundle_bytes = encoder::encode(&OscPacket::Bundle(OscBundle {
             timetag: OscTime {
                 seconds: 0,
@@ -1567,7 +1568,7 @@ mod tests {
     /// filter_map inside `parse_info_strings`.
     #[test]
     fn parse_info_strings_non_string_arg_filtered_out() {
-        use rosc::{encoder, OscMessage, OscPacket, OscType};
+        use rosc::{OscMessage, OscPacket, OscType, encoder};
         let msg_bytes = encoder::encode(&OscPacket::Message(OscMessage {
             addr: "/info".to_string(),
             args: vec![OscType::Int(42), OscType::Int(99)],

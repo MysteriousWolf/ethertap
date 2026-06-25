@@ -11,7 +11,7 @@ use std::io::Write;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use mock_suite::{default_slots, parse_slots_spec, MockMixer, SlotState};
+use mock_suite::{MockMixer, SlotState, default_slots, parse_slots_spec};
 
 mod tui;
 
@@ -184,17 +184,17 @@ fn run_headless(args: &Args, slots: [SlotState; 8]) -> i32 {
             eprintln!("mock-suite: all {} expectation(s) satisfied", expects.len());
             return 0;
         }
-        if let Some(d) = deadline {
-            if Instant::now() >= d {
-                if expects.is_empty() {
-                    return 0;
-                }
-                for e in &expects {
-                    let ok = expects_satisfied(&mock, std::slice::from_ref(e));
-                    eprintln!("mock-suite: {} {e:?}", if ok { "OK  " } else { "FAIL" });
-                }
-                return 1;
+        if let Some(d) = deadline
+            && Instant::now() >= d
+        {
+            if expects.is_empty() {
+                return 0;
             }
+            for e in &expects {
+                let ok = expects_satisfied(&mock, std::slice::from_ref(e));
+                eprintln!("mock-suite: {} {e:?}", if ok { "OK  " } else { "FAIL" });
+            }
+            return 1;
         }
         std::thread::sleep(Duration::from_millis(25));
     }

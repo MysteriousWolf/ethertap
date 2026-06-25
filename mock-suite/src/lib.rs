@@ -10,8 +10,8 @@
 
 pub mod mixer;
 pub use mixer::{
-    all_dly_slots, all_empty_slots, default_slots, parse_slots_spec, type_name, MockMixer,
-    ReceivedMsg, SlotState, DLY, EMPTY,
+    DLY, EMPTY, MockMixer, ReceivedMsg, SlotState, all_dly_slots, all_empty_slots, default_slots,
+    parse_slots_spec, type_name,
 };
 
 pub mod sink_state;

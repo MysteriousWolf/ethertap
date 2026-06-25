@@ -8,25 +8,25 @@
 /// Solar Icon Set Bold (PUA U+E900…) is used for all non-text glyphs.
 use std::collections::VecDeque;
 use std::sync::{
-    atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicU8, Ordering},
     Arc,
+    atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering},
 };
 
 use nih_plug::prelude::{BoolParam, GuiContext, ParamSetter};
 use nih_plug_iced::{
-    button, container, create_iced_editor, executor, pick_list, text_input,
-    widget::{tooltip, Button, Column, Container, PickList, Row, Space, Text, TextInput},
     Alignment, Background, Color, Command, Element, Font, IcedEditor, Length, Subscription,
-    WindowQueue, WindowSubs,
+    WindowQueue, WindowSubs, button, container, create_iced_editor, executor, pick_list,
+    text_input,
+    widget::{Button, Column, Container, PickList, Row, Space, Text, TextInput, tooltip},
 };
 use parking_lot::Mutex;
 
 #[cfg(feature = "standalone")]
 use crate::params::SyncStatus;
 use crate::{
-    network::{now_ms, DeviceInfo, NetworkCommand},
+    network::{DeviceInfo, NetworkCommand, now_ms},
     osc,
-    params::{EtherTapParams, Ppq, SyncMode, MONO_FONT},
+    params::{EtherTapParams, MONO_FONT, Ppq, SyncMode},
 };
 
 // ─── Solar Icons Bold font ───────────────────────────────────────────────────
@@ -929,10 +929,10 @@ impl IcedEditor for EtherTapEditor {
                 }
             }
             Message::PortEdited(s) => {
-                if !self.data.conn_status.load(Ordering::Acquire) {
-                    if let Ok(port) = s.parse::<u16>() {
-                        *self.data.params.target_port.lock() = port;
-                    }
+                if !self.data.conn_status.load(Ordering::Acquire)
+                    && let Ok(port) = s.parse::<u16>()
+                {
+                    *self.data.params.target_port.lock() = port;
                     // invalid input: rejected; params unchanged, TextInput reverts on next frame
                 }
             }
@@ -1118,10 +1118,10 @@ impl IcedEditor for EtherTapEditor {
             Message::TapTempo => {
                 let now = std::time::Instant::now();
                 const MAX_GAP: std::time::Duration = std::time::Duration::from_secs(2);
-                if let Some(&last) = self.tap_times.back() {
-                    if now.duration_since(last) > MAX_GAP {
-                        self.tap_times.clear();
-                    }
+                if let Some(&last) = self.tap_times.back()
+                    && now.duration_since(last) > MAX_GAP
+                {
+                    self.tap_times.clear();
                 }
                 self.tap_times.push_back(now);
                 if self.tap_times.len() > 8 {
@@ -1172,11 +1172,7 @@ impl IcedEditor for EtherTapEditor {
         // Snapshot slot_types from atomics (i32::MIN = not yet queried → None).
         let slot_types: [Option<i32>; 8] = std::array::from_fn(|i| {
             let raw = self.data.slot_types[i].load(Ordering::Relaxed);
-            if raw == i32::MIN {
-                None
-            } else {
-                Some(raw)
-            }
+            if raw == i32::MIN { None } else { Some(raw) }
         });
         let all_mode = self.data.params.all_slots.value();
         let post_audit = compat_mask != 0 || occup_mask != 0;

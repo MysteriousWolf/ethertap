@@ -1,4 +1,5 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 
 fn bench_bpm_to_float(c: &mut Criterion) {
     c.bench_function("bpm_to_float", |b| {

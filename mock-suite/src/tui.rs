@@ -7,17 +7,17 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Axis, Block, BorderType, Cell, Chart, Dataset, GraphType, Paragraph, Row, Sparkline, Table,
     Tabs,
 };
-use ratatui::Frame;
 
-use mock_suite::{type_name, MockMixer, SlotState, DLY, EMPTY};
+use mock_suite::{DLY, EMPTY, MockMixer, SlotState, type_name};
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -125,27 +125,27 @@ pub fn run(port: u16, slots: [SlotState; 8], no_midi: bool) -> std::io::Result<(
             break Err(e);
         }
         // Poll keyboard at the refresh cadence.
-        if event::poll(Duration::from_millis(250))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
+        if event::poll(Duration::from_millis(250))?
+            && let Event::Key(key) = event::read()?
+        {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Char('Q') => break Ok(()),
+                KeyCode::Char('c') | KeyCode::Char('C') => app.toggle_sink(),
+                KeyCode::Char('m') | KeyCode::Char('M') => app.toggle_mixer(),
+                KeyCode::Char('k') | KeyCode::Char('K') => app.log_scroll += 1,
+                KeyCode::Char('j') | KeyCode::Char('J') => {
+                    app.log_scroll = app.log_scroll.saturating_sub(1)
                 }
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Char('Q') => break Ok(()),
-                    KeyCode::Char('c') | KeyCode::Char('C') => app.toggle_sink(),
-                    KeyCode::Char('m') | KeyCode::Char('M') => app.toggle_mixer(),
-                    KeyCode::Char('k') | KeyCode::Char('K') => app.log_scroll += 1,
-                    KeyCode::Char('j') | KeyCode::Char('J') => {
-                        app.log_scroll = app.log_scroll.saturating_sub(1)
-                    }
-                    KeyCode::Char('r') | KeyCode::Char('R') => app.log_scroll = 0,
-                    KeyCode::Char('1') => app.tab = Tab::Overview,
-                    KeyCode::Char('2') => app.tab = Tab::Midi,
-                    KeyCode::Char('3') => app.tab = Tab::Mixer,
-                    KeyCode::Char('4') => app.tab = Tab::Log,
-                    KeyCode::Tab => app.tab = app.tab.next(),
-                    _ => {}
-                }
+                KeyCode::Char('r') | KeyCode::Char('R') => app.log_scroll = 0,
+                KeyCode::Char('1') => app.tab = Tab::Overview,
+                KeyCode::Char('2') => app.tab = Tab::Midi,
+                KeyCode::Char('3') => app.tab = Tab::Mixer,
+                KeyCode::Char('4') => app.tab = Tab::Log,
+                KeyCode::Tab => app.tab = app.tab.next(),
+                _ => {}
             }
         }
     };
@@ -846,13 +846,13 @@ fn draw_log(f: &mut Frame, area: Rect, mixer: &MockMixer, log_scroll: usize) {
         ];
         spans.extend(arg_spans(&m.args));
         // Highlight delay-time sets with the decoded BPM.
-        if let Some((_, v)) = m.is_set_delay() {
-            if v > 0.0 {
-                spans.push(Span::styled(
-                    format!("  → {:.2} BPM", 20.0 / v),
-                    Style::default().fg(Color::Green).bold(),
-                ));
-            }
+        if let Some((_, v)) = m.is_set_delay()
+            && v > 0.0
+        {
+            spans.push(Span::styled(
+                format!("  → {:.2} BPM", 20.0 / v),
+                Style::default().fg(Color::Green).bold(),
+            ));
         }
         lines.push(Line::from(spans));
     }

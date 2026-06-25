@@ -22,8 +22,8 @@
 /// Real-time safety contract: `process()` must never allocate, block, or lock
 /// a contended mutex.  All X32 I/O is delegated via bounded lock-free channels.
 use std::sync::{
-    atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicU8, Ordering},
     Arc,
+    atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering},
 };
 
 use nih_plug::prelude::*;
@@ -39,7 +39,7 @@ mod params;
 pub mod reconnect;
 pub use params::EtherTapParams;
 
-use network::{now_ms, NetworkCommand, NetworkStatus, NetworkWorker};
+use network::{NetworkCommand, NetworkStatus, NetworkWorker, now_ms};
 use params::{SyncMode, SyncStatus};
 
 // ─── Timing constants ────────────────────────────────────────────────────────
@@ -435,12 +435,12 @@ impl Plugin for EtherTap {
             // Automated test hook: ETHERTAP_TEST_PORT=<port> pre-sets the
             // target to 127.0.0.1:<port> and triggers an immediate connect,
             // enabling headless integration tests without GUI interaction.
-            if let Ok(port_str) = std::env::var("ETHERTAP_TEST_PORT") {
-                if let Ok(port) = port_str.parse::<u16>() {
-                    *self.params.target_ip.lock() = "127.0.0.1".to_string();
-                    *self.params.target_port.lock() = port;
-                    let _ = self.cmd_tx.try_send(NetworkCommand::ConnectToLast);
-                }
+            if let Ok(port_str) = std::env::var("ETHERTAP_TEST_PORT")
+                && let Ok(port) = port_str.parse::<u16>()
+            {
+                *self.params.target_ip.lock() = "127.0.0.1".to_string();
+                *self.params.target_port.lock() = port;
+                let _ = self.cmd_tx.try_send(NetworkCommand::ConnectToLast);
             }
         }
         #[cfg(not(feature = "standalone"))]
@@ -1539,9 +1539,11 @@ mod tests {
 
         // auto_reconnect must default OFF — no surprise automation.
         assert!(!params.auto_reconnect.value());
-        assert!(!params
-            .auto_reconnect_atom
-            .load(std::sync::atomic::Ordering::Relaxed));
+        assert!(
+            !params
+                .auto_reconnect_atom
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
     }
 
     // ── NetworkStatus::ScanDone ─────────────────────────────────────────────

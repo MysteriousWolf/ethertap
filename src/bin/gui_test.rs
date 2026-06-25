@@ -9,9 +9,6 @@
 ///
 /// (Audio I/O is optional; the GUI opens even if no audio device is found.)
 fn main() {
-    #[cfg(feature = "standalone")]
-    env_logger::init();
-
     if !nih_plug::nih_export_standalone::<ethertap::EtherTap>() {
         eprintln!("[EtherTap] standalone init failed");
         std::process::exit(1);

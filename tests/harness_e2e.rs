@@ -17,8 +17,8 @@ mod common;
 
 use std::time::Duration;
 
-use common::harness_util::{connect, step_until, E2E_LOCK};
 use common::MockMixer;
+use common::harness_util::{E2E_LOCK, connect, step_until};
 
 #[test]
 fn connect_disconnect_lifecycle_via_trigger_params() {

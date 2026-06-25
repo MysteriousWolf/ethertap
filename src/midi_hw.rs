@@ -5,8 +5,8 @@
 //! in `midi_clock::try_connect_out` is kept in that module; only the hardware
 //! fallback lives here so it does not inflate the missed-line count.
 use std::sync::{
-    atomic::{AtomicU32, Ordering},
     Arc,
+    atomic::{AtomicU32, Ordering},
 };
 
 use crossbeam_channel::Sender;

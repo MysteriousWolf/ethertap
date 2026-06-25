@@ -7,13 +7,13 @@
 //! `--expect`/`--jsonl` test modes.
 
 use std::net::UdpSocket;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
-use rosc::{decoder, encoder, OscMessage, OscPacket, OscType};
+use rosc::{OscMessage, OscPacket, OscType, decoder, encoder};
 
 pub const DLY: i32 = 10;
 pub const EMPTY: i32 = -1;
@@ -340,13 +340,13 @@ fn handle_request(
     let parts: Vec<&str> = msg.addr.split('/').collect();
 
     if parts.len() == 4 && parts[1] == "fx" && parts[3] == "type" {
-        if let Ok(slot) = parts[2].parse::<usize>() {
-            if (1..=8).contains(&slot) {
-                let type_id = slots.lock().get(slot - 1).map_or(0, |s| s.type_id);
-                // Empty slots (type == -1) don't respond, matching real X32 behavior.
-                if type_id != EMPTY {
-                    return Some(encode_msg(&msg.addr, vec![OscType::Int(type_id)]));
-                }
+        if let Ok(slot) = parts[2].parse::<usize>()
+            && (1..=8).contains(&slot)
+        {
+            let type_id = slots.lock().get(slot - 1).map_or(0, |s| s.type_id);
+            // Empty slots (type == -1) don't respond, matching real X32 behavior.
+            if type_id != EMPTY {
+                return Some(encode_msg(&msg.addr, vec![OscType::Int(type_id)]));
             }
         }
         return None;
@@ -365,13 +365,13 @@ fn handle_request(
                         );
                         return Some(encode_msg(&msg.addr, vec![OscType::Float(f)]));
                     }
-                } else if let Some(OscType::Float(value)) = msg.args.first() {
-                    if *value > 0.0 {
-                        if let Some(state) = slots_guard.get_mut(slot_idx) {
-                            state.rx_bpm = Some(20.0 / *value as f64);
-                            state.sync_count += 1;
-                            state.rx_ts_ms = now_ms();
-                        }
+                } else if let Some(OscType::Float(value)) = msg.args.first()
+                    && *value > 0.0
+                {
+                    if let Some(state) = slots_guard.get_mut(slot_idx) {
+                        state.rx_bpm = Some(20.0 / *value as f64);
+                        state.sync_count += 1;
+                        state.rx_ts_ms = now_ms();
                     }
                     return None;
                 }
@@ -443,7 +443,7 @@ pub fn parse_slots_spec(spec: &str) -> Result<[SlotState; 8], String> {
             _ => {
                 return Err(format!(
                     "--slots: unrecognized entry {entry:?} (want dly:BPM, other:TYPE, or empty)"
-                ))
+                ));
             }
         };
     }

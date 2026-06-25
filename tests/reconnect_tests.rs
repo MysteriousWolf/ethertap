@@ -2,8 +2,8 @@
 //! verification against the persisted (name, model), and rescan-based
 //! retargeting when the device moved or an imposter answers.
 
-use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::thread;
 use std::time::Duration;
 

@@ -1,17 +1,17 @@
 [package]
 name = "mock-suite"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "EtherTap mock suite — X32/M32 mixer simulator + MIDI clock sink. TUI by default, headless test modes via flags, reusable as a library."
 publish = false
 
 [dependencies]
-rosc = "0.10"
+rosc = "0.11"
 parking_lot = "0.12"
 midir = "0.11"
 clap = { version = "4", features = ["derive"] }
-ratatui = "0.29"
-crossterm = "0.28"
+ratatui = "0.30"
+crossterm = "0.29"
 serde_json = "1"
 crossbeam-channel = "0.5"
 midi-loopback = { path = "../midi-loopback" }

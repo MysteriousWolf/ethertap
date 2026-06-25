@@ -37,8 +37,8 @@
 /// matching MIDI input and forwards every non-clock byte through the virtual
 /// port, making it a transparent proxy.
 use std::sync::{
-    atomic::{AtomicBool, AtomicU32, Ordering},
     Arc,
+    atomic::{AtomicBool, AtomicU32, Ordering},
 };
 use std::time::{Duration, Instant};
 
@@ -270,7 +270,7 @@ fn set_realtime_priority() {
     const THREAD_TIME_CONSTRAINT_POLICY: u32 = 2;
     const THREAD_TIME_CONSTRAINT_POLICY_COUNT: u32 = 4;
 
-    extern "C" {
+    unsafe extern "C" {
         fn mach_timebase_info(info: *mut MachTimebaseInfo) -> i32;
         fn mach_thread_self() -> u32;
         fn thread_policy_set(thread: u32, flavor: u32, policy_info: *const u32, count: u32) -> i32;
@@ -393,7 +393,7 @@ fn run_worker(worker: MidiClockWorker, output: Option<midir::MidiOutput>) {
     let mut waiting_for_beat: bool = false;
 
     // ── Initial physical device connection ────────────────────────────────────
-    if let Some(ref name) = current_device {
+    if let Some(name) = current_device.as_deref() {
         log::info!("[EtherTap] run_worker: initial_device = {:?}", name);
         phys_out = try_connect_out(name);
         if phys_out.is_some() {
@@ -520,17 +520,17 @@ fn run_worker(worker: MidiClockWorker, output: Option<midir::MidiOutput>) {
                                     log::debug!("[EtherTap] tick #{} to virtual port, enabled={}", tick_count, worker.enabled.load(Ordering::Relaxed));
                                 }
                                 #[cfg(unix)]
-                                if let Some(ref mut vc) = virt_conn {
-                                    if vc.send(CLOCK_BYTE).is_err() {
-                                        log::warn!("[EtherTap] virtual port send failed — port may be disconnected");
-                                    }
+                                if let Some(ref mut vc) = virt_conn
+                                    && vc.send(CLOCK_BYTE).is_err()
+                                {
+                                    log::warn!("[EtherTap] virtual port send failed — port may be disconnected");
                                 }
-                                if let Some(ref mut out) = phys_out {
-                                    if out.send(CLOCK_BYTE).is_err() {
-                                        phys_out  = None;
-                                        phys_in   = None;
-                                        worker.bridge_connected.store(false, Ordering::Release);
-                                    }
+                                if let Some(ref mut out) = phys_out
+                                    && out.send(CLOCK_BYTE).is_err()
+                                {
+                                    phys_out  = None;
+                                    phys_in   = None;
+                                    worker.bridge_connected.store(false, Ordering::Release);
                                 }
                             }
                         }
@@ -560,7 +560,7 @@ fn run_worker(worker: MidiClockWorker, output: Option<midir::MidiOutput>) {
                         phys_out = None;
                         current_device = new_device;
                         backoff.reset();
-                        if let Some(ref name) = current_device {
+                        if let Some(name) = current_device.as_deref() {
                             worker.bridge_connecting.store(true, Ordering::Release);
                             phys_out = try_connect_out(name);
                             if phys_out.is_some() {
@@ -676,7 +676,7 @@ fn handle_port_scan(
         backoff.reset();
     }
 
-    if let Some(ref name) = current_device {
+    if let Some(name) = current_device.as_deref() {
         let present = known_ports.iter().any(|p| p == name);
         log::debug!(
             "[EtherTap] handle_port_scan: device={:?}, present={}, phys_out.is_some()={}",
@@ -1152,9 +1152,11 @@ mod tests {
             phys_out.is_none(),
             "disappeared device must disconnect phys_out"
         );
-        assert!(!worker
-            .bridge_connected
-            .load(std::sync::atomic::Ordering::Acquire));
+        assert!(
+            !worker
+                .bridge_connected
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
     }
 
     /// When a selected device is present AND already connected (`phys_out.is_some()`),

@@ -64,7 +64,10 @@ impl<P: Plugin> InitContext<P> for HarnessInitContext {
         // here, it is silently dropped — which will cause silent malfunction if
         // the task is load-bearing (e.g. spawning a network thread in initialize).
         // Surface this loudly in debug builds so test authors can catch it early.
-        debug_assert!(false, "BackgroundTask scheduled during initialize() — Harness has no executor; task dropped silently");
+        debug_assert!(
+            false,
+            "BackgroundTask scheduled during initialize() — Harness has no executor; task dropped silently"
+        );
     }
 
     fn set_latency_samples(&self, _samples: u32) {}
@@ -89,7 +92,10 @@ impl<P: Plugin> ProcessContext<P> for HarnessProcessContext<'_, P> {
     }
 
     fn execute_background(&self, _task: P::BackgroundTask) {
-        debug_assert!(false, "BackgroundTask scheduled during process() — Harness has no executor; task dropped silently");
+        debug_assert!(
+            false,
+            "BackgroundTask scheduled during process() — Harness has no executor; task dropped silently"
+        );
     }
 
     fn execute_gui(&self, _task: P::BackgroundTask) {

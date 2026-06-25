@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, bounded};
 use parking_lot::Mutex;
 
 /// Default channel capacity for registered ports.

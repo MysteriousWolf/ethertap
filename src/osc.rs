@@ -9,7 +9,7 @@
 ///   /fx/{slot}/par/02    – set normalised delay time (float)
 ///   /fxrtn/{slot}/mix/on – mute/unmute the FX return (i32: 0=off, 1=on)
 ///   /info                – heartbeat / connectivity probe
-use rosc::{encoder, OscMessage, OscPacket, OscType};
+use rosc::{OscMessage, OscPacket, OscType, encoder};
 
 // ─── Effect type tables (sourced from pmaillot/X32-Behringer X32.c) ─────────
 //
@@ -251,11 +251,7 @@ pub fn query_fx_delay(slot: u8, type_id: i32) -> Vec<u8> {
 ///
 /// Returns `0.0` when `f ≤ 0` (no data received yet).
 pub fn float_to_bpm(f: f32) -> f64 {
-    if f <= 0.0 {
-        0.0
-    } else {
-        20.0 / f as f64
-    }
+    if f <= 0.0 { 0.0 } else { 20.0 / f as f64 }
 }
 
 // ─── Internal helper ────────────────────────────────────────────────────────

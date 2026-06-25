@@ -14,8 +14,8 @@ use midir::os::unix::VirtualInput;
 use midir::{Ignore, MidiInput, MidiInputConnection};
 use parking_lot::Mutex;
 
-use crate::sink_state::SinkState;
 use crate::SinkStats;
+use crate::sink_state::SinkState;
 
 pub const SINK_PORT_NAME: &str = "EtherTap Mock MIDI Sink";
 

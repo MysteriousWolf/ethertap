@@ -17,7 +17,7 @@ mod common;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use common::harness_util::{connect, drain_auto_sync, step, step_until, wait_for_audit, E2E_LOCK};
+use common::harness_util::{E2E_LOCK, connect, drain_auto_sync, step, step_until, wait_for_audit};
 use common::{MockMixer, SlotState};
 use ethertap::EtherTap;
 use vst_runtime::Harness;

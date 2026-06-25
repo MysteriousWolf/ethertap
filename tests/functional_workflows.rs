@@ -18,7 +18,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use common::harness_util::{
-    connect, drain_auto_sync, step, step_at, step_n_beats, step_until, wait_for_audit, E2E_LOCK,
+    E2E_LOCK, connect, drain_auto_sync, step, step_at, step_n_beats, step_until, wait_for_audit,
 };
 use common::{MockMixer, SlotState};
 use ethertap::EtherTap;

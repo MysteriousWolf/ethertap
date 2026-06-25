@@ -1,6 +1,6 @@
 use std::sync::{
-    atomic::{AtomicBool, AtomicU32, AtomicU8},
     Arc,
+    atomic::{AtomicBool, AtomicU8, AtomicU32},
 };
 
 use nih_plug::prelude::*;

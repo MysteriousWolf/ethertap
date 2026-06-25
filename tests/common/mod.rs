@@ -8,11 +8,11 @@
 // `mock-suite` CLI/TUI); this module re-exports it and keeps only the
 // ethertap-specific NetworkWorker test glue.
 pub use mock_suite::{
-    all_dly_slots, all_empty_slots, default_slots, MockMixer, ReceivedMsg, SlotState, DLY, EMPTY,
+    DLY, EMPTY, MockMixer, ReceivedMsg, SlotState, all_dly_slots, all_empty_slots, default_slots,
 };
 
-use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -55,11 +55,7 @@ impl WorkerShared {
     pub fn slot_types_snapshot(&self) -> [Option<i32>; 8] {
         std::array::from_fn(|i| {
             let raw = self.slot_types[i].load(Ordering::Relaxed);
-            if raw == i32::MIN {
-                None
-            } else {
-                Some(raw)
-            }
+            if raw == i32::MIN { None } else { Some(raw) }
         })
     }
 }

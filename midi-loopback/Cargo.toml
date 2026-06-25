@@ -1,7 +1,7 @@
 [package]
 name = "midi-loopback"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "EtherTap in-process software MIDI loopback — process-global named-port registry for tests and cross-platform MIDI clock bridging."
 publish = false
 

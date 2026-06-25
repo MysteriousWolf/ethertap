@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use ethertap::network::{NetworkCommand, NetworkStatus, NetworkWorker};
@@ -80,8 +80,10 @@ fn sync_now_sets_delay_on_mock() {
     let mixer = MockMixer::start_with_slots(all_dly_slots());
     let (cmd_tx, status_rx, handle, _shared) = spawn_worker(mixer.port());
 
-    assert!(wait_for_status(&status_rx, Duration::from_secs(5))
-        .is_some_and(|s| matches!(s, NetworkStatus::Connected)));
+    assert!(
+        wait_for_status(&status_rx, Duration::from_secs(5))
+            .is_some_and(|s| matches!(s, NetworkStatus::Connected))
+    );
 
     mixer.clear_msgs();
 
@@ -124,8 +126,10 @@ fn hard_reset_mutes_sets_unmutes() {
     let mixer = MockMixer::start_with_slots(all_dly_slots());
     let (cmd_tx, status_rx, handle, _shared) = spawn_worker(mixer.port());
 
-    assert!(wait_for_status(&status_rx, Duration::from_secs(5))
-        .is_some_and(|s| matches!(s, NetworkStatus::Connected)));
+    assert!(
+        wait_for_status(&status_rx, Duration::from_secs(5))
+            .is_some_and(|s| matches!(s, NetworkStatus::Connected))
+    );
 
     mixer.clear_msgs();
 
@@ -240,8 +244,10 @@ fn disconnect_and_reconnect() {
     let mixer = MockMixer::start();
     let (cmd_tx, status_rx, handle, _shared) = spawn_worker(mixer.port());
 
-    assert!(wait_for_status(&status_rx, Duration::from_secs(5))
-        .is_some_and(|s| matches!(s, NetworkStatus::Connected)));
+    assert!(
+        wait_for_status(&status_rx, Duration::from_secs(5))
+            .is_some_and(|s| matches!(s, NetworkStatus::Connected))
+    );
     drain_all_status(&status_rx);
 
     cmd_tx.send(NetworkCommand::Disconnect).unwrap();
@@ -280,8 +286,10 @@ fn audit_slots_discovers_compatible_slots() {
     let mixer = MockMixer::start();
     let (cmd_tx, status_rx, handle, shared) = spawn_worker(mixer.port());
 
-    assert!(wait_for_status(&status_rx, Duration::from_secs(5))
-        .is_some_and(|s| matches!(s, NetworkStatus::Connected)));
+    assert!(
+        wait_for_status(&status_rx, Duration::from_secs(5))
+            .is_some_and(|s| matches!(s, NetworkStatus::Connected))
+    );
     drain_all_status(&status_rx);
 
     cmd_tx.send(NetworkCommand::AuditSlots).unwrap();
@@ -405,8 +413,10 @@ fn audit_slots_empty_mixer() {
     let mixer = MockMixer::start_with_slots(all_empty_slots());
     let (cmd_tx, status_rx, handle, shared) = spawn_worker(mixer.port());
 
-    assert!(wait_for_status(&status_rx, Duration::from_secs(5))
-        .is_some_and(|s| matches!(s, NetworkStatus::Connected)));
+    assert!(
+        wait_for_status(&status_rx, Duration::from_secs(5))
+            .is_some_and(|s| matches!(s, NetworkStatus::Connected))
+    );
     drain_all_status(&status_rx);
 
     cmd_tx.send(NetworkCommand::AuditSlots).unwrap();
@@ -509,8 +519,10 @@ fn sync_now_routes_3tap_to_par01() {
         })
         .unwrap();
 
-    assert!(wait_for_status(&status_rx, Duration::from_secs(5))
-        .is_some_and(|s| matches!(s, NetworkStatus::Connected)));
+    assert!(
+        wait_for_status(&status_rx, Duration::from_secs(5))
+            .is_some_and(|s| matches!(s, NetworkStatus::Connected))
+    );
 
     mixer.clear_msgs();
 

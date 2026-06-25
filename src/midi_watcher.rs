@@ -1,7 +1,6 @@
 #[cfg(not(target_os = "macos"))]
 use crossbeam_channel::tick;
-use crossbeam_channel::{bounded, Receiver, Sender};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use crossbeam_channel::{Receiver, Sender, bounded};
 use std::sync::Arc;
 /// MIDI device hot-plug watcher.
 ///
@@ -11,6 +10,7 @@ use std::sync::Arc;
 /// periodic polling via `midir::MidiOutput`.
 #[cfg(target_os = "macos")]
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(not(target_os = "macos"))]
 use std::time::Duration;
 

@@ -14,7 +14,7 @@ mod common;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use common::harness_util::{step_at, E2E_LOCK};
+use common::harness_util::{E2E_LOCK, step_at};
 use ethertap::EtherTap;
 use mock_suite::loopback_sink::LoopbackClockSink;
 use vst_runtime::Harness;

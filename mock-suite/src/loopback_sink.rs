@@ -7,16 +7,16 @@
 //! [`crate::sink_state::SinkState`] accumulation logic that the OS-virtual-port
 //! sink uses. No `midir`/unix dependency — compiles and runs on Windows.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use midi_loopback::{register, LoopbackPort};
+use midi_loopback::{LoopbackPort, register};
 use parking_lot::Mutex;
 
-use crate::sink_state::SinkState;
 use crate::SinkStats;
+use crate::sink_state::SinkState;
 
 /// How often the drain thread polls the loopback port for new messages.
 const POLL_INTERVAL: Duration = Duration::from_millis(1);
