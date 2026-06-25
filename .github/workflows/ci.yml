@@ -29,7 +29,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -39,13 +39,13 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Cache vendor
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: vendor/
           key: ${{ runner.os }}-vendor-${{ hashFiles('scripts/setup.sh', 'patches/**') }}
 
       - name: Cache build artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: target/
           key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}-test
@@ -83,7 +83,7 @@ jobs:
           components: clippy, rustfmt
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -93,13 +93,13 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Cache vendor
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: vendor/
           key: ${{ runner.os }}-vendor-${{ hashFiles('scripts/setup.sh', 'patches/**') }}
 
       - name: Cache build artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: target/
           key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}-lint
@@ -144,7 +144,7 @@ jobs:
           components: llvm-tools-preview
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -154,13 +154,13 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Cache vendor
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: vendor/
           key: ${{ runner.os }}-vendor-${{ hashFiles('scripts/setup.sh', 'patches/**') }}
 
       - name: Cache build artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: target/
           key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}-coverage
