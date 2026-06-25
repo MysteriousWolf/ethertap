@@ -1271,8 +1271,16 @@ mod tests {
         let bconn = bridge_connecting.clone();
         let handle = std::thread::spawn(move || worker.run());
 
-        // Give the worker time to process initial_device and enter the main loop.
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        // Poll until the worker sets bridge_connecting (set synchronously before the
+        // main loop, so this should be near-instant on any machine). 5 s is a generous
+        // bound for a slow CI runner.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if bconn.load(std::sync::atomic::Ordering::Acquire) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
 
         assert!(
             bconn.load(std::sync::atomic::Ordering::Acquire),
@@ -1321,7 +1329,15 @@ mod tests {
         let bc = bridge_connected.clone();
         let handle = std::thread::spawn(move || worker.run());
 
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        // Poll until bridge_connected flips — it is set synchronously before the
+        // main loop. 5 s covers the worst-case slow CI runner.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if bc.load(std::sync::atomic::Ordering::Acquire) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
 
         assert!(
             bc.load(std::sync::atomic::Ordering::Acquire),
