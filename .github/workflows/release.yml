@@ -82,7 +82,7 @@ jobs:
 
       # Cache the cargo registry and compiled git deps across runs.
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -93,14 +93,14 @@ jobs:
 
       # Cache the vendored baseview source so setup.sh is a no-op on warm runs.
       - name: Cache vendor
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: vendor/
           key: ${{ runner.os }}-vendor-${{ hashFiles('scripts/setup.sh', 'patches/**') }}
 
       # Cache per-platform cargo build artifacts.
       - name: Cache build artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: target/
           key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}-release
