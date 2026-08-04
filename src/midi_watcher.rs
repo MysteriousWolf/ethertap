@@ -8,16 +8,114 @@ use std::sync::Arc;
 /// `coremidi::Client::new_with_notifications` + a CFRunLoop on a dedicated
 /// thread — zero polling.  On non-macOS (Linux / Windows) it falls back to
 /// periodic polling via `midir::MidiOutput`.
-#[cfg(target_os = "macos")]
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(not(target_os = "macos"))]
 use std::time::Duration;
 
-/// Minimum interval between device-list broadcasts — rate-limits flurries of
-/// CoreMIDI notifications during USB hub plug/unplug.
+/// Length of one CFRunLoop slice on macOS — also serves as the debounce
+/// window: a notification observed anywhere within a slice is rebroadcast at
+/// the following slice boundary, so a trailing "device is back" notification
+/// can never be permanently suppressed the way the old cooldown-with-`return`
+/// design allowed.
 #[cfg(target_os = "macos")]
-const BROADCAST_COOLDOWN_MS: u64 = 300;
+const SLICE_MS: u64 = 300;
+
+/// Safety re-poll interval — re-enumerates and broadcasts only if the device
+/// list actually changed since the last broadcast. Heals notification
+/// classes CoreMIDI never fires for (e.g. MIDIServer restart) and self-heals
+/// any broadcast dropped by a full `try_send` channel (the channel keeps its
+/// bounded(16) size; a dropped send is recovered within one safety-poll
+/// interval instead of adding consumer-side plumbing).
+///
+/// Not cfg-gated: `BroadcastPlanner` below is platform-independent so it can
+/// be unit-tested on every CI runner; only its macOS wiring is cfg-gated.
+const SAFETY_POLL_MS: u64 = 15_000;
+
+// ─── Broadcast decision logic (platform-independent, unit-testable) ────────────
+
+/// What a slice-boundary tick should do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TickAction {
+    /// Broadcast `current` to both channels and record it as the last-sent
+    /// list.
+    Rebroadcast,
+    /// The safety poll ran but the list matches the last broadcast — no
+    /// channel send needed.
+    SkipUnchanged,
+}
+
+/// Owns the debounce + safety-poll decision for the macOS CoreMIDI watcher.
+/// Per-watcher-thread state — each `spawn_macos` invocation gets its own
+/// instance, unlike the old `static LAST_MS: OnceLock<AtomicU64>` which was
+/// shared process-wide and let multiple plugin instances suppress each
+/// other's broadcasts.
+struct BroadcastPlanner {
+    /// Set by the CoreMIDI notification callback; cleared on the next
+    /// `decide()` call. A notification observed anywhere within a slice
+    /// guarantees a rebroadcast at the following boundary — the trailing
+    /// edge can never be silently dropped the way the old cooldown-with-
+    /// `return` design allowed.
+    dirty: bool,
+    /// Device list from the last broadcast (initial seed excluded — see
+    /// `spawn_macos`, which sends the seed itself before the slice loop
+    /// starts and primes this via `record_broadcast`).
+    last_sent: Vec<String>,
+    /// `now_ms` at or after which the safety re-poll should run again.
+    next_safety_due_ms: u64,
+}
+
+impl BroadcastPlanner {
+    fn new(now_ms: u64) -> Self {
+        Self {
+            dirty: false,
+            last_sent: Vec::new(),
+            next_safety_due_ms: now_ms.saturating_add(SAFETY_POLL_MS),
+        }
+    }
+
+    /// Called from the CoreMIDI notification callback (or a test) to mark a
+    /// topology change observed since the last tick.
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Whether this slice boundary needs the caller to enumerate the device
+    /// list at all. Idle boundaries (no notification, safety poll not due)
+    /// return `false` and the caller can skip straight to the next slice
+    /// without touching CoreMIDI.
+    fn needs_enumeration(&self, now_ms: u64) -> bool {
+        self.dirty || now_ms >= self.next_safety_due_ms
+    }
+
+    /// Consumes the freshly enumerated `current` device list and decides the
+    /// action. Must only be called when `needs_enumeration(now_ms)` was
+    /// `true` for the same `now_ms`.
+    fn decide(&mut self, now_ms: u64, current: &[String]) -> TickAction {
+        let was_dirty = self.dirty;
+        self.dirty = false;
+        if now_ms >= self.next_safety_due_ms {
+            self.next_safety_due_ms = now_ms.saturating_add(SAFETY_POLL_MS);
+        }
+        // A dirty tick always rebroadcasts, even if `current` happens to
+        // match `last_sent` — a mid-transition enumeration that coincides
+        // with the last broadcast must not suppress the real update that
+        // triggered the notification.
+        if was_dirty || current != self.last_sent.as_slice() {
+            self.last_sent = current.to_vec();
+            TickAction::Rebroadcast
+        } else {
+            TickAction::SkipUnchanged
+        }
+    }
+
+    /// Records a broadcast made outside `decide()` — used to prime
+    /// `last_sent` with the initial seed broadcast sent before the slice
+    /// loop starts.
+    #[cfg(target_os = "macos")]
+    fn record_broadcast(&mut self, list: Vec<String>) {
+        self.last_sent = list;
+    }
+}
 
 /// Polling interval for the non-macOS fallback. Not cfg-gated so the editor
 /// (compiled for all platforms) can reference it for the status row even
@@ -50,16 +148,6 @@ pub struct MidiWatcherChannels {
     /// `last_update_ts` would be 0 even though the broadcast already landed.
     /// Write-once-true, never reset to `false`.
     pub has_update: Arc<AtomicBool>,
-}
-
-/// Returns the current time as milliseconds since the Unix epoch (0 on clock
-/// error). Used only for the CoreMIDI cooldown check, which is
-/// self-consistent on its own `SystemTime` base.
-#[cfg(target_os = "macos")]
-fn now_ms_epoch() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64)
 }
 
 /// Spawns a background device watcher and returns two receivers (editor +
@@ -117,46 +205,28 @@ fn spawn_macos(
     if let Err(e) = std::thread::Builder::new()
         .name("ethertap-midi-watch".into())
         .spawn(move || {
-            use core_foundation::runloop::CFRunLoop;
+            use core_foundation::runloop::{CFRunLoop, CFRunLoopRunResult, kCFRunLoopDefaultMode};
             use coremidi::{Client, Notification};
+            use std::time::Duration;
 
-            // Clone Senders before the move closure so we can also send
-            // the initial device list before entering the run loop.
-            let (ed_tx_cb, wk_tx_cb) = (ed_tx.clone(), wk_tx.clone());
-            let last_update_ts_cb = last_update_ts.clone();
-            let has_update_cb = has_update.clone();
+            // Notification callback is intentionally minimal: no
+            // enumeration, no channel sends, no cooldown state. It only
+            // flags that *something* changed; the slice loop below decides
+            // when to re-enumerate and broadcast. This removes the old
+            // cooldown-with-`return` bug where an early mid-transition
+            // enumeration would broadcast and then permanently suppress the
+            // trailing "device is back" notification.
+            let dirty = Arc::new(AtomicBool::new(false));
+            let dirty_cb = dirty.clone();
             let _client = match Client::new_with_notifications(
                 "EtherTap-MIDI-Watch",
                 move |notification: &Notification| {
-                    if !matches!(
+                    if matches!(
                         notification,
                         Notification::ObjectAdded(_) | Notification::ObjectRemoved(_)
                     ) {
-                        return;
+                        dirty_cb.store(true, Ordering::Relaxed);
                     }
-
-                    // Cooldown — CoreMIDI may fire multiple notifications for
-                    // a single physical plug/unplug (USB hub topology). Kept
-                    // on its own self-consistent SystemTime base.
-                    static LAST_MS: OnceLock<AtomicU64> = OnceLock::new();
-                    let now = now_ms_epoch();
-                    {
-                        let last = LAST_MS.get_or_init(|| AtomicU64::new(0));
-                        let prev = last.load(Ordering::Relaxed);
-                        if now.saturating_sub(prev) < BROADCAST_COOLDOWN_MS {
-                            return;
-                        }
-                        last.store(now, Ordering::Relaxed);
-                    }
-
-                    let devices = enumerate_devices();
-                    // Stamp before sending. A receiver that observes the
-                    // broadcast must also observe the timestamp — the channel
-                    // send/recv pair is what publishes these Relaxed stores.
-                    last_update_ts_cb.store(crate::network::now_ms(), Ordering::Relaxed);
-                    has_update_cb.store(true, Ordering::Relaxed);
-                    let _ = ed_tx_cb.try_send(devices.clone());
-                    let _ = wk_tx_cb.try_send(devices);
                 },
             ) {
                 Ok(c) => c,
@@ -168,18 +238,74 @@ fn spawn_macos(
 
             // Initial enumeration — CoreMIDI does NOT fire ObjectAdded for
             // already-connected devices, so we must seed the channel once
-            // before entering the run loop.  Without this the editor never
+            // before entering the slice loop. Without this the editor never
             // discovers existing MIDI ports.
             let initial_devices = enumerate_devices();
-            // Stamp before sending — see the notification callback above.
+            // Stamp before sending — a receiver that observes the broadcast
+            // must also observe the timestamp; the channel send/recv pair is
+            // what publishes these Relaxed stores.
             last_update_ts.store(crate::network::now_ms(), Ordering::Relaxed);
             has_update.store(true, Ordering::Relaxed);
             let _ = ed_tx.try_send(initial_devices.clone());
-            let _ = wk_tx.try_send(initial_devices);
+            let _ = wk_tx.try_send(initial_devices.clone());
 
-            // _client kept alive for its Drop — unregisters the CoreMIDI
-            // notification callback when the thread exits.
-            CFRunLoop::run_current();
+            let mut planner = BroadcastPlanner::new(crate::network::now_ms());
+            planner.record_broadcast(initial_devices);
+
+            loop {
+                // A slice IS the debounce window: any notification landing
+                // during it is observed as `dirty` at the following
+                // boundary, so a trailing notification can never be
+                // silently dropped the way the old cooldown-with-`return`
+                // design allowed.
+                let run_result = CFRunLoop::run_in_mode(
+                    unsafe { kCFRunLoopDefaultMode },
+                    Duration::from_millis(SLICE_MS),
+                    false,
+                );
+                // With zero registered sources the run loop returns
+                // immediately instead of blocking for the slice, which would
+                // turn this loop into a busy-spin. The CoreMIDI notification
+                // source registered above makes that unreachable today; the
+                // sleep keeps the thread bounded if that invariant ever
+                // breaks (coremidi upgrade, refactor).
+                if run_result == CFRunLoopRunResult::Finished {
+                    std::thread::sleep(Duration::from_millis(SLICE_MS));
+                }
+
+                if dirty.swap(false, Ordering::Relaxed) {
+                    planner.mark_dirty();
+                }
+
+                let now = crate::network::now_ms();
+                if !planner.needs_enumeration(now) {
+                    continue;
+                }
+
+                let devices = enumerate_devices();
+                if planner.decide(now, &devices) == TickAction::Rebroadcast {
+                    // Stamp before sending — see the initial-seed broadcast
+                    // above for why.
+                    last_update_ts.store(crate::network::now_ms(), Ordering::Relaxed);
+                    has_update.store(true, Ordering::Relaxed);
+                    // `try_send` on a full channel silently drops this
+                    // broadcast (the editor drains only while its GUI is
+                    // open). No consumer-side plumbing needed to fix that:
+                    // the unconditional rebroadcast-on-change above means
+                    // the drop self-heals within one `SAFETY_POLL_MS`
+                    // window at the latest.
+                    if ed_tx.try_send(devices.clone()).is_err() {
+                        log::debug!(
+                            "[EtherTap] MIDI device list: editor channel full, broadcast dropped (self-heals via safety poll)"
+                        );
+                    }
+                    if wk_tx.try_send(devices).is_err() {
+                        log::debug!(
+                            "[EtherTap] MIDI device list: worker channel full, broadcast dropped (self-heals via safety poll)"
+                        );
+                    }
+                }
+            }
         })
     {
         log::error!("[EtherTap] failed to spawn MIDI watcher thread: {e}");
@@ -254,6 +380,76 @@ fn spawn_polling(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// A notification observed anywhere within a slice must produce
+    /// `Rebroadcast` at the next tick — this is the trailing-edge-never-
+    /// dropped guarantee that replaces the old cooldown-with-`return` bug.
+    /// Holds even when the enumerated list happens to match the last
+    /// broadcast: a mid-transition enumeration coinciding with `last_sent`
+    /// must not suppress the real update that triggered the notification.
+    #[test]
+    fn dirty_notification_forces_rebroadcast_on_next_tick() {
+        let mut planner = BroadcastPlanner::new(0);
+        planner.decide(0, &names(&["A"])); // prime last_sent = ["A"]
+
+        planner.mark_dirty();
+        assert!(planner.needs_enumeration(100));
+        assert_eq!(
+            planner.decide(100, &names(&["A"])),
+            TickAction::Rebroadcast,
+            "dirty tick must rebroadcast even with an unchanged list"
+        );
+    }
+
+    /// Safety poll: not due before `SAFETY_POLL_MS` elapses (no notification
+    /// pending), then due afterward. A changed list rebroadcasts; an
+    /// unchanged list is a no-op (no channel churn from the periodic check).
+    #[test]
+    fn safety_poll_rebroadcasts_on_change_and_skips_when_unchanged() {
+        let mut planner = BroadcastPlanner::new(0);
+        planner.decide(0, &names(&["A"])); // prime last_sent = ["A"]
+
+        assert!(
+            !planner.needs_enumeration(SAFETY_POLL_MS - 1),
+            "safety poll must not fire before its interval elapses"
+        );
+
+        assert!(planner.needs_enumeration(SAFETY_POLL_MS));
+        assert_eq!(
+            planner.decide(SAFETY_POLL_MS, &names(&["A", "B"])),
+            TickAction::Rebroadcast,
+            "safety poll must rebroadcast when the list changed"
+        );
+
+        let next_due = SAFETY_POLL_MS * 2;
+        assert!(planner.needs_enumeration(next_due));
+        assert_eq!(
+            planner.decide(next_due, &names(&["A", "B"])),
+            TickAction::SkipUnchanged,
+            "safety poll must not rebroadcast an unchanged list"
+        );
+    }
+
+    /// Regression for the old `static LAST_MS: OnceLock<AtomicU64>` — two
+    /// planner instances (as created by two plugin instances) must not share
+    /// dirty/timing state.
+    #[test]
+    fn two_planners_do_not_share_state() {
+        let mut planner_a = BroadcastPlanner::new(0);
+        let planner_b = BroadcastPlanner::new(0);
+
+        planner_a.mark_dirty();
+
+        assert!(planner_a.needs_enumeration(50));
+        assert!(
+            !planner_b.needs_enumeration(50),
+            "planner_b must not observe planner_a's dirty flag"
+        );
+    }
 
     /// `spawn()` seeds `last_update_ts` and `has_update` from the initial
     /// device-list broadcast on both platform paths (macOS CoreMIDI callback
