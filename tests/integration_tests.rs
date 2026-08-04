@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use ethertap::network::{NetworkCommand, NetworkStatus, NetworkWorker};
+use ethertap::network::{NetworkCommand, NetworkStatus};
 
 mod common;
 use common::*;
@@ -330,29 +330,7 @@ fn telemetry_poll_updates_hardware_float() {
     let hardware_float = Arc::new(AtomicU32::new(0));
     let slot_types: [Option<i32>; 8] = [Some(10); 8];
 
-    let (cmd_tx, cmd_rx) = crossbeam_channel::bounded(64);
-    let (status_tx, status_rx) = crossbeam_channel::bounded(64);
-
-    let worker = NetworkWorker::new(
-        cmd_rx,
-        status_tx,
-        Arc::new(parking_lot::Mutex::new(String::new())),
-        Arc::new(parking_lot::Mutex::new(0u16)),
-        Arc::new(std::sync::atomic::AtomicU8::new(1u8)),
-        ethertap::network::WorkerShared {
-            hardware_float_out: hardware_float.clone(),
-            compatible_slots: Arc::new(std::sync::atomic::AtomicU8::new(0)),
-            occupied_slots: Arc::new(std::sync::atomic::AtomicU8::new(0)),
-            slot_types: Arc::new(std::array::from_fn(|i| {
-                std::sync::atomic::AtomicI32::new(slot_types[i].unwrap_or(i32::MIN))
-            })),
-            scan_targets: Arc::new(parking_lot::Mutex::new(Vec::new())),
-            connected_device: Arc::new(parking_lot::Mutex::new((String::new(), String::new()))),
-            scan_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            auto_reconnect: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            last_device: Arc::new(parking_lot::Mutex::new((String::new(), String::new()))),
-        },
-    );
+    let (worker, cmd_tx, status_rx, _shared) = create_worker(1, slot_types, hardware_float.clone());
     let handle = std::thread::Builder::new()
         .name("ethertap-net-test".into())
         .spawn(move || worker.run())
@@ -365,13 +343,12 @@ fn telemetry_poll_updates_hardware_float() {
         })
         .unwrap();
 
-    loop {
-        match status_rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(NetworkStatus::Connected) => break,
-            Ok(_) => continue,
-            Err(e) => panic!("Timed out waiting for Connected: {}", e),
-        }
-    }
+    let status = wait_for_status(&status_rx, Duration::from_secs(5));
+    assert!(
+        matches!(status, Some(NetworkStatus::Connected)),
+        "should connect to mock mixer, got {:?}",
+        status
+    );
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut found = false;

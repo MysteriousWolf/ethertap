@@ -150,10 +150,13 @@ fn spawn_macos(
                     }
 
                     let devices = enumerate_devices();
-                    let _ = ed_tx_cb.try_send(devices.clone());
-                    let _ = wk_tx_cb.try_send(devices);
+                    // Stamp before sending. A receiver that observes the
+                    // broadcast must also observe the timestamp — the channel
+                    // send/recv pair is what publishes these Relaxed stores.
                     last_update_ts_cb.store(crate::network::now_ms(), Ordering::Relaxed);
                     has_update_cb.store(true, Ordering::Relaxed);
+                    let _ = ed_tx_cb.try_send(devices.clone());
+                    let _ = wk_tx_cb.try_send(devices);
                 },
             ) {
                 Ok(c) => c,
@@ -168,10 +171,11 @@ fn spawn_macos(
             // before entering the run loop.  Without this the editor never
             // discovers existing MIDI ports.
             let initial_devices = enumerate_devices();
-            let _ = ed_tx.try_send(initial_devices.clone());
-            let _ = wk_tx.try_send(initial_devices);
+            // Stamp before sending — see the notification callback above.
             last_update_ts.store(crate::network::now_ms(), Ordering::Relaxed);
             has_update.store(true, Ordering::Relaxed);
+            let _ = ed_tx.try_send(initial_devices.clone());
+            let _ = wk_tx.try_send(initial_devices);
 
             // _client kept alive for its Drop — unregisters the CoreMIDI
             // notification callback when the thread exits.
@@ -219,10 +223,13 @@ fn spawn_polling(
             // and the first connection attempt cannot succeed until the first
             // timer tick (POLL_INTERVAL_SECS seconds later).
             let initial = scan_ports();
-            let _ = ed_tx.try_send(initial.clone());
-            let _ = wk_tx.try_send(initial);
+            // Stamp before sending: a receiver that observes the broadcast
+            // must also observe the timestamp. The channel send/recv pair is
+            // what publishes these Relaxed stores.
             last_update_ts.store(crate::network::now_ms(), Ordering::Relaxed);
             has_update.store(true, Ordering::Relaxed);
+            let _ = ed_tx.try_send(initial.clone());
+            let _ = wk_tx.try_send(initial);
 
             let scan_timer = tick(Duration::from_secs(POLL_INTERVAL_SECS));
             loop {
@@ -231,10 +238,10 @@ fn spawn_polling(
                     break;
                 }
                 let devices = scan_ports();
-                let _ = ed_tx.try_send(devices.clone());
-                let _ = wk_tx.try_send(devices);
                 last_update_ts.store(crate::network::now_ms(), Ordering::Relaxed);
                 has_update.store(true, Ordering::Relaxed);
+                let _ = ed_tx.try_send(devices.clone());
+                let _ = wk_tx.try_send(devices);
             }
         })
     {
@@ -257,17 +264,21 @@ mod tests {
     fn spawn_seeds_last_update_ts() {
         let channels = spawn();
 
-        // The watcher thread sends its initial broadcast and then stamps
-        // last_update_ts + has_update, but it's async — wait for the
-        // broadcast to land on editor_rx (a value of 0 for last_update_ts is
-        // itself a valid, legitimate `now_ms()` reading taken very early in
-        // process lifetime, so it can't be used as an "unset" sentinel here).
+        // The watcher thread stamps last_update_ts + has_update and *then*
+        // sends its initial broadcast, so receiving the broadcast is what
+        // makes both stores observable here — the send/recv pair supplies the
+        // ordering the Relaxed stores lack. (A value of 0 for last_update_ts
+        // is itself a valid, legitimate `now_ms()` reading taken very early in
+        // process lifetime, so it can't be used as an "unset" sentinel.)
+        //
+        // The timeout is generous because the macOS path builds a CoreMIDI
+        // notification client first, which can take seconds on a loaded
+        // machine; this test gates on ordering, not on latency.
         channels
             .editor_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("initial device-list broadcast was never sent within 5s of spawn()");
+            .recv_timeout(std::time::Duration::from_secs(15))
+            .expect("initial device-list broadcast was never sent within 15s of spawn()");
 
-        // has_update is set synchronously before the recv_timeout returns above.
         assert!(
             channels.has_update.load(Ordering::Relaxed),
             "has_update must be true after the initial device-list broadcast"
@@ -286,8 +297,8 @@ mod tests {
             "last_update_ts ({ts}) is ahead of now_ms() ({now}) — wrong time base"
         );
         assert!(
-            now - ts < 5000,
-            "last_update_ts ({ts}) is not within 5s of now_ms() ({now}) — wrong time base"
+            now - ts < 15_000,
+            "last_update_ts ({ts}) is not within 15s of now_ms() ({now}) — wrong time base"
         );
 
         // Request shutdown so the non-macOS polling thread exits promptly;

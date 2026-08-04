@@ -24,7 +24,7 @@ use parking_lot::Mutex;
 #[cfg(feature = "standalone")]
 use crate::params::SyncStatus;
 use crate::{
-    network::{DeviceInfo, NetworkCommand, now_ms},
+    network::{DeviceInfo, NetworkCommand, ScanHealth, now_ms},
     osc,
     params::{EtherTapParams, MONO_FONT, Ppq, SyncMode},
 };
@@ -632,6 +632,10 @@ pub struct EditorData {
     pub scan_targets: Arc<Mutex<Vec<DeviceInfo>>>,
     /// Millisecond timestamp of the last completed scan (0 = never scanned).
     pub scan_completed_ts: Arc<AtomicU64>,
+    /// Latest [`ScanHealth`] as a `u8`, written by the network worker. Tints
+    /// the Scan control so a network that is silently swallowing probes looks
+    /// different from a network with no mixer on it.
+    pub scan_health: Arc<AtomicU8>,
     /// Name and model parsed from /info heartbeat responses.
     pub connected_device: Arc<Mutex<(String, String)>>,
     /// Incremented each time the editor opens a new scan and clears stale
@@ -696,6 +700,7 @@ pub(crate) fn create_editor(
         slot_types: plugin.slot_types.clone(),
         scan_targets: plugin.scan_targets.clone(),
         scan_completed_ts: plugin.scan_completed_ts.clone(),
+        scan_health: plugin.scan_health.clone(),
         connected_device: plugin.connected_device.clone(),
         scan_generation: plugin.scan_generation.clone(),
         cmd_tx: plugin.cmd_tx.clone(),
@@ -994,6 +999,15 @@ impl IcedEditor for EtherTapEditor {
                 setter.begin_set_parameter(&self.data.params.auto_reconnect);
                 setter.set_parameter(&self.data.params.auto_reconnect, next);
                 setter.end_set_parameter(&self.data.params.auto_reconnect);
+                // Mirror straight into the worker-facing atom rather than
+                // waiting for the next process() call to do it. Toggling this
+                // in a stopped DAW, or on a track the host has suspended, must
+                // still reach the worker — that is the whole point of the
+                // switch.
+                self.data
+                    .params
+                    .auto_reconnect_atom
+                    .store(next, Ordering::Relaxed);
             }
             Message::SetClockPpq(ppq) => {
                 let setter = ParamSetter::new(self.context.as_ref());
@@ -1509,10 +1523,17 @@ impl IcedEditor for EtherTapEditor {
                 .into();
 
         let scan_btn = {
-            let icon_color = if connected {
-                THEME.surface_border
-            } else {
-                THEME.text_dim
+            // A scan that finds nothing is ambiguous: no mixer on the network
+            // looks identical to a network that is discarding the probes. The
+            // worker's health verdict is the only way to tell, so it colours
+            // the control — amber once several scans go unanswered, red when
+            // there is no usable interface at all.
+            let health = ScanHealth::from_u8(self.data.scan_health.load(Ordering::Relaxed));
+            let icon_color = match (connected, health) {
+                (true, _) => THEME.surface_border,
+                (false, ScanHealth::NoInterfaces) => THEME.err,
+                (false, ScanHealth::NoReplies) => THEME.warn,
+                (false, _) => THEME.text_dim,
             };
             let inner = Row::new()
                 .push(t!(icon::SCAN).size(11).font(SOLAR_BOLD).color(icon_color))

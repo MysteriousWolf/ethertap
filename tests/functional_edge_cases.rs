@@ -13,35 +13,12 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use common::harness_util::{
-    E2E_LOCK, connect, drain_auto_sync, step, step_at, step_at_opts, step_at_stopped_with_pos,
-    step_n_beats, step_no_pos, step_stopped, step_until, wait_for_audit,
+    E2E_LOCK, connect, drain_auto_sync, setup_loopback_sink, step, step_at, step_at_opts,
+    step_at_stopped_with_pos, step_n_beats, step_no_pos, step_stopped, step_until, wait_for_audit,
 };
 use common::{MockMixer, SlotState};
 use ethertap::EtherTap;
-use mock_suite::loopback_sink::LoopbackClockSink;
 use vst_runtime::Harness;
-
-// ── helper ───────────────────────────────────────────────────────────────────
-
-fn midi_loopback(harness: &mut Harness<EtherTap>, tag: &str) -> LoopbackClockSink {
-    let name = format!(
-        "EtherTap Edge {} {} {:?}",
-        tag,
-        std::process::id(),
-        std::thread::current().id()
-    );
-    let sink = LoopbackClockSink::start_named(&name).expect("loopback register");
-    let params = harness.plugin().ethertap_params();
-    let handles = harness.plugin().test_handles();
-    *params.midi_out_device.lock() = Some(name.clone());
-    handles.device_change_tx.send(Some(name)).expect("send");
-    let dl = Instant::now() + Duration::from_secs(5);
-    while !handles.midi_bridge_connected.load(Ordering::Acquire) {
-        assert!(Instant::now() < dl, "MIDI bridge never connected");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    sink
-}
 
 // ── Test 1: force sync fires immediately during BPM settle ───────────────────
 
@@ -305,7 +282,7 @@ fn bpm_extreme_values_valid_osc() {
 fn midi_ppq_switch_mid_session_changes_rate() {
     let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut harness = Harness::<EtherTap>::new(44_100.0, 256).expect("init");
-    let sink = midi_loopback(&mut harness, "ppq-switch");
+    let sink = setup_loopback_sink(&mut harness, "ppq-switch");
 
     // Baseline: 2 beats at PPQ=24 (default).
     let pos_after_base = step_n_beats(&mut harness, 2, 120.0, 0);
@@ -344,7 +321,7 @@ fn midi_ppq_switch_mid_session_changes_rate() {
 fn midi_stop_quiesces_clock() {
     let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut harness = Harness::<EtherTap>::new(44_100.0, 256).expect("init");
-    let sink = midi_loopback(&mut harness, "stop");
+    let sink = setup_loopback_sink(&mut harness, "stop");
 
     // Run clock for 2 beats.
     let _pos = step_n_beats(&mut harness, 2, 120.0, 0);
@@ -702,7 +679,7 @@ fn on_change_rate_single_slot_mode_targets_selected() {
 fn midi_clock_runs_without_daw_transport_position() {
     let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut harness = Harness::<EtherTap>::new(44_100.0, 256).expect("init");
-    let sink = midi_loopback(&mut harness, "no-pos");
+    let sink = setup_loopback_sink(&mut harness, "no-pos");
 
     // Drive 4 beats without a DAW position — tick accumulator path.
     // 4 beats × 256-sample buffers @ 120 BPM: samples_per_beat = 22050,
@@ -733,7 +710,7 @@ fn midi_clock_runs_without_daw_transport_position() {
 fn midi_clock_accumulator_bpm_change_rescales_phase() {
     let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut harness = Harness::<EtherTap>::new(44_100.0, 256).expect("init");
-    let sink = midi_loopback(&mut harness, "accumulator-bpm");
+    let sink = setup_loopback_sink(&mut harness, "accumulator-bpm");
 
     // Baseline: 2 beats at PPQ=24 (default) and 120 BPM.
     for _ in 0..180 {
@@ -849,7 +826,7 @@ fn bpm_settle_restarts_on_large_change_during_window() {
 fn midi_bridge_cleared_device_disconnects() {
     let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut harness = Harness::<EtherTap>::new(44_100.0, 256).expect("init");
-    let _sink = midi_loopback(&mut harness, "clear-device");
+    let _sink = setup_loopback_sink(&mut harness, "clear-device");
     let handles = harness.plugin().test_handles();
 
     // Loopback setup already verified bridge_connected = true.
@@ -922,7 +899,7 @@ fn midi_bridge_nonexistent_device_stays_disconnected() {
 fn midi_clock_daw_transport_stop_quiesces() {
     let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut harness = Harness::<EtherTap>::new(44_100.0, 256).expect("init");
-    let sink = midi_loopback(&mut harness, "daw-stop");
+    let sink = setup_loopback_sink(&mut harness, "daw-stop");
 
     // Advance 2 beats with DAW position to establish playing state.
     let pos_after = step_n_beats(&mut harness, 2, 120.0, 0);

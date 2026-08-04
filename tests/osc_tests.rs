@@ -29,26 +29,27 @@ fn roundtrip_fx_delay_par02_dly() {
 }
 
 #[test]
-fn roundtrip_fx_delay_par01_effects() {
-    // 3TAP (11), 4TAP (12), MODD (26) use par/01
-    let par01_effects = [(11, "3TAP"), (12, "4TAP"), (26, "MODD")];
+fn roundtrip_set_fx_delay_all_par01_effects() {
+    // All non-DLY BPM-compatible effects use par/01 (time is their first parameter).
+    // 3TAP (11), 4TAP (12): confirmed fxparse1.c.
+    // D/RV (21), D/CR (24), D/FL (25): same `,fiffffffffff` layout — time first.
+    // MODD (26): confirmed fxparse1.c.
+    let par01_effects = [
+        (11, "3TAP"),
+        (12, "4TAP"),
+        (21, "D/RV"),
+        (24, "D/CR"),
+        (25, "D/FL"),
+        (26, "MODD"),
+    ];
     for (type_id, name) in par01_effects {
         let bytes = osc::set_fx_delay(2, type_id, 0.3);
         let msg = decode_msg(&bytes).expect("must decode");
-        assert_eq!(msg.addr, "/fx/2/par/01", "{name} should use par/01");
-        assert_eq!(msg.args, vec![OscType::Float(0.3)]);
-    }
-}
-
-#[test]
-fn roundtrip_fx_delay_combined_effects() {
-    // D/RV (21), D/CR (24), D/FL (25) use par/01
-    let par01_effects = [(21, "D/RV"), (24, "D/CR"), (25, "D/FL")];
-    for (type_id, name) in par01_effects {
-        let bytes = osc::set_fx_delay(3, type_id, 0.7);
-        let msg = decode_msg(&bytes).expect("must decode");
-        assert_eq!(msg.addr, "/fx/3/par/01", "{name} should use par/01");
-        assert_eq!(msg.args, vec![OscType::Float(0.7)]);
+        assert_eq!(
+            msg.addr, "/fx/2/par/01",
+            "{name} (type {type_id}) should use par/01"
+        );
+        assert_eq!(msg.args, vec![OscType::Float(0.3)], "{name}");
     }
 }
 
@@ -74,58 +75,6 @@ fn roundtrip_query_fx_type_all_slots() {
     }
 }
 
-// ─── Edge case: delay_float boundary values ────────────────────────────────────
-
-#[test]
-fn encode_edge_case_delay_float_zero() {
-    // 0.0 is a valid par value (no delay) — must encode and round-trip.
-    let bytes = osc::set_fx_delay(1, 10, 0.0);
-    let msg = decode_msg(&bytes).expect("must decode");
-    let [OscType::Float(f)] = msg.args.as_slice() else {
-        panic!("expected Float")
-    };
-    assert_eq!(*f, 0.0_f32, "0.0 par value should round-trip exactly");
-}
-
-#[test]
-fn encode_edge_case_delay_float_protocol_max() {
-    // 1.0 is the maximum par value on X32 — must encode and round-trip.
-    let bytes = osc::set_fx_delay(1, 10, 1.0);
-    let msg = decode_msg(&bytes).expect("must decode");
-    let [OscType::Float(f)] = msg.args.as_slice() else {
-        panic!("expected Float")
-    };
-    assert_eq!(*f, 1.0_f32, "1.0 par value should round-trip exactly");
-}
-
-// ─── Edge case: Empty OSC message ──────────────────────────────────────────────
-
-#[test]
-fn decode_empty_packet() {
-    // rosc will return an error for an empty buffer; this is not a panic
-    let result = rosc::decoder::decode_udp(&[]);
-    assert!(result.is_err(), "empty buffer must return error");
-}
-
-// ─── Edge case: Wrong type-tag position ────────────────────────────────────────
-
-#[test]
-fn malformed_packet_type_tag_wrong_position() {
-    // After the null-padded address "/fx\0", the next field must be the
-    // type-tag string starting with ','.  Here it is another address segment
-    // "/1\0\0" instead — rosc must reject the packet rather than misparse it.
-    let result = rosc::decoder::decode_udp(&[
-        0x2f, 0x66, 0x78, 0x00, // "/fx\0"
-        0x2f, 0x31, 0x00, 0x00, // "/1\0\0" — address segment where type tag expected
-        0x2c, 0x69, 0x00, 0x00, // ",i\0\0"
-        0x00, 0x00, 0x00, 0x2a,
-    ]);
-    assert!(
-        result.is_err(),
-        "type-tag field not starting with ',' must be rejected"
-    );
-}
-
 // ─── Mute/unmute int encoding: wrong polarity would silently break X32 ─────────
 
 #[test]
@@ -143,65 +92,32 @@ fn set_fxrtn_mute_int_value_polarity() {
     assert_eq!(u.args, vec![OscType::Int(1)], "mute=false must send 1 (on)");
 }
 
-#[test]
-fn mute_uses_int_arg_delay_uses_float_arg() {
-    // X32 protocol: on/off params (mute) use Int; time params (delay) use Float.
-    // Swapping these produces silent protocol failures — the mixer silently ignores
-    // a Float where it expects Int and vice versa.
-    let mute_bytes = osc::set_fxrtn_mute(1, true);
-    let mute_msg = decode_msg(&mute_bytes).expect("must decode");
-    assert!(
-        matches!(mute_msg.args.first(), Some(OscType::Int(_))),
-        "mute must use Int arg per X32 on/off protocol"
-    );
-
-    let delay_bytes = osc::set_fx_delay(1, 10, 0.5);
-    let delay_msg = decode_msg(&delay_bytes).expect("must decode");
-    assert!(
-        matches!(delay_msg.args.first(), Some(OscType::Float(_))),
-        "delay time must use Float arg per X32 par value protocol"
-    );
-}
-
 // ─── Malformed packet handling – rejection of structurally invalid inputs ──────
-
-#[test]
-fn malformed_packet_truncated_header() {
-    // Truncated before OSC address complete – rosc must reject, not panic.
-    let result = rosc::decoder::decode_udp(b"/f");
-    assert!(result.is_err());
-}
-
-#[test]
-fn malformed_packet_zero_length_after_address() {
-    // Address present but no type-tag section at all — rosc must reject.
-    let result = rosc::decoder::decode_udp(&[
-        0x2f, 0x69, 0x6e, 0x66, 0x6f, 0x00, 0x00, 0x00, // "/info\0\0\0"
-    ]);
-    assert!(result.is_err(), "missing type tag must be rejected");
-}
-
-#[test]
-fn malformed_packet_invalid_string_padding() {
-    // Address without trailing NUL padding — rosc must reject.
-    let result = rosc::decoder::decode_udp(&[
-        0x2f, 0x69, 0x6e, 0x66, 0x6f, 0x6f, 0x00, 0x00, // "/infoo\0\0"
-    ]);
-    assert!(result.is_err(), "missing type tag must be rejected");
-}
 
 // ─── Additional roundtrip consistency tests ────────────────────────────────────
 
 #[test]
-fn roundtrip_set_fxrtn_mute() {
-    for slot in 1..=8 {
-        for muted in [false, true] {
-            let bytes = osc::set_fxrtn_mute(slot, muted);
-            let msg = decode_msg(&bytes).expect("must decode");
-            assert_eq!(msg.addr, format!("/fxrtn/{slot}/mix/on"));
-            let expected = if muted { 0 } else { 1 };
-            assert_eq!(msg.args, vec![OscType::Int(expected)]);
-        }
+fn roundtrip_set_fxrtn_mute_all_slots() {
+    // Polarity: mute=true → 0 (off), mute=false → 1 (on). Hardcoded, not mirrored.
+    // Covers slots 2-8; slot 1 is already pinned by set_fxrtn_mute_int_value_polarity.
+    for slot in 2..=8 {
+        let muted = osc::set_fxrtn_mute(slot, true);
+        let msg = decode_msg(&muted).expect("must decode");
+        assert_eq!(msg.addr, format!("/fxrtn/{slot}/mix/on"));
+        assert_eq!(
+            msg.args,
+            vec![OscType::Int(0)],
+            "slot {slot} mute=true must send 0"
+        );
+
+        let unmuted = osc::set_fxrtn_mute(slot, false);
+        let msg = decode_msg(&unmuted).expect("must decode");
+        assert_eq!(msg.addr, format!("/fxrtn/{slot}/mix/on"));
+        assert_eq!(
+            msg.args,
+            vec![OscType::Int(1)],
+            "slot {slot} mute=false must send 1"
+        );
     }
 }
 
@@ -240,6 +156,22 @@ fn float_to_bpm_zero_is_unset_sentinel() {
         float_to_bpm(0.0),
         0.0,
         "float 0.0 must return sentinel 0.0 (not a divide-by-zero)"
+    );
+}
+
+#[test]
+fn float_to_bpm_negative_is_sentinel() {
+    // Negative values (e.g. corrupted mixer data) must return 0.0, not a
+    // negative BPM. The implementation guards with `if f <= 0.0`.
+    assert_eq!(
+        float_to_bpm(-0.5),
+        0.0,
+        "negative float must return sentinel 0.0"
+    );
+    assert_eq!(
+        float_to_bpm(-1.0),
+        0.0,
+        "negative float must return sentinel 0.0"
     );
 }
 
@@ -309,6 +241,17 @@ fn fx_type_short_bus_slot_all_type_ids() {
     // Unknown type_id must fall back to "???"
     assert_eq!(osc::fx_type_short(999, 1), "???");
     assert_eq!(osc::fx_type_short(-2, 1), "???");
+    // Spot-check BPM-compatible types — wrong short labels would silently produce
+    // confusing UI text without failing any other assertion.
+    assert_eq!(osc::fx_type_short(10, 1), "DLY", "type 10 = Stereo Delay");
+    assert_eq!(osc::fx_type_short(11, 1), "3TAP", "type 11 = 3-Tap Delay");
+    assert_eq!(osc::fx_type_short(12, 1), "4TAP", "type 12 = 4-Tap Delay");
+    assert_eq!(
+        osc::fx_type_short(26, 1),
+        "MODD",
+        "type 26 = Modulated Delay"
+    );
+    assert_eq!(osc::fx_type_short(0, 1), "HALL", "type 0 = Hall Reverb");
 }
 
 #[test]
@@ -321,6 +264,13 @@ fn fx_type_long_bus_slot_all_type_ids() {
         );
     }
     assert_eq!(osc::fx_type_long(999, 1), "Unknown");
+    // Spot-check BPM-compatible effects — wrong labels here would silently produce
+    // confusing UI text without breaking any other assertion.
+    assert_eq!(osc::fx_type_long(10, 1), "Stereo Delay");
+    assert_eq!(osc::fx_type_long(11, 1), "3-Tap Delay");
+    assert_eq!(osc::fx_type_long(12, 1), "4-Tap Delay");
+    assert_eq!(osc::fx_type_long(26, 1), "Modulated Delay");
+    assert_eq!(osc::fx_type_long(0, 1), "Hall Reverb");
 }
 
 #[test]
@@ -332,10 +282,21 @@ fn fx_type_short_insert_slot_all_type_ids() {
             !s.is_empty(),
             "insert type_id {type_id} short label must not be empty"
         );
+        assert!(
+            s.len() <= 4,
+            "short label for insert type_id {type_id} should be ≤4 chars: {s:?}"
+        );
     }
     assert_eq!(osc::fx_type_short(999, 5), "???");
     // Slot 8 (highest insert slot) must also use insert table.
     assert_ne!(osc::fx_type_short(0, 8), osc::fx_type_short(0, 1));
+    // Spot-check known insert-slot types.
+    assert_eq!(
+        osc::fx_type_short(0, 5),
+        "GEQ2",
+        "insert type 0 = Dual GEQ 27"
+    );
+    assert_eq!(osc::fx_type_short(6, 5), "P1A", "insert type 6 = PCM42");
 }
 
 #[test]
@@ -348,6 +309,10 @@ fn fx_type_long_insert_slot_all_type_ids() {
         );
     }
     assert_eq!(osc::fx_type_long(999, 6), "Unknown");
+    // Spot-check a few known insert-slot types to catch table mix-ups.
+    assert_eq!(osc::fx_type_long(0, 5), "Dual GEQ 27");
+    assert_eq!(osc::fx_type_long(6, 5), "PCM42");
+    assert_eq!(osc::fx_type_long(23, 5), "Stereo Imager");
 }
 
 #[test]

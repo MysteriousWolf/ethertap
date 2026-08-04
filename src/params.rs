@@ -134,6 +134,10 @@ impl std::fmt::Display for Ppq {
 #[derive(Params)]
 pub struct EtherTapParams {
     // ── Editor window state ──────────────────────────────────────────────
+    /// Window size and open/closed state. Persisted so a resized editor comes
+    /// back the way the user left it instead of snapping to the default size
+    /// on every session load.
+    #[persist = "editor-state"]
     pub editor_state: Arc<IcedState>,
 
     // ── Network configuration (persisted, not automatable) ───────────────
@@ -149,6 +153,13 @@ pub struct EtherTapParams {
     /// persisted address (e.g. DHCP reassigned the IP).
     #[persist = "last-device"]
     pub last_device: Arc<Mutex<(String, String)>>,
+
+    /// Last slot audit result: raw effect type per slot (index = slot-1),
+    /// `i32::MIN` for "no response". Persisted so a reloaded session shows the
+    /// console's slot map immediately instead of eight blanks until the first
+    /// audit lands. Overwritten by the audit that runs on every connect.
+    #[persist = "slot-types"]
+    pub last_slot_types: Arc<Mutex<[i32; 8]>>,
 
     // ── Auto-reconnect (automatable + worker-facing atom) ────────────────
     /// Opt-in: connect to the last mixer on plugin load and auto-retarget
@@ -297,6 +308,7 @@ impl Default for EtherTapParams {
             })),
             target_port: Arc::new(Mutex::new(10023)),
             last_device: Arc::new(Mutex::new((String::new(), String::new()))),
+            last_slot_types: Arc::new(Mutex::new([i32::MIN; 8])),
             auto_reconnect: BoolParam::new("Auto Reconnect", false),
             auto_reconnect_atom: Arc::new(AtomicBool::new(false)),
             fx_slot: IntParam::new("FX Slot", 1, IntRange::Linear { min: 1, max: 8 }),

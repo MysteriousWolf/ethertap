@@ -135,6 +135,8 @@ pub fn create_worker_full(
             scan_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             auto_reconnect,
             last_device,
+            scan_health: Arc::new(AtomicU8::new(0)),
+            last_slot_types: Arc::new(Mutex::new([i32::MIN; 8])),
         },
     );
 
@@ -184,6 +186,7 @@ pub mod harness_util {
     use std::time::{Duration, Instant};
 
     use ethertap::EtherTap;
+    use mock_suite::loopback_sink::LoopbackClockSink;
     use vst_runtime::Harness;
 
     use super::MockMixer;
@@ -193,11 +196,9 @@ pub mod harness_util {
     /// on macOS, a CoreMIDI watcher) — never construct two concurrently.
     pub static E2E_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// Drive one playing `process()` call at `tempo` BPM, 4/4, with the song
-    /// position set from `pos_samples` (beat/bar fields derived).
-    pub fn step_at(harness: &mut Harness<EtherTap>, tempo: f64, pos_samples: i64) {
+    fn step_at_impl(harness: &mut Harness<EtherTap>, tempo: f64, pos_samples: i64, playing: bool) {
         let mut t = harness.new_transport();
-        t.playing = true;
+        t.playing = playing;
         t.tempo = Some(tempo);
         t.time_sig_numerator = Some(4);
         t.time_sig_denominator = Some(4);
@@ -212,6 +213,12 @@ pub mod harness_util {
         );
         let mut io = vec![vec![0.0f32; 256]; 2];
         let _ = harness.process(&mut io, t, &[]);
+    }
+
+    /// Drive one playing `process()` call at `tempo` BPM, 4/4, with the song
+    /// position set from `pos_samples` (beat/bar fields derived).
+    pub fn step_at(harness: &mut Harness<EtherTap>, tempo: f64, pos_samples: i64) {
+        step_at_impl(harness, tempo, pos_samples, true);
     }
 
     /// Drive one playing `process()` call at `tempo` BPM, 4/4, position zero.
@@ -224,22 +231,7 @@ pub mod harness_util {
     /// lib.rs enters the DAW-mode MIDI clock branch (`if let Some(beat_start)`)
     /// even though `playing = false`, covering the transport-stop code path.
     pub fn step_at_stopped_with_pos(harness: &mut Harness<EtherTap>, tempo: f64, pos_samples: i64) {
-        let mut t = harness.new_transport();
-        t.playing = false;
-        t.tempo = Some(tempo);
-        t.time_sig_numerator = Some(4);
-        t.time_sig_denominator = Some(4);
-        let pos_beats = pos_samples as f64 / 44_100.0 / 60.0 * tempo;
-        let bar_number = (pos_beats / 4.0).floor() as i32;
-        t.set_song_position(
-            Some(pos_samples),
-            Some(pos_beats),
-            Some(bar_number as f64 * 4.0),
-            Some(bar_number),
-            None,
-        );
-        let mut io = vec![vec![0.0f32; 256]; 2];
-        let _ = harness.process(&mut io, t, &[]);
+        step_at_impl(harness, tempo, pos_samples, false);
     }
 
     /// Step the plugin until `pred` holds or `timeout` elapses. Sleeps between
@@ -386,21 +378,50 @@ pub mod harness_util {
         });
         std::thread::sleep(Duration::from_millis(300));
     }
+
+    /// Register a loopback MIDI port and wire the harness's clock worker to it.
+    /// The port name embeds `tag`, the process id, and the thread id so
+    /// concurrent test binaries never collide on the same name.
+    /// Panics if the bridge does not connect within 5 s.
+    pub fn setup_loopback_sink(harness: &mut Harness<EtherTap>, tag: &str) -> LoopbackClockSink {
+        let name = format!(
+            "EtherTap Test {} {} {:?}",
+            tag,
+            std::process::id(),
+            std::thread::current().id()
+        );
+        let sink = LoopbackClockSink::start_named(&name).expect("loopback sink register");
+        let params = harness.plugin().ethertap_params();
+        let handles = harness.plugin().test_handles();
+        *params.midi_out_device.lock() = Some(name.clone());
+        handles
+            .device_change_tx
+            .send(Some(name))
+            .expect("device_change send");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !handles
+            .midi_bridge_connected
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            assert!(
+                Instant::now() < deadline,
+                "MIDI worker never connected to loopback sink"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        sink
+    }
 }
 
 pub fn wait_for_status(
     status_rx: &Receiver<NetworkStatus>,
     timeout: Duration,
 ) -> Option<NetworkStatus> {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        match status_rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(NetworkStatus::ActivityPulse | NetworkStatus::RxPulse) => continue,
-            Ok(other) => return Some(other),
-            Err(_) => continue,
-        }
-    }
-    None
+    wait_for_specific_status(
+        status_rx,
+        |s| !matches!(s, NetworkStatus::ActivityPulse | NetworkStatus::RxPulse),
+        timeout,
+    )
 }
 
 pub fn drain_all_status(status_rx: &Receiver<NetworkStatus>) {

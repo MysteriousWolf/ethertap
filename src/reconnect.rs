@@ -43,13 +43,12 @@ impl Backoff {
         self.skip_until = None;
     }
 
-    pub fn is_cooling_down(&self) -> bool {
-        self.skip_until.is_some_and(|until| Instant::now() < until)
+    pub fn reset(&mut self) {
+        self.record_success();
     }
 
-    pub fn reset(&mut self) {
-        self.attempts = 0;
-        self.skip_until = None;
+    pub fn is_cooling_down(&self) -> bool {
+        self.skip_until.is_some_and(|until| Instant::now() < until)
     }
 }
 

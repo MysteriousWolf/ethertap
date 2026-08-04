@@ -104,6 +104,10 @@ pub struct EtherTap {
     scan_targets: Arc<Mutex<Vec<network::DeviceInfo>>>,
     /// Millisecond timestamp of the last completed TargetsFound scan result.
     scan_completed_ts: Arc<AtomicU64>,
+    /// Latest [`network::ScanHealth`] as a `u8` — the editor tints its scan
+    /// control from this so a silently-blocked network is visible without
+    /// reading the log.
+    scan_health: Arc<AtomicU8>,
     /// Name and model of the currently connected device, from /info responses.
     connected_device: Arc<Mutex<(String, String)>>,
 
@@ -194,6 +198,12 @@ pub struct EtherTap {
     last_compatible_slot_count: u8,
     /// Last value written to `params.midi_bridge_connected` from the audio thread.
     last_midi_bridge_connected_param: bool,
+    /// Set by `initialize()`: publish every read-only status parameter once on
+    /// the next buffer, regardless of whether it changed. The host restores
+    /// these params from the saved session like any other, so the first buffer
+    /// has to overwrite whatever it restored rather than trusting a comparison
+    /// against our own freshly-reset mirrors.
+    force_status_publish: bool,
 
     // ── OnChange retry ────────────────────────────────────────────────────
     /// True while we're waiting for hardware to confirm the tempo.
@@ -239,6 +249,7 @@ impl Default for EtherTap {
             Arc::new(std::array::from_fn(|_| AtomicI32::new(i32::MIN)));
         let scan_targets = Arc::new(Mutex::new(Vec::<network::DeviceInfo>::new()));
         let scan_completed_ts = Arc::new(AtomicU64::new(0));
+        let scan_health = Arc::new(AtomicU8::new(network::ScanHealth::Unknown as u8));
         let connected_device = Arc::new(Mutex::new((String::new(), String::new())));
         let scan_generation = Arc::new(AtomicU64::new(0));
 
@@ -280,6 +291,8 @@ impl Default for EtherTap {
                 scan_generation: scan_generation.clone(),
                 auto_reconnect: params.auto_reconnect_atom.clone(),
                 last_device: params.last_device.clone(),
+                scan_health: scan_health.clone(),
+                last_slot_types: params.last_slot_types.clone(),
             },
         );
         std::thread::Builder::new()
@@ -332,6 +345,7 @@ impl Default for EtherTap {
             slot_types,
             scan_targets,
             scan_completed_ts,
+            scan_health,
             connected_device,
             scan_generation,
             sample_rate: 44100.0,
@@ -343,6 +357,7 @@ impl Default for EtherTap {
             last_hardware_bpm: 0.0,
             last_compatible_slot_count: 0,
             last_midi_bridge_connected_param: false,
+            force_status_publish: true,
             last_bpm: 0.0,
             bpm_change_ts: 0,
             bpm_is_settling: false,
@@ -446,12 +461,13 @@ impl Plugin for EtherTap {
         #[cfg(not(feature = "standalone"))]
         let _ = layout;
 
+        self.adopt_restored_state();
+
         // No network traffic at load: connecting is either explicit (user
         // pulses connect_to_last / the editor Connect button) or opt-in via
         // the auto_reconnect param, whose atom the network worker polls and
-        // self-connects on. The worker path also covers hosts that restore
-        // param state only *after* initialize() returns. AuditSlots fires
-        // from process() on every connect transition.
+        // self-connects on. AuditSlots fires from process() on every connect
+        // transition.
         true
     }
 
@@ -600,11 +616,19 @@ impl Plugin for EtherTap {
         // closed; context.set_parameter() updates the internal atomic and, for
         // VST3, schedules a host notification via the GUI event loop.
         let connected = self.conn_status.load(Ordering::Acquire);
+        let force_status = std::mem::take(&mut self.force_status_publish);
         let hw_float = f32::from_bits(self.hardware_float.load(Ordering::Acquire));
         let in_sync =
             connected && hw_float > 0.0001 && (osc::bpm_to_float(bpm) - hw_float).abs() < 0.001;
-        if connected != self.last_conn_status {
+        // Publishing the value and reacting to a transition are separate jobs:
+        // the forced first-buffer publish overwrites whatever the host restored,
+        // but nothing has actually changed, so the connect/disconnect side
+        // effects below must stay keyed on a real transition.
+        let conn_changed = connected != self.last_conn_status;
+        if force_status || conn_changed {
             context.set_parameter(&self.params.is_connected, connected);
+        }
+        if conn_changed {
             if connected {
                 // Just (re)connected: scan slots and arm the auto-sync.
                 // This mirrors the manual "Query → All" flow in the editor.
@@ -627,7 +651,7 @@ impl Plugin for EtherTap {
             }
             self.last_conn_status = connected;
         }
-        if in_sync != self.last_matched_status {
+        if force_status || in_sync != self.last_matched_status {
             context.set_parameter(&self.params.is_matched, in_sync);
             self.last_matched_status = in_sync;
         }
@@ -643,13 +667,13 @@ impl Plugin for EtherTap {
         } else {
             SyncStatus::Connected
         };
-        if sync_status != self.last_sync_status {
+        if force_status || sync_status != self.last_sync_status {
             context.set_parameter(&self.params.sync_status, sync_status);
             self.last_sync_status = sync_status;
         }
 
         // phase_reset_pending mirrors hr_pending (quantised Hard Reset armed).
-        if self.hr_pending != self.last_phase_reset_pending {
+        if force_status || self.hr_pending != self.last_phase_reset_pending {
             context.set_parameter(&self.params.phase_reset_pending, self.hr_pending);
             self.last_phase_reset_pending = self.hr_pending;
         }
@@ -661,7 +685,7 @@ impl Plugin for EtherTap {
         } else {
             0.0
         };
-        if (hardware_bpm - self.last_hardware_bpm).abs() > 0.01 {
+        if force_status || (hardware_bpm - self.last_hardware_bpm).abs() > 0.01 {
             context.set_parameter(&self.params.hardware_bpm, hardware_bpm as f32);
             self.last_hardware_bpm = hardware_bpm;
         }
@@ -669,14 +693,14 @@ impl Plugin for EtherTap {
         // compatible_slot_count = popcount of the compatible_slots bitmask.
         let compatible_slot_count =
             self.compatible_slots.load(Ordering::Relaxed).count_ones() as i32;
-        if compatible_slot_count as u8 != self.last_compatible_slot_count {
+        if force_status || compatible_slot_count as u8 != self.last_compatible_slot_count {
             context.set_parameter(&self.params.compatible_slot_count, compatible_slot_count);
             self.last_compatible_slot_count = compatible_slot_count as u8;
         }
 
         // midi_bridge_connected mirrors the MIDI worker's open-connection flag.
         let midi_bridge_connected = self.midi_bridge_connected.load(Ordering::Relaxed);
-        if midi_bridge_connected != self.last_midi_bridge_connected_param {
+        if force_status || midi_bridge_connected != self.last_midi_bridge_connected_param {
             context.set_parameter(&self.params.midi_bridge_connected, midi_bridge_connected);
             self.last_midi_bridge_connected_param = midi_bridge_connected;
         }
@@ -1084,6 +1108,79 @@ fn fx_type_to_bit(type_id: i32) -> Option<u8> {
 }
 
 impl EtherTap {
+    /// Reconcile the plugin's own state with the parameter values the host has
+    /// just restored. Called from `initialize()`, before the first buffer.
+    ///
+    /// A VST3 host restores every `#[id]` parameter from the saved session,
+    /// including the momentary triggers and the read-only status readouts. Both
+    /// groups need handling: a restored trigger must not look like a fresh
+    /// press, and a restored status must not be believed.
+    fn adopt_restored_state(&mut self) {
+        // Mirror auto_reconnect into the worker-facing atom right here, not
+        // only from process(). The worker's discovery and self-connect both
+        // read that atom, and a plugin sitting on a bypassed or disabled track
+        // may never get a process() call to mirror it — which used to mean
+        // auto-reconnect silently did nothing for the whole session.
+        self.params
+            .auto_reconnect_atom
+            .store(self.params.auto_reconnect.value(), Ordering::Relaxed);
+
+        // Seed the momentary-trigger edge detectors from the restored values.
+        // A session stored with one of them true would otherwise read as a
+        // rising edge on the first buffer and fire a command nobody asked for.
+        // A restored `disconnect` was the worst of them: it latched the worker
+        // into user-disconnected, which blocks auto-reconnect and background
+        // discovery until the user presses Connect by hand.
+        self.prev_connect_to_last = self.params.connect_to_last.value();
+        self.prev_disconnect_param = self.params.disconnect.value();
+        self.prev_force_sync_rate = self.params.force_sync_rate.value();
+        self.prev_force_sync_phase = self.params.force_sync_phase.value();
+        self.prev_audit_slots = self.params.audit_slots.value();
+
+        // Read-only status params are host-visible, so the host restores them
+        // too. Believing a restored "connected" would leave the UI and any
+        // automation lane lying about the mixer until the first real status
+        // arrives, so force a full status republish on the first buffer.
+        //
+        // The republish reads `conn_status` / `hardware_float`, which the
+        // network worker owns — they are never host-restored, so they already
+        // hold the truth and must not be cleared here. `initialize()` runs on
+        // every host activation, not only at load: clearing them would make a
+        // still-connected plugin report offline whenever its track is
+        // deactivated and re-enabled, and the offline→online edge on the next
+        // heartbeat would re-fire the eight-query connect-time slot audit.
+        // Seeding the edge detector from the live value keeps the publish
+        // forced without inventing a transition. At genuine load time the
+        // worker has not connected yet, so this reads false as before.
+        self.last_conn_status = self.conn_status.load(Ordering::Acquire);
+        self.last_matched_status = false;
+        self.last_sync_status = SyncStatus::Offline;
+        self.last_phase_reset_pending = false;
+        self.last_hardware_bpm = 0.0;
+        self.force_status_publish = true;
+
+        // Restore the last slot audit so the editor can draw the console's slot
+        // map straight away rather than eight blanks. The audit that runs on
+        // the next connect overwrites all of it.
+        let restored = *self.params.last_slot_types.lock();
+        let mut compatible = 0u8;
+        let mut occupied = 0u8;
+        for (i, &type_id) in restored.iter().enumerate() {
+            self.slot_types[i].store(type_id, Ordering::Relaxed);
+            if type_id == i32::MIN {
+                continue;
+            }
+            let slot = i as u8 + 1;
+            occupied |= 1 << i;
+            if osc::is_bpm_compatible(type_id, slot) {
+                compatible |= 1 << i;
+            }
+        }
+        self.compatible_slots.store(compatible, Ordering::Release);
+        self.occupied_slots.store(occupied, Ordering::Release);
+        self.last_compatible_slot_count = compatible.count_ones() as u8;
+    }
+
     /// Dispatch a sync command.  `hard_reset = true` → `HardReset`, else `SyncNow`.
     ///
     /// When "all slots" mode is active, every compatible slot whose effect type
@@ -1544,6 +1641,238 @@ mod tests {
                 .auto_reconnect_atom
                 .load(std::sync::atomic::Ordering::Relaxed)
         );
+    }
+
+    // ── Restored session state ──────────────────────────────────────────────
+
+    /// Write a host parameter by `#[id]`, the way a host restoring a session
+    /// does — straight into the parameter, with no plugin code in between.
+    fn set_param(plugin: &EtherTap, id: &str, normalized: f32) {
+        let map = plugin.params.param_map();
+        let (_, ptr, _) = map
+            .iter()
+            .find(|(name, _, _)| name == id)
+            .unwrap_or_else(|| panic!("no parameter with id {id}"));
+        // SAFETY: `ptr` points into `plugin.params`, which outlives this call.
+        unsafe {
+            ptr.set_normalized_value(normalized);
+        }
+    }
+
+    /// A session saved while `disconnect` happened to be true must not fire a
+    /// Disconnect on load. That command latches the worker into
+    /// user-disconnected, which kills auto-reconnect and background discovery
+    /// for the whole session — the exact "it never connects" symptom.
+    #[test]
+    fn restored_disconnect_trigger_does_not_fire_on_load() {
+        let mut plugin = EtherTap::default();
+        let (test_cmd_tx, test_cmd_rx) = crossbeam_channel::bounded(8);
+        plugin.cmd_tx = test_cmd_tx;
+
+        // Host restores the saved parameter set, then initialize() runs.
+        set_param(&plugin, "disconnect", 1.0);
+        assert!(plugin.params.disconnect.value(), "precondition");
+        plugin.adopt_restored_state();
+
+        let mut ctx = MockProcessContext::new(120.0, false);
+        let mut buffer = make_buffer();
+        let mut aux = make_aux();
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+
+        assert!(
+            !test_cmd_rx
+                .try_iter()
+                .any(|c| matches!(c, NetworkCommand::Disconnect)),
+            "a restored trigger value must not be read as a rising edge"
+        );
+    }
+
+    /// Same hazard on the connect side: a restored `connect_to_last` must not
+    /// put traffic on the network before the user has asked for any.
+    #[test]
+    fn restored_connect_trigger_does_not_fire_on_load() {
+        let mut plugin = EtherTap::default();
+        let (test_cmd_tx, test_cmd_rx) = crossbeam_channel::bounded(8);
+        plugin.cmd_tx = test_cmd_tx;
+
+        set_param(&plugin, "connect_to_last", 1.0);
+        plugin.adopt_restored_state();
+
+        let mut ctx = MockProcessContext::new(120.0, false);
+        let mut buffer = make_buffer();
+        let mut aux = make_aux();
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+
+        assert!(
+            !test_cmd_rx
+                .try_iter()
+                .any(|c| matches!(c, NetworkCommand::ConnectToLast)),
+            "a restored trigger value must not be read as a rising edge"
+        );
+    }
+
+    /// After a genuine press the trigger must still work — the seeding fixes
+    /// the load-time edge without disarming the control.
+    #[test]
+    fn trigger_still_fires_on_a_real_press_after_load() {
+        let mut plugin = EtherTap::default();
+        let (test_cmd_tx, test_cmd_rx) = crossbeam_channel::bounded(8);
+        plugin.cmd_tx = test_cmd_tx;
+
+        set_param(&plugin, "disconnect", 1.0);
+        plugin.adopt_restored_state();
+
+        let mut ctx = MockProcessContext::new(120.0, false);
+        let mut buffer = make_buffer();
+        let mut aux = make_aux();
+        // First buffer consumes the restored value and self-resets the param;
+        // the edge detector still holds the pre-reset `true`, so it takes one
+        // more buffer to observe the reset and re-arm.
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+        let _ = test_cmd_rx.try_iter().count();
+
+        // Now a real press.
+        set_param(&plugin, "disconnect", 1.0);
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+        assert!(
+            test_cmd_rx
+                .try_iter()
+                .any(|c| matches!(c, NetworkCommand::Disconnect)),
+            "a genuine rising edge must still dispatch Disconnect"
+        );
+    }
+
+    /// The worker polls an atom for auto_reconnect. initialize() must mirror
+    /// the restored parameter into it, because a suspended or bypassed track
+    /// may never call process() to do it.
+    #[test]
+    fn restored_auto_reconnect_reaches_the_worker_atom() {
+        let mut plugin = EtherTap::default();
+        set_param(&plugin, "auto_reconnect", 1.0);
+        assert!(
+            !plugin.params.auto_reconnect_atom.load(Ordering::Relaxed),
+            "precondition: the atom starts at the default, not the restored value"
+        );
+
+        plugin.adopt_restored_state();
+
+        assert!(
+            plugin.params.auto_reconnect_atom.load(Ordering::Relaxed),
+            "the worker-facing atom must reflect the restored parameter"
+        );
+    }
+
+    /// A session saved while connected restores `is_connected = true`. On load
+    /// the plugin is offline, and the first buffer must say so rather than
+    /// waiting for a transition that will never come.
+    #[test]
+    fn restored_connected_status_is_overwritten_on_first_buffer() {
+        let mut plugin = EtherTap::default();
+        set_param(&plugin, "is_connected", 1.0);
+        assert!(plugin.params.is_connected.value(), "precondition");
+
+        plugin.adopt_restored_state();
+        let mut ctx = MockProcessContext::new(120.0, false);
+        let mut buffer = make_buffer();
+        let mut aux = make_aux();
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+
+        assert!(
+            !plugin.params.is_connected.value(),
+            "a restored connected status must be corrected on the first buffer"
+        );
+        assert_eq!(plugin.params.sync_status.value(), SyncStatus::Offline);
+    }
+
+    /// `initialize()` runs on every host activation, not only at load — a DAW
+    /// calls it again whenever the track is deactivated and re-enabled. The
+    /// worker keeps its socket across that, so the plugin must not announce
+    /// itself offline, and must not re-fire the connect-time slot audit for a
+    /// connection it never lost.
+    #[test]
+    fn host_reactivation_keeps_a_live_connection() {
+        let mut plugin = EtherTap::default();
+        let (test_cmd_tx, test_cmd_rx) = crossbeam_channel::bounded(16);
+        plugin.cmd_tx = test_cmd_tx;
+
+        let mut ctx = MockProcessContext::new(120.0, false);
+        let mut buffer = make_buffer();
+        let mut aux = make_aux();
+
+        // Load, then the worker connects and the first buffer picks it up.
+        plugin.adopt_restored_state();
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+        plugin.conn_status.store(true, Ordering::Release);
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+        assert!(plugin.params.is_connected.value(), "precondition: online");
+        assert!(
+            test_cmd_rx
+                .try_iter()
+                .any(|c| matches!(c, NetworkCommand::AuditSlots)),
+            "precondition: the genuine connect fires the slot audit"
+        );
+
+        // Host deactivates and re-enables the track: initialize() runs again.
+        plugin.adopt_restored_state();
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+
+        assert!(
+            plugin.params.is_connected.value(),
+            "reactivation must not report a still-live connection as offline"
+        );
+        assert!(
+            !test_cmd_rx
+                .try_iter()
+                .any(|c| matches!(c, NetworkCommand::AuditSlots)),
+            "no connect transition happened, so no second slot audit"
+        );
+    }
+
+    /// The slot audit is expensive (eight round trips) and only runs on
+    /// connect. Restoring the last one lets the editor show the console's slot
+    /// map on load instead of eight blanks.
+    #[test]
+    fn restored_slot_audit_repopulates_the_slot_map() {
+        let mut plugin = EtherTap::default();
+        // Slot 1 = DLY (BPM-compatible), slot 2 = a reverb (not), rest silent.
+        *plugin.params.last_slot_types.lock() = [
+            10,
+            1,
+            i32::MIN,
+            i32::MIN,
+            i32::MIN,
+            i32::MIN,
+            i32::MIN,
+            i32::MIN,
+        ];
+
+        plugin.adopt_restored_state();
+
+        assert_eq!(
+            plugin.slot_types[0].load(Ordering::Relaxed),
+            10,
+            "restored slot types must reach the shared array"
+        );
+        assert_eq!(
+            plugin.occupied_slots.load(Ordering::Acquire),
+            0b0000_0011,
+            "both answering slots count as occupied"
+        );
+        assert_eq!(
+            plugin.compatible_slots.load(Ordering::Acquire),
+            0b0000_0001,
+            "only the delay is BPM-compatible"
+        );
+    }
+
+    /// A session that never saw a console must not claim slots exist.
+    #[test]
+    fn empty_restored_slot_audit_leaves_the_map_blank() {
+        let mut plugin = EtherTap::default();
+        plugin.adopt_restored_state();
+        assert_eq!(plugin.occupied_slots.load(Ordering::Acquire), 0);
+        assert_eq!(plugin.compatible_slots.load(Ordering::Acquire), 0);
     }
 
     // ── NetworkStatus::ScanDone ─────────────────────────────────────────────

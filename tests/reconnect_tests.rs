@@ -146,10 +146,16 @@ fn identity_mismatch_rescans_to_matching_device() {
         real.port(), // scan probes reach the real device's port
     );
 
+    // Budget: the happy path is ~3 s (1 s scan → dial imposter → reject →
+    // 1 s retarget scan → dial the real device). But a probe or reply lost
+    // under load makes that retarget scan come up empty, and the worker then
+    // ramps its discovery cadence to 10 s before trying again — so any budget
+    // near 10 s is a coin flip on a loaded machine. 30 s covers two missed
+    // scan windows; it is an upper bound, not the expected duration.
     let connected = wait_for_specific_status(
         &fx.status_rx,
         |s| matches!(s, NetworkStatus::Connected),
-        Duration::from_secs(10),
+        Duration::from_secs(30),
     );
     assert!(connected.is_some(), "should connect after rescan");
 

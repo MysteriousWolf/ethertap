@@ -37,8 +37,38 @@ const HARD_RESET_DWELL: Duration = Duration::from_millis(75);
 const LOOP_SLEEP: Duration = Duration::from_millis(10);
 /// Consecutive heartbeat failures before an auto_reconnect rescan kicks in.
 const AUTO_RESCAN_FAILURES: u32 = 3;
-/// Listen window for the synchronous identity rescan.
-const RESCAN_WINDOW: Duration = Duration::from_millis(600);
+
+/// Full listen window for one scan.  Must outlast the whole probe burst plus
+/// the console's reply latency — an X32 answers `/info` in a few ms, but a
+/// congested Wi-Fi link or a console still finishing its boot can take far
+/// longer, and a scan that stops listening early reports "nothing there".
+const SCAN_WINDOW: Duration = Duration::from_millis(1000);
+/// Probe retransmits inside one scan window.  Broadcast UDP has no delivery
+/// guarantee and a single lost datagram used to mean an empty device list.
+const SCAN_PROBE_BURST: usize = 3;
+/// Spacing between the retransmits of a burst.
+const SCAN_PROBE_SPACING: Duration = Duration::from_millis(200);
+/// Consecutive zero-reply scans (with interfaces present) before the worker
+/// reports [`ScanHealth::NoReplies`] — one empty scan just means "nothing on
+/// the LAN yet", a run of them means the probes are very likely being dropped.
+const SCAN_HEALTH_FAILURES: u32 = 3;
+
+/// Discovery cadence floor while disconnected — fast enough that a console
+/// powering up alongside the DAW is found within seconds.
+const DISCOVERY_INTERVAL_MIN: Duration = Duration::from_secs(5);
+/// Discovery cadence ceiling — reached by doubling after fruitless scans so an
+/// idle session with no mixer on the network settles to one scan per 30 s.
+const DISCOVERY_INTERVAL_MAX: Duration = Duration::from_secs(30);
+/// Fruitless discovery passes that keep the floor cadence when the worker is
+/// hunting a console it just lost (address rejected, or heartbeats stopped).
+///
+/// The ordinary ramp assumes "nothing found" means "nothing is out there". A
+/// retarget search knows better: the console answered seconds ago, so an empty
+/// scan is far more likely to be a dropped probe than an absent device. Four
+/// passes ≈ 25 s of floor-cadence searching before the ramp resumes, which
+/// covers a DHCP lease change without turning a genuinely powered-down console
+/// into a permanent scan every 5 s.
+const RETARGET_FAST_PASSES: u32 = 4;
 
 // ─── Device info ─────────────────────────────────────────────────────────────
 
@@ -69,6 +99,157 @@ impl DeviceInfo {
             (false, _) => self.name.clone(),
             (_, false) => self.model.clone(),
             _ => format!("{}:{}", self.ip, self.port),
+        }
+    }
+}
+
+// ─── Scan health ─────────────────────────────────────────────────────────────
+
+/// Why the device list looks the way it does.
+///
+/// A dropped UDP probe is indistinguishable from "no mixer answered" at the
+/// socket layer — `send_to` succeeds either way.  On macOS 15+ a host app
+/// without the Local Network privacy grant has every LAN datagram discarded
+/// silently, which presents exactly like an empty network.  Publishing this
+/// state lets the editor tint its scan control instead of leaving the user
+/// staring at an empty list with no idea whether to look at the mixer, the
+/// cabling, or a permission prompt they dismissed months ago.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ScanHealth {
+    /// No scan has completed yet.
+    Unknown = 0,
+    /// The last scan received at least one reply.
+    Ok = 1,
+    /// Interfaces were probed but nothing has answered for several scans.
+    NoReplies = 2,
+    /// No usable IPv4 interface — the machine has no network to scan.
+    NoInterfaces = 3,
+}
+
+impl ScanHealth {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => ScanHealth::Ok,
+            2 => ScanHealth::NoReplies,
+            3 => ScanHealth::NoInterfaces,
+            _ => ScanHealth::Unknown,
+        }
+    }
+}
+
+/// Per-scan counters, logged after every scan and used to derive [`ScanHealth`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScanStats {
+    /// Local IPv4 addresses probed from, excluding the loopback fallback.
+    /// Doubles as the interface fingerprint used to notice the network coming
+    /// up after the plugin loaded.
+    pub addrs: Vec<String>,
+    /// Probe datagrams handed to the socket layer.
+    pub probes: usize,
+    /// Decodable replies received, before de-duplication by address.
+    pub replies: usize,
+}
+
+impl ScanStats {
+    /// Usable IPv4 interfaces probed.
+    pub fn ifaces(&self) -> usize {
+        self.addrs.len()
+    }
+}
+
+/// The shared sinks every scan writes to, whoever ran it.
+///
+/// Both the worker's own discovery pass and the editor-triggered background
+/// scan thread publish through one of these, so the device list and the health
+/// counter mean the same thing regardless of which path produced them.
+#[derive(Clone)]
+struct ScanPublisher {
+    scan_targets: Arc<Mutex<Vec<DeviceInfo>>>,
+    scan_health: Arc<AtomicU8>,
+    /// Consecutive scans that probed real interfaces and received nothing.
+    empty_scans: Arc<AtomicU32>,
+}
+
+impl ScanPublisher {
+    /// Merge a scan's devices into the shared list and publish its health.
+    ///
+    /// `guard` is the scan generation this result belongs to. It is checked
+    /// while the device list is locked, so a scan that finished after the
+    /// editor started a fresh one cannot resurrect its stale devices.
+    /// Returns `None` when the result was discarded for that reason.
+    fn record(
+        &self,
+        devices: &[DeviceInfo],
+        stats: &ScanStats,
+        guard: Option<(&AtomicU64, u64)>,
+    ) -> Option<ScanHealth> {
+        {
+            let mut list = self.scan_targets.lock();
+            if let Some((generation, expected)) = guard
+                && generation.load(Ordering::Acquire) != expected
+            {
+                log::debug!("[EtherTap] scan: generation changed, discarding stale results");
+                return None;
+            }
+            merge_devices(&mut list, devices.iter().cloned());
+        }
+
+        let empty_run = if stats.replies > 0 {
+            self.empty_scans.store(0, Ordering::Relaxed);
+            0
+        } else {
+            self.empty_scans.fetch_add(1, Ordering::Relaxed) + 1
+        };
+
+        let health = if stats.ifaces() == 0 {
+            ScanHealth::NoInterfaces
+        } else if stats.replies > 0 {
+            ScanHealth::Ok
+        } else if empty_run >= SCAN_HEALTH_FAILURES {
+            ScanHealth::NoReplies
+        } else {
+            // One quiet scan is not evidence of anything — hold the previous
+            // verdict rather than flapping the editor's colour every 5 s.
+            ScanHealth::from_u8(self.scan_health.load(Ordering::Relaxed))
+        };
+        self.scan_health.store(health as u8, Ordering::Relaxed);
+
+        log::debug!(
+            "[EtherTap] scan: {} iface(s), {} probe(s), {} reply(ies) → {} device(s), health {health:?}",
+            stats.ifaces(),
+            stats.probes,
+            stats.replies,
+            devices.len(),
+        );
+        if health == ScanHealth::NoReplies {
+            log::warn!(
+                "[EtherTap] {empty_run} consecutive scans probed {} interface(s) and got no \
+                 reply. If a console is powered on and cabled, the probes are most likely \
+                 being discarded — on macOS check the host application's Local Network \
+                 permission, otherwise check the firewall and that the console shares a subnet.",
+                stats.ifaces(),
+            );
+        }
+        Some(health)
+    }
+}
+
+/// Merge freshly-scanned devices into `list`, replacing entries that describe
+/// the same device.  Identity `(name, model)` wins when the console reported
+/// one; otherwise entries are matched by address.
+fn merge_devices(list: &mut Vec<DeviceInfo>, devices: impl IntoIterator<Item = DeviceInfo>) {
+    for dev in devices {
+        let has_id = !dev.name.is_empty() || !dev.model.is_empty();
+        let existing = if has_id {
+            list.iter_mut()
+                .find(|d| d.name == dev.name && d.model == dev.model)
+        } else {
+            list.iter_mut().find(|d| d.ip == dev.ip)
+        };
+        match existing {
+            Some(e) => *e = dev,
+            None => list.push(dev),
         }
     }
 }
@@ -151,6 +332,12 @@ pub struct WorkerShared {
     /// Persisted (name, model) of the last connected device. Empty until the
     /// first successful connect; verified on auto-reconnect.
     pub last_device: Arc<Mutex<(String, String)>>,
+    /// Latest [`ScanHealth`] as a `u8`. Read by the editor to tint its scan
+    /// control; never gates behaviour.
+    pub scan_health: Arc<AtomicU8>,
+    /// Persisted mirror of the slot audit, written by the worker after every
+    /// audit so a reloaded session starts with the last known slot map.
+    pub last_slot_types: Arc<Mutex<[i32; 8]>>,
 }
 
 // ─── Worker ──────────────────────────────────────────────────────────────────
@@ -172,7 +359,8 @@ pub struct NetworkWorker {
     compatible_slots: Arc<AtomicU8>,
     occupied_slots: Arc<AtomicU8>,
     slot_types: Arc<[AtomicI32; 8]>,
-    scan_targets: Arc<Mutex<Vec<DeviceInfo>>>,
+    /// Shared sinks every scan publishes through, whoever ran it.
+    scan: ScanPublisher,
     connected_device: Arc<Mutex<(String, String)>>,
     scan_generation: Arc<AtomicU64>,
     /// Set by an explicit `Disconnect` command; prevents automatic reconnect.
@@ -188,6 +376,8 @@ pub struct NetworkWorker {
     auto_reconnect: Arc<std::sync::atomic::AtomicBool>,
     /// Persisted (name, model) of the last connected device.
     last_device: Arc<Mutex<(String, String)>>,
+    /// Persisted mirror of the slot audit (see [`WorkerShared`]).
+    last_slot_types: Arc<Mutex<[i32; 8]>>,
     /// True when the current target was established by the run-loop
     /// self-connect (auto-resume) rather than an explicit user command.
     /// Auto-resumed targets get identity verification; explicit ones adopt
@@ -199,6 +389,29 @@ pub struct NetworkWorker {
     heartbeat_failures: u32,
     /// Throttle for run-loop self-connect attempts.
     last_auto_attempt: Option<Instant>,
+    /// When the worker's own discovery last ran.  `None` = never.
+    last_discovery: Option<Instant>,
+    /// Current background-discovery cadence; doubles on a fruitless scan up to
+    /// [`DISCOVERY_INTERVAL_MAX`], snaps back to the floor on a hit.
+    discovery_interval: Duration,
+    /// IPv4 addresses seen on the last discovery.  A change means the machine's
+    /// network came up (or moved), which re-arms discovery immediately instead
+    /// of waiting out the ramped interval.
+    last_iface_set: Vec<String>,
+    /// Set when the heartbeat has failed enough times that the console has
+    /// probably moved; consumed by the next discovery pass, which owns the
+    /// only scan path so the two can't scan on top of each other.
+    retarget_requested: bool,
+    /// Fruitless discovery passes still owed the floor cadence because the
+    /// worker is actively hunting a console it was talking to moments ago.
+    /// See [`RETARGET_FAST_PASSES`]. Zero = ordinary discovery, which ramps.
+    retarget_fast_passes: u32,
+    /// Whether the fast search above has already been spent without finding
+    /// anything. Latches the budget off until the worker actually reaches a
+    /// console again — a console that is simply switched off keeps failing its
+    /// heartbeat, and each failure run asks for another retarget, which would
+    /// otherwise re-arm the budget forever and pin the cadence at the floor.
+    retarget_search_spent: bool,
 }
 
 /// Encode a slot list (values 1..=8) as a u8 bitmask: bit n = slot (n+1) present.
@@ -206,6 +419,22 @@ fn slots_to_bitmask(slots: &[u8]) -> u8 {
     slots
         .iter()
         .fold(0u8, |acc, &s| acc | (1u8 << s.saturating_sub(1)))
+}
+
+/// `(ip, latency_ms, name, model, same_subnet, is_loopback)` — one response per source IP.
+type RawEntry = (String, f32, String, String, bool, bool);
+
+/// Sort order: loopback > same-subnet > routed; ties broken by ascending latency.
+fn entry_cmp(a: &RawEntry, b: &RawEntry) -> std::cmp::Ordering {
+    match (a.5, b.5) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => match (a.4, b.4) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal),
+        },
+    }
 }
 
 impl NetworkWorker {
@@ -232,7 +461,11 @@ impl NetworkWorker {
             compatible_slots: shared.compatible_slots,
             occupied_slots: shared.occupied_slots,
             slot_types: shared.slot_types,
-            scan_targets: shared.scan_targets,
+            scan: ScanPublisher {
+                scan_targets: shared.scan_targets,
+                scan_health: shared.scan_health,
+                empty_scans: Arc::new(AtomicU32::new(0)),
+            },
             connected_device: shared.connected_device,
             scan_generation: shared.scan_generation,
             user_disconnected: false,
@@ -241,9 +474,16 @@ impl NetworkWorker {
             scan_port: 10023,
             auto_reconnect: shared.auto_reconnect,
             last_device: shared.last_device,
+            last_slot_types: shared.last_slot_types,
             target_from_auto: false,
             heartbeat_failures: 0,
             last_auto_attempt: None,
+            last_discovery: None,
+            discovery_interval: DISCOVERY_INTERVAL_MIN,
+            last_iface_set: Vec::new(),
+            retarget_requested: false,
+            retarget_fast_passes: 0,
+            retarget_search_spent: false,
         }
     }
 
@@ -273,6 +513,12 @@ impl NetworkWorker {
             // still converge here once `process()` mirrors the atom.
             self.maybe_auto_connect();
 
+            // Background discovery: keeps the device list fresh and retargets a
+            // console that moved, with no GUI open and no user action. This is
+            // what makes a cold start work — the DAW, the network and the mixer
+            // can come up in any order and the worker converges anyway.
+            self.maybe_discover();
+
             // Periodic heartbeat / reconnect.
             // Skipped entirely when the user explicitly disconnected.
             if !self.user_disconnected && self.target.is_some() {
@@ -296,6 +542,13 @@ impl NetworkWorker {
                     // Advance by exactly one interval so the cadence stays
                     // constant regardless of how long the heartbeat took.
                     self.last_heartbeat += interval;
+                    // A blocking discovery pass or slot audit can leave the
+                    // advanced deadline still in the past, which would refire
+                    // the heartbeat on the next 10 ms tick and burn through the
+                    // backoff in a burst. Resynchronise instead of catching up.
+                    if self.last_heartbeat.elapsed() >= interval {
+                        self.last_heartbeat = Instant::now();
+                    }
                 }
             }
 
@@ -339,6 +592,12 @@ impl NetworkWorker {
             || self.user_disconnected
             || !self.auto_reconnect.load(Ordering::Relaxed)
         {
+            return;
+        }
+        // A pending retarget means the persisted address was just rejected —
+        // re-dialling it now would only get the same wrong device again. Let
+        // the discovery pass find the real one first.
+        if self.retarget_requested {
             return;
         }
         // Throttle attempts by the shared backoff so a dead persisted target
@@ -415,9 +674,9 @@ impl NetworkWorker {
 
             NetworkCommand::AuditSlots => self.audit_slots(),
             NetworkCommand::ScanTargets => {
-                // Run the 600 ms scan on a dedicated thread so the network
-                // worker remains responsive to sync commands during the window.
-                let scan_targets = self.scan_targets.clone();
+                // Run the scan on a dedicated thread so the network worker
+                // remains responsive to sync commands during the window.
+                let publisher = self.scan.clone();
                 let status_tx = self.status_tx.clone();
                 let scan_gen = self.scan_generation.clone();
                 // Capture the current generation so the background thread can
@@ -425,15 +684,14 @@ impl NetworkWorker {
                 // before this thread finishes.
                 let my_gen = scan_gen.load(Ordering::Acquire);
                 let scan_port = self.scan_port;
+                // Give the probe burst the current target as a unicast hint —
+                // a console that ignores broadcast still answers direct.
+                let hint = self.target;
                 std::thread::Builder::new()
                     .name("ethertap-scan".into())
                     .spawn(move || {
                         NetworkWorker::scan_targets_bg(
-                            scan_targets,
-                            status_tx,
-                            scan_gen,
-                            my_gen,
-                            scan_port,
+                            publisher, status_tx, scan_gen, my_gen, scan_port, hint,
                         )
                     })
                     .ok(); // best-effort; failure just means no scan result
@@ -514,13 +772,17 @@ impl NetworkWorker {
             .as_ref()
             .and_then(|sock| sock.recv_from(&mut buf).ok().map(|(len, _)| len));
 
-        match recv_len.filter(|&len| {
+        let info_msg = recv_len.and_then(|len| {
             decoder::decode_udp(&buf[..len])
-                .map(|(_, pkt)| matches!(pkt, OscPacket::Message(ref m) if m.addr == "/info"))
-                .unwrap_or(false)
-        }) {
-            Some(len) => {
-                let (name, model) = parse_info_strings(&buf[..len]);
+                .ok()
+                .and_then(|(_, pkt)| match pkt {
+                    OscPacket::Message(m) if m.addr == "/info" => Some(m),
+                    _ => None,
+                })
+        });
+        match info_msg {
+            Some(msg) => {
+                let (name, model) = extract_info_strings(&msg);
 
                 // Identity check for auto-resumed targets: if a *different*
                 // device answers at the persisted address (DHCP moved things),
@@ -535,13 +797,23 @@ impl NetworkWorker {
                         );
                         self.target = None;
                         self.connected = false;
-                        self.rescan_for_last_device();
+                        // This attempt did not reach our console, so it counts
+                        // as a failure — otherwise the throttle stays at its
+                        // floor and we re-dial the wrong device every 2 s.
+                        self.backoff.record_failure();
+                        // Hand the search to the discovery pass, which owns the
+                        // only scan path — running one here too would put two
+                        // probe bursts on the wire for the same question.
+                        self.request_retarget();
                         return;
                     }
                 }
 
                 self.connected = true;
                 self.heartbeat_failures = 0;
+                // A console answered: whatever loss spent the last fast search
+                // is over, so the next one gets its full budget again.
+                self.retarget_search_spent = false;
                 self.backoff.record_success();
                 let _ = self.status_tx.try_send(NetworkStatus::Connected);
                 self.pulse_rx();
@@ -562,51 +834,165 @@ impl NetworkWorker {
                 let _ = self.status_tx.try_send(NetworkStatus::Disconnected);
 
                 // The device may have moved address entirely — after a few
-                // straight failures, try to find it again by identity.
+                // straight failures, ask the discovery pass to find it again.
                 if self.heartbeat_failures >= AUTO_RESCAN_FAILURES
                     && self.auto_reconnect.load(Ordering::Relaxed)
                 {
                     self.heartbeat_failures = 0;
-                    self.rescan_for_last_device();
+                    self.request_retarget();
                 }
             }
         }
     }
 
-    /// Synchronous LAN rescan for the persisted device identity. On a hit,
-    /// write the new address through to the persisted target and connect to
-    /// it (as an auto-resumed target, so identity stays verified).
+    // ── Background discovery ──────────────────────────────────────────────
+
+    /// Ask the next discovery pass to hunt for the persisted identity, and give
+    /// that hunt a budget of floor-cadence passes.
     ///
-    /// Blocks the worker for [`RESCAN_WINDOW`] — acceptable: it only runs
-    /// while disconnected, when there is nothing to sync or poll.
-    fn rescan_for_last_device(&mut self) {
-        debug_assert!(!self.connected, "rescan must not run while connected");
-        let expected = self.last_device.lock().clone();
-        if expected.0.is_empty() && expected.1.is_empty() {
+    /// Both callers are "we were just talking to this console and lost it": a
+    /// wrong device answering the persisted address, and a heartbeat that has
+    /// stopped landing. Either way the device is far more likely to be present
+    /// and missed than absent, so the usual back-off-on-empty-scan reflex is
+    /// the wrong one for the next few passes.
+    fn request_retarget(&mut self) {
+        self.retarget_requested = true;
+        // One fast search per loss. Re-arming on every heartbeat-failure run
+        // would hold the floor cadence indefinitely against a console that is
+        // simply switched off. The latch lifts as soon as any console answers.
+        if !self.retarget_search_spent {
+            self.retarget_fast_passes = RETARGET_FAST_PASSES;
+            self.discovery_interval = DISCOVERY_INTERVAL_MIN;
+        }
+    }
+
+    /// Decide whether to run a discovery pass this iteration, and run it.
+    ///
+    /// Discovery is the worker's own job, not the editor's: it runs with the
+    /// GUI closed, and it is the only reason a cold start converges when the
+    /// DAW, the network interface and the console come up in an arbitrary
+    /// order. It is gated on `auto_reconnect` — with the opt-in off, EtherTap
+    /// still emits no unrequested traffic.
+    fn maybe_discover(&mut self) {
+        if self.connected || self.user_disconnected || !self.auto_reconnect.load(Ordering::Relaxed)
+        {
             return;
         }
-        let devices = Self::scan_collect(self.scan_port, RESCAN_WINDOW);
-        let hit = devices
-            .into_iter()
-            .find(|d| d.name == expected.0 && d.model == expected.1);
-        match hit {
-            Some(dev) => {
-                log::info!(
-                    "[EtherTap] auto_reconnect: found {:?} at {}:{}",
-                    dev.display_name(),
-                    dev.ip,
-                    dev.port
-                );
-                *self.target_ip.lock() = dev.ip.clone();
-                *self.target_port.lock() = dev.port;
-                self.target_from_auto = true;
-                self.connect(dev.ip, dev.port);
-            }
-            None => {
-                self.backoff.record_failure();
-                log::debug!("[EtherTap] auto_reconnect: device {expected:?} not found in rescan");
-            }
+        let due = match self.last_discovery {
+            None => true,
+            Some(t) => t.elapsed() >= self.discovery_interval || self.retarget_requested,
+        };
+        if !due {
+            return;
         }
+        self.discover_and_retarget();
+    }
+
+    /// One discovery pass: scan, publish the results for the editor, and adopt
+    /// an address if one can be justified.
+    ///
+    /// Adoption rules, in order:
+    /// 1. A device whose `(name, model)` matches the persisted identity — the
+    ///    console we were talking to before, wherever DHCP has since put it.
+    /// 2. Exactly one device on the network and no persisted identity — a
+    ///    first run on a LAN with a single console. Ambiguity never adopts:
+    ///    two or more unknown devices leave the choice to the user.
+    ///
+    /// Blocks the worker for [`SCAN_WINDOW`]. Acceptable: it only runs while
+    /// disconnected, when there is nothing to sync or poll.
+    fn discover_and_retarget(&mut self) {
+        debug_assert!(!self.connected, "discovery must not run while connected");
+        self.last_discovery = Some(Instant::now());
+        self.retarget_requested = false;
+
+        let last_known = {
+            let ip = self.target_ip.lock().clone();
+            let port = *self.target_port.lock();
+            (!ip.is_empty() && port != 0).then(|| format!("{ip}:{port}").parse().ok())
+        }
+        .flatten();
+
+        let (devices, stats) = Self::scan_collect(self.scan_port, SCAN_WINDOW, last_known);
+        self.scan.record(&devices, &stats, None);
+
+        // An interface set that differs from the last pass means the machine's
+        // network just came up (or moved) — keep the fast cadence so a DAW that
+        // launched before DHCP finished doesn't sit out a 30 s interval.
+        let ifaces_changed = stats.addrs != self.last_iface_set;
+        if ifaces_changed {
+            log::info!(
+                "[EtherTap] discovery: interfaces changed → {:?}",
+                stats.addrs
+            );
+            self.last_iface_set = stats.addrs;
+        }
+
+        let expected = self.last_device.lock().clone();
+        let identity_known = !expected.0.is_empty() || !expected.1.is_empty();
+
+        let hit = if identity_known {
+            devices
+                .iter()
+                .find(|d| d.name == expected.0 && d.model == expected.1)
+                .cloned()
+        } else if devices.len() == 1 {
+            devices.first().cloned()
+        } else {
+            None
+        };
+
+        let Some(dev) = hit else {
+            // Nothing to adopt — ramp the cadence down so an empty network
+            // settles to an occasional probe instead of a scan every 5 s.
+            // Two states keep the fast cadence instead: a network that just
+            // changed shape, and an active retarget search that still has
+            // passes left in its budget.
+            let searching = self.retarget_fast_passes > 0;
+            self.retarget_fast_passes = self.retarget_fast_passes.saturating_sub(1);
+            if searching && self.retarget_fast_passes == 0 {
+                // Budget just ran out without a hit: stop treating this loss as
+                // fresh, so later heartbeat failures can't re-arm it.
+                self.retarget_search_spent = true;
+            }
+            self.discovery_interval = if ifaces_changed || searching {
+                DISCOVERY_INTERVAL_MIN
+            } else {
+                (self.discovery_interval * 2).min(DISCOVERY_INTERVAL_MAX)
+            };
+            if identity_known {
+                log::debug!(
+                    "[EtherTap] discovery: {expected:?} not found ({} device(s) seen)",
+                    devices.len()
+                );
+            }
+            return;
+        };
+
+        self.discovery_interval = DISCOVERY_INTERVAL_MIN;
+        // The hunt is over — the next fruitless pass is an ordinary one and
+        // ramps like any other, and a future loss earns a fresh fast search.
+        self.retarget_fast_passes = 0;
+        self.retarget_search_spent = false;
+
+        // Already pointed at it and merely waiting on the heartbeat — don't
+        // tear down a connection attempt that is still in progress.
+        let same_target = self
+            .target
+            .is_some_and(|t| t.ip().to_string() == dev.ip && t.port() == dev.port);
+        if same_target {
+            return;
+        }
+
+        log::info!(
+            "[EtherTap] discovery: adopting {} at {}:{}",
+            dev.display_name(),
+            dev.ip,
+            dev.port
+        );
+        *self.target_ip.lock() = dev.ip.clone();
+        *self.target_port.lock() = dev.port;
+        self.target_from_auto = true;
+        self.connect(dev.ip, dev.port);
     }
 
     // ── Slot audit ───────────────────────────────────────────────────────
@@ -621,9 +1007,11 @@ impl NetworkWorker {
         if self.socket.is_none() || self.target.is_none() {
             return;
         }
-        if let Some(s) = &self.socket {
-            let _ = s.set_read_timeout(Some(RECV_TIMEOUT));
-        }
+        let _ = self
+            .socket
+            .as_ref()
+            .unwrap()
+            .set_read_timeout(Some(RECV_TIMEOUT));
 
         let mut compatible = Vec::new();
         let mut occupied = Vec::new();
@@ -704,6 +1092,14 @@ impl NetworkWorker {
         for (i, t) in slot_types.iter().enumerate() {
             self.slot_types[i].store(t.unwrap_or(i32::MIN), Ordering::Relaxed);
         }
+        // Write-through to the persisted mirror so the map survives a reload.
+        // Worker-thread only — the audio thread never touches this lock.
+        {
+            let mut persisted = self.last_slot_types.lock();
+            for (i, t) in slot_types.iter().enumerate() {
+                persisted[i] = t.unwrap_or(i32::MIN);
+            }
+        }
         self.compatible_slots
             .store(slots_to_bitmask(&compatible), Ordering::Release);
         self.occupied_slots
@@ -728,52 +1124,41 @@ impl NetworkWorker {
     /// IPs are appended to `all_addrs` so the UI can show them.
     ///
     /// Runs on a dedicated short-lived thread (spawned from `handle()`) so the
-    /// network worker remains fully responsive during the 600 ms window.
+    /// network worker remains fully responsive during the scan window.
     fn scan_targets_bg(
-        scan_targets: Arc<parking_lot::Mutex<Vec<DeviceInfo>>>,
+        publisher: ScanPublisher,
         status_tx: Sender<NetworkStatus>,
         scan_generation: Arc<AtomicU64>,
         expected_gen: u64,
         scan_port: u16,
+        unicast_hint: Option<SocketAddr>,
     ) {
-        let result = Self::scan_collect(scan_port, Duration::from_millis(600));
-
-        // Merge into the shared mutex — the editor reads scan_targets;
-        // process() receives ScanDone.
-        //
-        // Check the scan generation inside the lock so we can't race with the
-        // editor's fetch_add + clear: if the generation changed, the editor
-        // already cleared the list for a new scan and our results are stale.
+        let (devices, stats) = Self::scan_collect(scan_port, SCAN_WINDOW, unicast_hint);
+        // Discarded on a generation change — the editor already started a
+        // newer scan and cleared the list for it.
+        if publisher
+            .record(&devices, &stats, Some((&scan_generation, expected_gen)))
+            .is_none()
         {
-            let mut list = scan_targets.lock();
-            if scan_generation.load(Ordering::Acquire) != expected_gen {
-                log::debug!(
-                    "[EtherTap] scan_targets_bg: generation changed, discarding stale results"
-                );
-                return;
-            }
-            for dev in result {
-                let has_id = !dev.name.is_empty() || !dev.model.is_empty();
-                let existing = if has_id {
-                    list.iter_mut()
-                        .find(|d| d.name == dev.name && d.model == dev.model)
-                } else {
-                    list.iter_mut().find(|d| d.ip == dev.ip)
-                };
-                match existing {
-                    Some(e) => *e = dev,
-                    None => list.push(dev),
-                }
-            }
+            return;
         }
         let _ = status_tx.try_send(NetworkStatus::ScanDone);
     }
 
     /// Probe every IPv4 interface (plus loopback) on `scan_port` and collect
     /// the devices that answer within `window`. Pure collection — no shared
-    /// state; used by the editor-driven background scan and the synchronous
-    /// auto-reconnect rescan.
-    fn scan_collect(scan_port: u16, window: Duration) -> Vec<DeviceInfo> {
+    /// state; used by the editor-driven background scan and the worker's own
+    /// discovery pass.
+    ///
+    /// `unicast_hint` is probed directly alongside the broadcasts. A console on
+    /// another subnet, or behind a switch that drops directed broadcast, never
+    /// sees a broadcast probe but answers a unicast one — which is how a known
+    /// address stays discoverable when broadcast discovery finds nothing.
+    fn scan_collect(
+        scan_port: u16,
+        window: Duration,
+        unicast_hint: Option<SocketAddr>,
+    ) -> (Vec<DeviceInfo>, ScanStats) {
         use std::{collections::HashMap, net::Ipv4Addr};
 
         let probe = osc::heartbeat();
@@ -783,9 +1168,12 @@ impl NetworkWorker {
             sock: UdpSocket,
             local: Ipv4Addr,
             netmask: Ipv4Addr,
+            /// Every destination this socket probes, retried once per burst.
+            targets: Vec<SocketAddr>,
         }
 
         let mut ifaces: Vec<Iface> = Vec::new();
+        let mut stats = ScanStats::default();
 
         let raw = if_addrs::get_if_addrs().unwrap_or_default();
         for iface in raw {
@@ -800,90 +1188,116 @@ impl NetworkWorker {
                 continue;
             };
             let _ = sock.set_broadcast(true);
-            let bcast = v4
+            let _ = sock.set_nonblocking(true);
+            let directed = v4
                 .broadcast
                 .unwrap_or_else(|| Ipv4Addr::from(u32::from(v4.ip) | !u32::from(v4.netmask)));
-            let _ = sock.send_to(&probe, SocketAddr::from((bcast, scan_port)));
-            let _ = sock.set_nonblocking(true);
+            // Three destinations per interface, because any one of them can be
+            // the only one that works: the directed subnet broadcast is the
+            // normal path; the limited broadcast survives a wrong netmask and
+            // switches that filter directed broadcast; the hint reaches a
+            // console that broadcast can't touch at all.
+            let mut targets = vec![
+                SocketAddr::from((directed, scan_port)),
+                SocketAddr::from((Ipv4Addr::BROADCAST, scan_port)),
+            ];
+            if let Some(hint) = unicast_hint.filter(|h| !h.ip().is_loopback()) {
+                targets.push(hint);
+            }
+            stats.addrs.push(v4.ip.to_string());
             ifaces.push(Iface {
                 sock,
                 local: v4.ip,
                 netmask: v4.netmask,
+                targets,
             });
         }
 
         // Loopback socket so a local mock mixer is always discoverable.
         if let Ok(sock) = UdpSocket::bind("127.0.0.1:0") {
-            let _ = sock.send_to(&probe, SocketAddr::from((Ipv4Addr::LOCALHOST, scan_port)));
             let _ = sock.set_nonblocking(true);
+            let mut targets = vec![SocketAddr::from((Ipv4Addr::LOCALHOST, scan_port))];
+            if let Some(hint) = unicast_hint.filter(|h| h.ip().is_loopback())
+                && !targets.contains(&hint)
+            {
+                targets.push(hint);
+            }
             ifaces.push(Iface {
                 sock,
                 local: Ipv4Addr::LOCALHOST,
                 netmask: Ipv4Addr::new(255, 0, 0, 0),
+                targets,
             });
         }
 
         // ── Collect responses — raw entry per (socket, device) pair ───────
-        // Tuple: (ip, latency_ms, name, model, same_subnet, is_loopback)
-        type RawEntry = (String, f32, String, String, bool, bool);
-
         // ip_key → best raw entry (loopback wins, then same-subnet; ties broken by latency)
         let mut by_ip: HashMap<String, RawEntry> = HashMap::new();
         let mut buf = [0u8; 512];
         let probe_sent_at = Instant::now();
-        let start = probe_sent_at;
+        let mut bursts_sent = 0usize;
 
-        while start.elapsed() < window {
+        while probe_sent_at.elapsed() < window {
+            // Retransmit on a schedule while still listening. A single probe
+            // that gets dropped used to cost the whole scan.
+            if bursts_sent < SCAN_PROBE_BURST
+                && probe_sent_at.elapsed() >= SCAN_PROBE_SPACING * bursts_sent as u32
+            {
+                for iface in &ifaces {
+                    for target in &iface.targets {
+                        if iface.sock.send_to(&probe, target).is_ok() {
+                            stats.probes += 1;
+                        }
+                    }
+                }
+                bursts_sent += 1;
+            }
+
             let mut any_recv = false;
             for iface in &ifaces {
-                loop {
-                    match iface.sock.recv_from(&mut buf) {
-                        Ok((len, src)) => {
-                            any_recv = true;
-                            if decoder::decode_udp(&buf[..len]).is_err() {
-                                continue;
-                            }
-                            let src_v4 = match src.ip() {
-                                std::net::IpAddr::V4(v) => v,
-                                _ => continue,
-                            };
+                while let Ok((len, src)) = iface.sock.recv_from(&mut buf) {
+                    any_recv = true;
+                    let Ok((_, OscPacket::Message(info_msg))) = decoder::decode_udp(&buf[..len])
+                    else {
+                        continue;
+                    };
+                    stats.replies += 1;
+                    let src_v4 = match src.ip() {
+                        std::net::IpAddr::V4(v) => v,
+                        _ => continue,
+                    };
 
-                            let mask = u32::from(iface.netmask);
-                            let same_subnet =
-                                (u32::from(iface.local) & mask) == (u32::from(src_v4) & mask);
-                            let is_loopback = src_v4.is_loopback();
-                            let latency_ms = probe_sent_at.elapsed().as_micros() as f32 / 1000.0;
-                            let ip_key = src_v4.to_string();
-                            let (name, model) = parse_info_strings(&buf[..len]);
+                    let mask = u32::from(iface.netmask);
+                    let same_subnet = (u32::from(iface.local) & mask) == (u32::from(src_v4) & mask);
+                    let is_loopback = src_v4.is_loopback();
+                    let latency_ms = probe_sent_at.elapsed().as_micros() as f32 / 1000.0;
+                    let ip_key = src_v4.to_string();
+                    let (name, model) = extract_info_strings(&info_msg);
 
-                            let entry: RawEntry = (
-                                ip_key.clone(),
-                                latency_ms,
-                                name,
-                                model,
-                                same_subnet,
-                                is_loopback,
-                            );
+                    let entry: RawEntry = (
+                        ip_key.clone(),
+                        latency_ms,
+                        name,
+                        model,
+                        same_subnet,
+                        is_loopback,
+                    );
 
-                            match by_ip.get(&ip_key) {
-                                None => {
-                                    by_ip.insert(ip_key, entry);
-                                }
-                                Some((_, _, _, _, prev_same, prev_loopback)) => {
-                                    // Prefer loopback, then same-subnet; within that, lower latency.
-                                    let better = (!*prev_loopback && is_loopback)
-                                        || (*prev_loopback == is_loopback
-                                            && ((!*prev_same && same_subnet)
-                                                || (*prev_same == same_subnet
-                                                    && latency_ms < by_ip[&ip_key].1)));
-                                    if better {
-                                        by_ip.insert(ip_key, entry);
-                                    }
-                                }
+                    match by_ip.get(&ip_key) {
+                        None => {
+                            by_ip.insert(ip_key, entry);
+                        }
+                        Some((_, prev_latency, _, _, prev_same, prev_loopback)) => {
+                            // Prefer loopback, then same-subnet; within that, lower latency.
+                            let better = (!*prev_loopback && is_loopback)
+                                || (*prev_loopback == is_loopback
+                                    && ((!*prev_same && same_subnet)
+                                        || (*prev_same == same_subnet
+                                            && latency_ms < *prev_latency)));
+                            if better {
+                                by_ip.insert(ip_key, entry);
                             }
                         }
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                        Err(_) => break,
                     }
                 }
             }
@@ -895,19 +1309,7 @@ impl NetworkWorker {
         // ── Merge by (name, model) — best path first ──────────────────────
         // Sort: loopback first, then same-subnet before routed, then ascending latency.
         let mut all: Vec<RawEntry> = by_ip.into_values().collect();
-        all.sort_by(|a, b| {
-            match (a.5, b.5) {
-                // is_loopback: true sorts before false
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => match (a.4, b.4) {
-                    // same_subnet: true sorts before false
-                    (true, false) => std::cmp::Ordering::Less,
-                    (false, true) => std::cmp::Ordering::Greater,
-                    _ => a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal),
-                },
-            }
-        });
+        all.sort_by(entry_cmp);
 
         let mut result: Vec<DeviceInfo> = Vec::new();
 
@@ -938,7 +1340,7 @@ impl NetworkWorker {
             });
         }
 
-        result
+        (result, stats)
     }
 
     // ── UDP helpers ───────────────────────────────────────────────────────
@@ -1020,35 +1422,45 @@ fn parse_fx_type(data: &[u8]) -> Option<i32> {
     }
 }
 
-/// Parse the string arguments from an X32 `/info` response.
+/// Extract `(name, model)` from an already-decoded X32 `/info` message.
 ///
 /// X32 format: `/info ,ssss  version  name  model  firmware`
-/// Returns `(name, model)` — empty strings if the args aren't present.
-fn parse_info_strings(data: &[u8]) -> (String, String) {
-    let Ok((_, OscPacket::Message(msg))) = decoder::decode_udp(data) else {
-        return (String::new(), String::new());
-    };
-    let strings: Vec<String> = msg
+/// Returns empty strings when the expected string args are absent.
+fn extract_info_strings(msg: &OscMessage) -> (String, String) {
+    let strings: Vec<&str> = msg
         .args
         .iter()
         .filter_map(|a| {
             if let OscType::String(s) = a {
-                Some(s.clone())
+                Some(s.as_str())
             } else {
                 None
             }
         })
         .collect();
     match strings.len() {
-        0 => (String::new(), String::new()),
-        // With a single string we don't know if it's version or name; skip it.
-        1 => (String::new(), String::new()),
+        // 0 args: no data; 1 arg: ambiguous (could be version) — skip.
+        0 | 1 => (String::new(), String::new()),
         // X32 layout: version, name, model[, firmware] — skip version (index 0).
-        // With 2 args: (version, name) → return (name, "").
-        2 => (strings[1].clone(), String::new()),
-        // 3+ args: skip version, take name and model.
-        _ => (strings[1].clone(), strings[2].clone()),
+        _ => {
+            let name = strings[1].to_owned();
+            // With 2 args: (version, name) → return (name, "").
+            let model = strings.get(2).map(|s| s.to_string()).unwrap_or_default();
+            (name, model)
+        }
     }
+}
+
+/// Parse the string arguments from an X32 `/info` response (test helper).
+///
+/// X32 format: `/info ,ssss  version  name  model  firmware`
+/// Returns `(name, model)` — empty strings if the args aren't present.
+#[cfg(test)]
+fn parse_info_strings(data: &[u8]) -> (String, String) {
+    let Ok((_, OscPacket::Message(msg))) = decoder::decode_udp(data) else {
+        return (String::new(), String::new());
+    };
+    extract_info_strings(&msg)
 }
 
 fn parse_fx_delay_response(data: &[u8]) -> Option<f32> {
@@ -1291,50 +1703,10 @@ mod tests {
         assert_eq!(parse_fx_type(&data_no_args), None);
     }
 
-    // ── Backoff fuzz: full cycle ──────────────────────────────────────────
-
-    #[test]
-    fn backoff_full_cycle() {
-        let mut b = crate::reconnect::Backoff::new(2000, 10000);
-        assert_eq!(b.next_delay_ms(), 2000);
-        assert!(!b.is_cooling_down());
-
-        b.record_failure();
-        assert_eq!(b.next_delay_ms(), 4000);
-        assert!(b.is_cooling_down());
-
-        b.record_failure();
-        assert_eq!(b.next_delay_ms(), 8000);
-
-        b.record_failure();
-        assert_eq!(b.next_delay_ms(), 10000, "should cap at cap_ms");
-
-        b.record_failure();
-        assert_eq!(b.next_delay_ms(), 10000, "should stay capped");
-
-        b.record_success();
-        assert_eq!(b.next_delay_ms(), 2000, "should reset to base");
-        assert!(!b.is_cooling_down());
-    }
-
-    #[test]
-    fn backoff_reset_clears_everything() {
-        let mut b = crate::reconnect::Backoff::new(1000, 5000);
-        b.record_failure();
-        b.record_failure();
-        b.record_failure();
-        assert_eq!(b.next_delay_ms(), 5000);
-        b.reset();
-        assert_eq!(b.next_delay_ms(), 1000);
-        assert!(!b.is_cooling_down());
-    }
-
     #[test]
     fn scan_sort_prefers_same_subnet() {
-        // Mirrors production sort: (ip, latency_ms, name, model, same_subnet, is_loopback)
         // Tier order: loopback > same-subnet > other, ties broken by ascending latency.
-        type RawEntry = (String, f32, String, String, bool, bool);
-        let mut entries: Vec<RawEntry> = vec![
+        let mut entries: Vec<super::RawEntry> = vec![
             (
                 "10.0.0.1".into(),
                 5.0,
@@ -1368,16 +1740,7 @@ mod tests {
                 true,
             ),
         ];
-        let sort_fn = |a: &RawEntry, b: &RawEntry| match (a.5, b.5) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => match (a.4, b.4) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal),
-            },
-        };
-        entries.sort_by(sort_fn);
+        entries.sort_by(super::entry_cmp);
         // Loopback sorts first regardless of latency or subnet.
         assert!(entries[0].5, "loopback must be first");
         assert_eq!(entries[0].0, "127.0.0.1");
@@ -1410,26 +1773,11 @@ mod tests {
                 false,
             ), // non-loopback at [1]
         ];
-        two.sort_by(sort_fn);
+        two.sort_by(super::entry_cmp);
         assert!(
             two[0].5,
             "loopback remains first in a 2-element already-sorted list"
         );
-    }
-
-    #[test]
-    fn backoff_immutable_queries() {
-        // Prove is_cooling_down() and next_delay_ms() don't consume or mutate state.
-        let mut b = crate::reconnect::Backoff::new(1000, 10000);
-        b.record_failure();
-
-        let cooling1 = b.is_cooling_down();
-        let delay1 = b.next_delay_ms();
-        let cooling2 = b.is_cooling_down();
-        let delay2 = b.next_delay_ms();
-
-        assert_eq!(cooling1, cooling2, "is_cooling_down() must be idempotent");
-        assert_eq!(delay1, delay2, "next_delay_ms() must be idempotent");
     }
 
     fn make_test_worker() -> NetworkWorker {
@@ -1451,6 +1799,8 @@ mod tests {
                 scan_generation: Arc::new(AtomicU64::new(0)),
                 auto_reconnect: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 last_device: Arc::new(Mutex::new((String::new(), String::new()))),
+                scan_health: Arc::new(AtomicU8::new(ScanHealth::Unknown as u8)),
+                last_slot_types: Arc::new(Mutex::new([i32::MIN; 8])),
             },
         )
     }
@@ -1507,23 +1857,295 @@ mod tests {
         );
     }
 
-    /// rescan_for_last_device returns immediately when last_device identity is empty.
-    /// Covers the early-return guard at line 585-586.
+    /// A discovery pass that finds nothing must leave the target alone and back
+    /// its cadence off, rather than retargeting to whatever last answered.
     #[test]
-    fn rescan_for_last_device_returns_early_for_empty_identity() {
+    fn discovery_without_devices_does_not_retarget() {
         let mut worker = make_test_worker();
-        // last_device defaults to ("", "") in make_test_worker — rescan must return early.
-        worker.rescan_for_last_device();
-        // If it didn't return early it would block for RESCAN_WINDOW scanning the LAN.
-        // Verify no connection was attempted: backoff must remain idle (no failures recorded).
-        assert!(
-            !worker.backoff.is_cooling_down(),
-            "rescan with empty identity must not attempt connection (backoff must stay idle)"
-        );
+        // Probe a port nothing listens on so the scan is guaranteed empty —
+        // without this the developer's own console could answer and the test
+        // would depend on what is plugged into the LAN.
+        worker.set_scan_port(unused_udp_port());
+
+        // First pass also fingerprints the interfaces, which deliberately holds
+        // the fast cadence; the ramp starts once the network looks settled.
+        worker.discover_and_retarget();
+        assert!(worker.last_discovery.is_some(), "the pass must be recorded");
+        let before = worker.discovery_interval;
+
+        worker.discover_and_retarget();
+
         assert!(
             worker.target.is_none(),
-            "rescan with empty identity must not retarget the worker"
+            "an empty scan must not retarget the worker"
         );
+        assert!(
+            worker.discovery_interval > before,
+            "a fruitless scan on an unchanged network must ramp the interval down"
+        );
+    }
+
+    /// A retarget search is not an ordinary scan: the console answered seconds
+    /// ago, so an empty pass means a lost probe far more often than an absent
+    /// device. The cadence must hold the floor for the whole budget, then ramp
+    /// like anything else so a console that really is powered down doesn't buy
+    /// a permanent 5 s scan loop.
+    #[test]
+    fn retarget_search_holds_the_fast_cadence_then_ramps() {
+        let mut worker = make_test_worker();
+        worker.set_scan_port(unused_udp_port());
+
+        // Warm-up pass: the first one fingerprints the interfaces, which holds
+        // the floor on its own and would mask the behaviour under test.
+        worker.discover_and_retarget();
+
+        worker.request_retarget();
+        for pass in 1..=RETARGET_FAST_PASSES {
+            worker.discover_and_retarget();
+            assert_eq!(
+                worker.discovery_interval, DISCOVERY_INTERVAL_MIN,
+                "pass {pass} of {RETARGET_FAST_PASSES} must still search at the floor cadence"
+            );
+        }
+
+        worker.discover_and_retarget();
+        assert!(
+            worker.discovery_interval > DISCOVERY_INTERVAL_MIN,
+            "with the search budget spent, the ordinary ramp must resume"
+        );
+
+        // A console that is switched off keeps failing its heartbeat, and every
+        // failure run asks for another retarget. Those must not re-arm the
+        // budget — otherwise the cadence never leaves the floor.
+        let ramped = worker.discovery_interval;
+        worker.request_retarget();
+        assert_eq!(
+            worker.retarget_fast_passes, 0,
+            "a spent search must not re-arm on a repeat request"
+        );
+        assert_eq!(
+            worker.discovery_interval, ramped,
+            "a repeat request must not snap the ramped cadence back to the floor"
+        );
+        assert!(
+            worker.retarget_requested,
+            "the pass itself is still requested — only the fast budget is withheld"
+        );
+    }
+
+    /// The latch is per-loss, not permanent: finding a console again must clear
+    /// it, so the *next* time that console goes missing still earns a full fast
+    /// search. Without this the budget is a once-per-session affair.
+    #[test]
+    fn finding_a_console_clears_the_spent_latch() {
+        use mock_suite::{MockMixer, default_slots};
+
+        let mock = MockMixer::start_with_identity(0, default_slots(), "Test Desk", "X32")
+            .expect("bind mock mixer");
+        let mut worker = make_test_worker();
+        worker.set_scan_port(mock.port());
+        *worker.last_device.lock() = ("Test Desk".to_string(), "X32".to_string());
+        // State left behind by an earlier search that came up empty.
+        worker.retarget_search_spent = true;
+        worker.retarget_fast_passes = 0;
+
+        worker.discover_and_retarget();
+
+        assert!(
+            worker.target.is_some(),
+            "precondition: the mock must be found and adopted"
+        );
+        assert!(
+            !worker.retarget_search_spent,
+            "adopting a device must clear the latch so a later loss searches fast again"
+        );
+
+        worker.request_retarget();
+        assert_eq!(worker.retarget_fast_passes, RETARGET_FAST_PASSES);
+    }
+
+    /// The heartbeat may have been failing for a while by the time the worker
+    /// gives up on the address, leaving the cadence ramped. Arming the search
+    /// has to undo that — otherwise the first pass of the hunt waits out a 30 s
+    /// interval before it even runs.
+    #[test]
+    fn request_retarget_resets_a_ramped_cadence() {
+        let mut worker = make_test_worker();
+        worker.discovery_interval = DISCOVERY_INTERVAL_MAX;
+
+        worker.request_retarget();
+
+        assert_eq!(worker.discovery_interval, DISCOVERY_INTERVAL_MIN);
+        assert_eq!(worker.retarget_fast_passes, RETARGET_FAST_PASSES);
+        assert!(worker.retarget_requested);
+    }
+
+    /// The interval doubles per fruitless pass and stops at the ceiling.
+    #[test]
+    fn discovery_interval_ramps_to_cap() {
+        let mut worker = make_test_worker();
+        worker.set_scan_port(unused_udp_port());
+        // Far more passes than needed to reach the cap from the 5 s floor.
+        for _ in 0..8 {
+            worker.discovery_interval = (worker.discovery_interval * 2).min(DISCOVERY_INTERVAL_MAX);
+        }
+        assert_eq!(worker.discovery_interval, DISCOVERY_INTERVAL_MAX);
+    }
+
+    /// Discovery is opt-in: with `auto_reconnect` off, the worker emits nothing.
+    #[test]
+    fn discovery_is_gated_on_auto_reconnect() {
+        let mut worker = make_test_worker();
+        worker.set_scan_port(unused_udp_port());
+        worker.auto_reconnect.store(false, Ordering::Relaxed);
+        worker.maybe_discover();
+        assert!(
+            worker.last_discovery.is_none(),
+            "auto_reconnect OFF must not run a discovery pass"
+        );
+    }
+
+    /// Every scan retransmits its probe — one lost datagram must not cost the
+    /// whole window. The loopback socket is always present, so the burst count
+    /// holds regardless of what interfaces the test machine has.
+    #[test]
+    fn scan_probes_are_retransmitted() {
+        let (_devices, stats) = NetworkWorker::scan_collect(unused_udp_port(), SCAN_WINDOW, None);
+        assert!(
+            stats.probes >= SCAN_PROBE_BURST,
+            "expected at least {SCAN_PROBE_BURST} probes, sent {}",
+            stats.probes
+        );
+        assert_eq!(stats.replies, 0, "nothing listens on an unused port");
+    }
+
+    /// Bind an ephemeral UDP port, then release it — near-certainly unused.
+    fn unused_udp_port() -> u16 {
+        UdpSocket::bind("127.0.0.1:0")
+            .expect("bind ephemeral")
+            .local_addr()
+            .expect("local_addr")
+            .port()
+    }
+
+    fn test_publisher() -> ScanPublisher {
+        ScanPublisher {
+            scan_targets: Arc::new(Mutex::new(Vec::new())),
+            scan_health: Arc::new(AtomicU8::new(ScanHealth::Unknown as u8)),
+            empty_scans: Arc::new(AtomicU32::new(0)),
+        }
+    }
+
+    fn device(name: &str, ip: &str) -> DeviceInfo {
+        DeviceInfo {
+            ip: ip.into(),
+            port: 10023,
+            name: name.into(),
+            model: "X32".into(),
+            latency_ms: None,
+            all_addrs: vec![],
+        }
+    }
+
+    /// A reply means the path works, whatever else is wrong.
+    #[test]
+    fn scan_health_ok_on_reply() {
+        let p = test_publisher();
+        let stats = ScanStats {
+            addrs: vec!["192.168.1.5".into()],
+            probes: 3,
+            replies: 1,
+        };
+        assert_eq!(
+            p.record(&[device("A", "192.168.1.9")], &stats, None),
+            Some(ScanHealth::Ok)
+        );
+    }
+
+    /// One quiet scan is not evidence — the warning state needs a run of them.
+    #[test]
+    fn scan_health_escalates_only_after_repeated_silence() {
+        let p = test_publisher();
+        let stats = ScanStats {
+            addrs: vec!["192.168.1.5".into()],
+            probes: 3,
+            replies: 0,
+        };
+        for _ in 1..SCAN_HEALTH_FAILURES {
+            assert_eq!(
+                p.record(&[], &stats, None),
+                Some(ScanHealth::Unknown),
+                "must hold the previous verdict until the run is long enough"
+            );
+        }
+        assert_eq!(p.record(&[], &stats, None), Some(ScanHealth::NoReplies));
+
+        // A single reply clears it immediately.
+        let ok = ScanStats {
+            replies: 1,
+            ..stats
+        };
+        assert_eq!(p.record(&[], &ok, None), Some(ScanHealth::Ok));
+    }
+
+    /// No interfaces is a different problem from no answers, and says so.
+    #[test]
+    fn scan_health_reports_missing_interfaces() {
+        let p = test_publisher();
+        let stats = ScanStats::default();
+        assert_eq!(p.record(&[], &stats, None), Some(ScanHealth::NoInterfaces));
+    }
+
+    /// A result from a superseded scan must not repopulate the cleared list.
+    #[test]
+    fn scan_result_from_stale_generation_is_discarded() {
+        let p = test_publisher();
+        let generation = AtomicU64::new(2);
+        let stats = ScanStats {
+            addrs: vec!["192.168.1.5".into()],
+            probes: 3,
+            replies: 1,
+        };
+        assert_eq!(
+            p.record(
+                &[device("A", "192.168.1.9")],
+                &stats,
+                Some((&generation, 1))
+            ),
+            None
+        );
+        assert!(p.scan_targets.lock().is_empty());
+    }
+
+    /// The same console seen again updates its entry instead of duplicating it,
+    /// even when DHCP has since moved it to another address.
+    #[test]
+    fn merge_devices_dedupes_by_identity() {
+        let mut list = vec![device("Desk", "192.168.1.9")];
+        merge_devices(&mut list, [device("Desk", "192.168.1.42")]);
+        assert_eq!(list.len(), 1, "identity match must replace, not append");
+        assert_eq!(list[0].ip, "192.168.1.42", "the newer address wins");
+
+        merge_devices(&mut list, [device("Other", "192.168.1.7")]);
+        assert_eq!(list.len(), 2, "a different console is a new entry");
+    }
+
+    /// After the persisted address answered with the wrong console, the worker
+    /// must not immediately re-dial it — that just gets the same wrong device
+    /// again, and starves the discovery pass that could find the right one.
+    #[test]
+    fn pending_retarget_blocks_redialling_the_rejected_address() {
+        let mut worker = make_test_worker();
+        worker.auto_reconnect.store(true, Ordering::Relaxed);
+        worker.retarget_requested = true;
+
+        worker.maybe_auto_connect();
+
+        assert!(
+            worker.last_auto_attempt.is_none(),
+            "a pending retarget must suppress the auto-connect attempt"
+        );
+        assert!(worker.target.is_none());
     }
 
     /// maybe_auto_connect returns early when the target IP is empty.
@@ -1601,17 +2223,19 @@ mod tests {
     /// editor's "scan finished" display.
     #[test]
     fn scan_targets_bg_discards_stale_generation() {
-        let scan_targets = Arc::new(Mutex::new(Vec::<DeviceInfo>::new()));
+        let publisher = test_publisher();
+        let scan_targets = publisher.scan_targets.clone();
         let (status_tx, status_rx) = crossbeam_channel::bounded(8);
         let scan_generation = Arc::new(AtomicU64::new(2)); // advanced past expected_gen
 
         // Call with expected_gen=1 but current generation is 2 → stale.
         NetworkWorker::scan_targets_bg(
-            scan_targets.clone(),
+            publisher,
             status_tx,
             scan_generation,
             1, // expected_gen — outdated
-            10023,
+            unused_udp_port(),
+            None,
         );
 
         assert!(

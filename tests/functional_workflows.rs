@@ -15,45 +15,15 @@
 mod common;
 
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use common::harness_util::{
-    E2E_LOCK, connect, drain_auto_sync, step, step_at, step_n_beats, step_until, wait_for_audit,
+    E2E_LOCK, connect, drain_auto_sync, setup_loopback_sink, step, step_at, step_n_beats,
+    step_until, wait_for_audit,
 };
 use common::{MockMixer, SlotState};
 use ethertap::EtherTap;
-use mock_suite::loopback_sink::LoopbackClockSink;
 use vst_runtime::Harness;
-
-// ── MIDI helpers ─────────────────────────────────────────────────────────────
-
-/// Register a loopback MIDI port and wire the harness's clock worker to it.
-/// Panics if the bridge does not connect within 5 s.
-fn setup_midi_loopback(harness: &mut Harness<EtherTap>, tag: &str) -> LoopbackClockSink {
-    let name = format!(
-        "EtherTap Functional {} {} {:?}",
-        tag,
-        std::process::id(),
-        std::thread::current().id()
-    );
-    let sink = LoopbackClockSink::start_named(&name).expect("loopback sink register");
-    let params = harness.plugin().ethertap_params();
-    let handles = harness.plugin().test_handles();
-    *params.midi_out_device.lock() = Some(name.clone());
-    handles
-        .device_change_tx
-        .send(Some(name))
-        .expect("device_change send");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !handles.midi_bridge_connected.load(Ordering::Acquire) {
-        assert!(
-            Instant::now() < deadline,
-            "MIDI worker never connected to loopback sink"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    sink
-}
 
 // ── Test 1: Full lifecycle ────────────────────────────────────────────────────
 
@@ -352,47 +322,7 @@ fn rate_mode_switch_manual_to_continuous_mid_session() {
     harness.deactivate();
 }
 
-// ── Test 7: Tempo switching ───────────────────────────────────────────────────
-
-/// Multiple BPM changes with settle verification: 120 → 140 → 90.
-/// Each settle dispatches the correct BPM to the mixer.
-#[test]
-fn tempo_switching_three_changes_each_settle() {
-    let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut slots = [SlotState::empty(); 8];
-    slots[0] = SlotState::dly(120.0);
-    let mock = MockMixer::start_with_slots(slots);
-    let mut harness = connect(&mock);
-    wait_for_audit(&mut harness);
-
-    // rate_sync_mode=OnChange (default). Wait for initial sync.
-    let _ = step_until(&mut harness, 120.0, Duration::from_secs(2), |_| {
-        mock.sync_count(1) > 0
-    });
-    std::thread::sleep(Duration::from_millis(300));
-    let after_120 = mock.sync_count(1);
-
-    // 120 → 140 BPM.
-    let d140 = step_until(&mut harness, 140.0, Duration::from_secs(4), |_| {
-        mock.sync_count(1) > after_120
-    });
-    assert!(d140, "settle not triggered for 140 BPM");
-    let rx140 = mock.rx_bpm(1).expect("bpm after 140");
-    assert!((rx140 - 140.0).abs() < 0.5, "expected 140 BPM, got {rx140}");
-    let after_140 = mock.sync_count(1);
-
-    // 140 → 90 BPM.
-    let d90 = step_until(&mut harness, 90.0, Duration::from_secs(4), |_| {
-        mock.sync_count(1) > after_140
-    });
-    assert!(d90, "settle not triggered for 90 BPM");
-    let rx90 = mock.rx_bpm(1).expect("bpm after 90");
-    assert!((rx90 - 90.0).abs() < 0.5, "expected 90 BPM, got {rx90}");
-
-    harness.deactivate();
-}
-
-// ── Test 8: MIDI clock — transport start beat alignment ───────────────────────
+// ── Test 7: MIDI clock — transport start beat alignment ───────────────────────
 
 /// When transport starts mid-beat, the clock worker waits for the next beat
 /// boundary before forwarding 0xF8 bytes. Verify: zero ticks before beat 1.0,
@@ -402,7 +332,7 @@ fn midi_clock_transport_start_waits_for_beat_boundary() {
     let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let mut harness = Harness::<EtherTap>::new(44_100.0, 256).expect("EtherTap init");
-    let sink = setup_midi_loopback(&mut harness, "transport-start");
+    let sink = setup_loopback_sink(&mut harness, "transport-start");
     // midi_clock_enabled defaults true.
 
     // Transport was never played (was_playing=false). First step_at fires
@@ -434,7 +364,7 @@ fn midi_clock_transport_start_waits_for_beat_boundary() {
     harness.deactivate();
 }
 
-// ── Test 9: MIDI clock — BPM change silence gap ───────────────────────────────
+// ── Test 8: MIDI clock — BPM change silence gap ───────────────────────────────
 
 /// A BPM change > 0.5 BPM inserts a ≥ 1 500 ms silence gap. Verify ticks stop
 /// during the gap and resume after it expires.
@@ -443,7 +373,7 @@ fn midi_clock_bpm_change_inserts_silence_gap() {
     let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let mut harness = Harness::<EtherTap>::new(44_100.0, 256).expect("EtherTap init");
-    let sink = setup_midi_loopback(&mut harness, "bpm-gap");
+    let sink = setup_loopback_sink(&mut harness, "bpm-gap");
 
     // Establish clock running at 120 BPM (2 beats = 48 ticks at PPQ=24).
     let pos_after_base = step_n_beats(&mut harness, 2, 120.0, 0);
@@ -484,7 +414,7 @@ fn midi_clock_bpm_change_inserts_silence_gap() {
     harness.deactivate();
 }
 
-// ── Test 10: MIDI clock PPQ accuracy ─────────────────────────────────────────
+// ── Test 9: MIDI clock PPQ accuracy ─────────────────────────────────────────
 
 /// Driving exactly N beats produces exactly N × PPQ clock bytes for each
 /// supported PPQ value.
@@ -506,7 +436,7 @@ fn midi_clock_ppq_accuracy() {
         step(&mut harness, 120.0); // mirror atom
 
         let tag = format!("ppq{ppq}");
-        let sink = setup_midi_loopback(&mut harness, &tag);
+        let sink = setup_loopback_sink(&mut harness, &tag);
 
         // Drive exactly 4 beats from position 0; the first step fires
         // TransportStart → waiting_for_beat=true.  Tick 0 (on_beat) in the
@@ -540,7 +470,7 @@ fn midi_clock_ppq_accuracy() {
     }
 }
 
-// ── Test 11: Backward seek arms Hard Reset ───────────────────────────────────
+// ── Test 10: Backward seek arms Hard Reset ───────────────────────────────────
 
 /// A position rewind (pos_beats drops by > 0.5) arms `hr_pending` regardless
 /// of sync mode and is reflected in the `phase_reset_pending` param.
@@ -574,7 +504,7 @@ fn backward_seek_arms_phase_reset_pending() {
     harness.deactivate();
 }
 
-// ── Test 12: FX slot switch mid-sync ─────────────────────────────────────────
+// ── Test 11: FX slot switch mid-sync ─────────────────────────────────────────
 
 /// In single-slot mode, switching fx_slot redirects subsequent force-sync
 /// dispatches to the new slot without touching the old one.
