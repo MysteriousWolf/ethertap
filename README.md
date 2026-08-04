@@ -61,6 +61,29 @@ the session loads and remembers the console's name and model. If a different
 device answers at the saved address, or the connection stays down, EtherTap
 rescans the network for the console it knows and follows it to its new IP.
 
+Auto also turns on background discovery. While disconnected, EtherTap scans for
+consoles on its own every few seconds, whether or not the plugin window is open,
+and backs off to one scan every 30 seconds when it keeps finding nothing. This is
+what makes a cold start work: the DAW, the network interface and the console can
+come up in any order and EtherTap still converges. If it recognises the console
+it connected to before, it reconnects to it wherever the address moved to. If it
+has never connected to anything and finds exactly one console, it adopts that
+one. Two or more unknown consoles is ambiguous, so it waits for you to choose.
+
+### macOS: nothing is discovered
+
+From macOS 15, applications need the Local Network permission to reach anything
+on the LAN. A plugin inherits this from the DAW that loaded it, and a denied
+permission is silent: every probe and every reply is discarded with no error, so
+an empty device list looks exactly like a mixer that is switched off.
+
+If EtherTap finds nothing, open **System Settings → Privacy & Security → Local
+Network** and confirm your DAW is listed and enabled. The scan button turns
+amber when several scans in a row go unanswered, which is the usual sign that
+something is dropping the traffic; it turns red when the machine has no usable
+network interface at all. The plugin log records the interface, probe and reply
+counts for every scan.
+
 ---
 
 ## Sync modes

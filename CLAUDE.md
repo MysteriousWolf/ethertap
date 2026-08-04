@@ -45,6 +45,8 @@ EtherTap is a **Status-Aware Proxy** with a "Human-in-the-loop" approach:
 | trigger params (`connect_to_last`, `disconnect`, `force_sync_rate`, `force_sync_phase`, `audit_slots`) | editor/host → audio | momentary `BoolParam` | editor pulses via `ParamSetter`; `process()` consumes the rising edge then self-resets via `context.set_parameter(param, false)` |
 | `auto_reconnect_atom` | host → network | `Arc<AtomicBool>` | mirrored from the `auto_reconnect` param each buffer; worker polls it to self-connect / rescan |
 | `last_device` | network ↔ persisted params | `Arc<Mutex<(String, String)>>` | device (name, model) write-through; worker-thread only, never touched by `process()` |
+| `last_slot_types` | network ↔ persisted params | `Arc<Mutex<[i32; 8]>>` | slot audit write-through; worker-thread only. Seeded back into `slot_types` by `initialize()` |
+| `scan_health` | network → editor | `Arc<AtomicU8>` | `ScanHealth` discriminant; tints the Scan control when probes go unanswered |
 | `hardware_float` | network → editor | `Arc<AtomicU32>` | f32 bits via `f32::to/from_bits` |
 | `host_bpm` | audio → editor | `Arc<AtomicU32>` | f32 bits |
 | `tx/rx_activity_ts` | audio → editor | `Arc<AtomicU64>` | ms since epoch for LED pulse |

@@ -26,11 +26,38 @@ for arg in "$@"; do
   esac
 done
 
+# ── Output helpers (gum when available; plain fallback) ───────────────────────
+if command -v gum &>/dev/null; then
+    step()     { gum log --level info "$*"; }
+    err()      { gum log --level error "$*"; }
+    ok()       { printf '\n'; gum style --foreground 2 --bold "  ✓  $*"; printf '\n'; }
+    bail()     { printf '\n'; gum style --foreground 1 --bold "  ✗  $*"; printf '\n'; }
+    spin_cmd() {
+        local _t="$1"; shift
+        local _out _err _rc
+        _out=$(mktemp); _err=$(mktemp)
+        "$@" >"$_out" 2>"$_err" &
+        local _pid=$!
+        gum spin --spinner dot --title "$_t" -- \
+            sh -c "while kill -0 $_pid 2>/dev/null; do sleep 0.1; done" 2>/dev/null || true
+        wait "$_pid" 2>/dev/null; _rc=$?
+        [[ $_rc -ne 0 ]] && { cat "$_out"; cat "$_err" >&2; }
+        rm -f "$_out" "$_err"
+        return $_rc
+    }
+else
+    step()     { echo "  → $*"; }
+    err()      { echo "ERROR: $*" >&2; }
+    ok()       { echo; echo "✓ $*"; echo; }
+    bail()     { echo; echo "✗ $*"; }
+    spin_cmd() { local _t="$1"; shift; step "$_t"; "$@"; }
+fi
+
 # ── Version ────────────────────────────────────────────────────────────────────
 if [ -z "${VERSION:-}" ]; then
   VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
 fi
-echo "==> Version: $VERSION"
+step "Version: $VERSION"
 
 # ── Platform label ─────────────────────────────────────────────────────────────
 OS="$(uname -s)"
@@ -52,11 +79,11 @@ case "$OS" in
     PLATFORM="$(echo "$OS" | tr '[:upper:]' '[:lower:]')-$(uname -m)"
     ;;
 esac
-echo "==> Platform: $PLATFORM"
+step "Platform: $PLATFORM"
 
 # ── Vendor ─────────────────────────────────────────────────────────────────────
 if [ ! -d "vendor/baseview" ]; then
-  echo "==> Running setup..."
+  step "Running setup..."
   bash ./scripts/setup.sh
 fi
 
@@ -67,27 +94,47 @@ BINARY_PATH="$BUNDLE_DIR/$BUNDLE_NAME/Contents/MacOS/ethertap"
 
 if $UNIVERSAL; then
   if [ "$OS" != "Darwin" ]; then
-    echo "Error: --universal requires macOS" >&2
+    err "--universal requires macOS"
     exit 1
   fi
 
-  echo "==> Building aarch64-apple-darwin..."
-  cargo run -p xtask -- bundle ethertap --release --target aarch64-apple-darwin
+  spin_cmd "Building aarch64-apple-darwin…" \
+      cargo run -p xtask -- bundle ethertap --release --target aarch64-apple-darwin
   cp "$BINARY_PATH" /tmp/ethertap-arm64
 
-  echo "==> Building x86_64-apple-darwin..."
-  cargo run -p xtask -- bundle ethertap --release --target x86_64-apple-darwin
+  spin_cmd "Building x86_64-apple-darwin…" \
+      cargo run -p xtask -- bundle ethertap --release --target x86_64-apple-darwin
   cp "$BINARY_PATH" /tmp/ethertap-x86_64
 
-  echo "==> Creating universal binary..."
+  step "Merging into universal binary…"
   lipo -create /tmp/ethertap-arm64 /tmp/ethertap-x86_64 -output "$BINARY_PATH"
   rm -f /tmp/ethertap-arm64 /tmp/ethertap-x86_64
 
-  echo "==> Re-signing universal bundle..."
-  codesign --force --sign - "$BUNDLE_DIR/$BUNDLE_NAME" 2>/dev/null || true
 else
-  echo "==> Building for host..."
-  cargo run -p xtask -- bundle ethertap --release
+  spin_cmd "Building for host…" \
+      cargo run -p xtask -- bundle ethertap --release
+fi
+
+# ── macOS Local Network declaration ───────────────────────────────────────────
+# EtherTap talks to the console over UDP broadcast on the local network. From
+# macOS 15 that needs the Local Network privacy grant, and a denied grant drops
+# every datagram silently — no error, no devices found, no connection. The
+# prompt is driven by the host application, but the plug-in bundle declaring a
+# purpose string is what puts EtherTap's own reason in front of the user
+# instead of a bare host name. Written after the build (the nih-plug bundler
+# generates Info.plist itself) and before signing, since editing a bundle
+# invalidates its signature.
+if [ "$OS" = "Darwin" ]; then
+  PLIST="$BUNDLE_DIR/$BUNDLE_NAME/Contents/Info.plist"
+  USAGE="EtherTap discovers and syncs X32/M32 consoles over your local network."
+  step "Declaring local network usage…"
+  /usr/libexec/PlistBuddy -c \
+    "Add :NSLocalNetworkUsageDescription string $USAGE" "$PLIST" 2>/dev/null ||
+    /usr/libexec/PlistBuddy -c \
+      "Set :NSLocalNetworkUsageDescription $USAGE" "$PLIST"
+
+  step "Signing bundle…"
+  codesign --force --sign - "$BUNDLE_DIR/$BUNDLE_NAME" 2>/dev/null || true
 fi
 
 # ── Export ─────────────────────────────────────────────────────────────────────
@@ -97,7 +144,7 @@ DEST="$REPO_ROOT/dist/$EXPORT_NAME"
 
 rm -rf "$DEST"
 cp -R "$BUNDLE_DIR/$BUNDLE_NAME" "$DEST"
-echo "==> Exported: dist/$EXPORT_NAME"
+step "Exported: dist/$EXPORT_NAME"
 
 # ── Package ────────────────────────────────────────────────────────────────────
 # VST3 is a directory bundle on every platform; zip it so CI's
@@ -111,10 +158,10 @@ if command -v zip >/dev/null 2>&1; then
 elif command -v 7z >/dev/null 2>&1; then
   7z a -tzip -bd -bb0 "${EXPORT_NAME}.zip" "$EXPORT_NAME" >/dev/null
 else
-  echo "Error: neither 'zip' nor '7z' found for packaging" >&2
+  err "neither 'zip' nor '7z' found for packaging"
   exit 1
 fi
-echo "==> Packaged: dist/${EXPORT_NAME}.zip"
+step "Packaged: dist/${EXPORT_NAME}.zip"
 
 # ── Checksum ───────────────────────────────────────────────────────────────────
 # Named after the .vst3 bundle (not the .zip) so it's obvious which plugin
@@ -124,8 +171,7 @@ if command -v sha256sum >/dev/null 2>&1; then
 else
   shasum -a 256 "${EXPORT_NAME}.zip" > "${EXPORT_NAME}.sha256"
 fi
-echo "==> Checksum: dist/${EXPORT_NAME}.sha256"
+step "Checksum: dist/${EXPORT_NAME}.sha256"
 cd "$REPO_ROOT"
 
-echo ""
-echo "Bundle: $BUNDLE_DIR/$BUNDLE_NAME"
+ok "Bundle ready: $BUNDLE_DIR/$BUNDLE_NAME"

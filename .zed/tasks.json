@@ -1,21 +1,21 @@
 [
   {
     "label": "Format",
-    "command": "cargo fmt --all",
+    "command": "bash scripts/format.sh",
     "cwd": "$ZED_WORKTREE_ROOT",
   },
   {
     "label": "Check",
-    "command": "cargo clippy --workspace --all-targets -- -D warnings && cargo clippy -p ethertap --all-targets --features standalone -- -D warnings && cargo fmt --all --check",
+    "command": "bash scripts/check.sh",
     "cwd": "$ZED_WORKTREE_ROOT",
   },
   {
     "label": "Test",
-    "command": "cargo test --workspace",
+    "command": "bash scripts/test.sh",
     "cwd": "$ZED_WORKTREE_ROOT",
   },
   {
-    "label": "Coverage (≥ 95%)",
+    "label": "Coverage",
     "command": "bash scripts/coverage.sh",
     "cwd": "$ZED_WORKTREE_ROOT",
   },
@@ -32,6 +32,11 @@
   {
     "label": "Export VST3",
     "command": "bash scripts/build.sh",
+    "cwd": "$ZED_WORKTREE_ROOT",
+  },
+  {
+    "label": "Install",
+    "command": "bash scripts/install.sh",
     "cwd": "$ZED_WORKTREE_ROOT",
   },
 ]

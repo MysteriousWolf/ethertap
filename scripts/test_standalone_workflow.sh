@@ -37,17 +37,49 @@ done
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# ── Output helpers (gum when available; plain fallback) ───────────────────────
+if command -v gum &>/dev/null; then
+    step()     { gum log --level info "$*"; }
+    err()      { gum log --level error "$*"; }
+    ok()       { printf '\n'; gum style --foreground 2 --bold "  ✓  $*"; printf '\n'; }
+    bail()     { printf '\n'; gum style --foreground 1 --bold "  ✗  $*"; printf '\n'; }
+    spin_cmd() {
+        local _t="$1"; shift
+        local _out _err _rc
+        _out=$(mktemp); _err=$(mktemp)
+        "$@" >"$_out" 2>"$_err" &
+        local _pid=$!
+        gum spin --spinner dot --title "$_t" -- \
+            sh -c "while kill -0 $_pid 2>/dev/null; do sleep 0.1; done" 2>/dev/null || true
+        wait "$_pid" 2>/dev/null; _rc=$?
+        [[ $_rc -ne 0 ]] && { cat "$_out"; cat "$_err" >&2; }
+        rm -f "$_out" "$_err"
+        return $_rc
+    }
+    spin_wait() {
+        local _pid="$1" _title="$2"
+        gum spin --spinner dot --title "$_title" -- \
+            sh -c "while kill -0 $_pid 2>/dev/null; do sleep 0.1; done" 2>/dev/null || true
+    }
+else
+    step()     { echo "  → $*"; }
+    err()      { echo "ERROR: $*" >&2; }
+    ok()       { echo; echo "✓ $*"; echo; }
+    bail()     { echo; echo "✗ $*"; }
+    spin_cmd() { local _t="$1"; shift; step "$_t"; "$@"; }
+    spin_wait() { :; }
+fi
+
 # ── Build ────────────────────────────────────────────────────────────────────
 
-echo "[test_standalone_workflow] building mock-suite…"
-cargo build -p mock-suite --quiet 2>&1 || {
-    echo "[test_standalone_workflow] mock-suite build failed" >&2
+spin_cmd "Building mock-suite…" cargo build -p mock-suite --quiet || {
+    err "mock-suite build failed"
     exit 2
 }
 
-echo "[test_standalone_workflow] building ethertap standalone…"
-cargo build --bin ethertap-gui --features standalone --quiet 2>&1 || {
-    echo "[test_standalone_workflow] standalone build failed" >&2
+spin_cmd "Building ethertap standalone…" \
+    cargo build --bin ethertap-gui --features standalone --quiet || {
+    err "standalone build failed"
     exit 2
 }
 
@@ -59,7 +91,7 @@ GUI_BIN="$ROOT/target/debug/ethertap-gui"
 #   /info:3      — at least 3 heartbeats (confirms stable connection)
 #   sync:1:1     — at least one BPM sync to slot 1 (auto-sync after connect)
 
-echo "[test_standalone_workflow] starting mock-suite on :$MOCK_PORT…"
+step "Starting mock-suite on :$MOCK_PORT..."
 "$MOCK_BIN" \
     --no-tui \
     --port "$MOCK_PORT" \
@@ -78,13 +110,13 @@ sleep 0.3
 # ETHERTAP_TEST_PORT triggers initialize() to set target 127.0.0.1:$MOCK_PORT
 # and send ConnectToLast before the first audio callback, so no GUI click needed.
 
-echo "[test_standalone_workflow] launching ethertap-gui (ETHERTAP_TEST_PORT=$MOCK_PORT)…"
-echo "[test_standalone_workflow] ↳ a window will appear — this is intentional"
+step "Launching ethertap-gui (ETHERTAP_TEST_PORT=$MOCK_PORT) — a window will appear"
 ETHERTAP_TEST_PORT="$MOCK_PORT" "$GUI_BIN" &
 GUI_PID=$!
 
 # ── Wait for mock-suite result ───────────────────────────────────────────────
 
+spin_wait "$MOCK_PID" "Waiting for OSC traffic (timeout: ${TIMEOUT}s)…"
 wait "$MOCK_PID"
 MOCK_EXIT=$?
 
@@ -96,9 +128,9 @@ wait "$GUI_PID" 2>/dev/null || true
 # ── Report ───────────────────────────────────────────────────────────────────
 
 if [[ $MOCK_EXIT -eq 0 ]]; then
-    echo "[test_standalone_workflow] PASS — connection + BPM sync verified"
+    ok "PASS — connection + BPM sync verified"
 else
-    echo "[test_standalone_workflow] FAIL — timeout: expected OSC traffic not received (exit $MOCK_EXIT)" >&2
+    bail "FAIL — timeout: expected OSC traffic not received (exit $MOCK_EXIT)"
 fi
 
 exit "$MOCK_EXIT"

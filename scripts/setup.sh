@@ -27,6 +27,29 @@ done
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# ── Output helpers (gum when available; plain fallback) ───────────────────────
+if command -v gum &>/dev/null; then
+    step()     { gum log --level info "$*"; }
+    ok()       { printf '\n'; gum style --foreground 2 --bold "  ✓  $*"; printf '\n'; }
+    spin_cmd() {
+        local _t="$1"; shift
+        local _out _err _rc
+        _out=$(mktemp); _err=$(mktemp)
+        "$@" >"$_out" 2>"$_err" &
+        local _pid=$!
+        gum spin --spinner dot --title "$_t" -- \
+            sh -c "while kill -0 $_pid 2>/dev/null; do sleep 0.1; done" 2>/dev/null || true
+        wait "$_pid" 2>/dev/null; _rc=$?
+        [[ $_rc -ne 0 ]] && { cat "$_out"; cat "$_err" >&2; }
+        rm -f "$_out" "$_err"
+        return $_rc
+    }
+else
+    step()     { echo "  → $*"; }
+    ok()       { echo; echo "✓ $*"; echo; }
+    spin_cmd() { local _t="$1"; shift; step "$_t"; "$@"; }
+fi
+
 vendor_one() {
   local label="$1"
   local url="$2"
@@ -34,35 +57,36 @@ vendor_one() {
   local vendor_dir="$4"
   local patches_dir="$5"
 
-  echo "==> $label @ $rev"
+  step "$label @ $rev"
 
   if $DRY_RUN; then
-    echo "    Dry-run: cloning to temp dir and testing patches..."
+    step "Dry-run: cloning to temp dir and testing patches..."
     TMP=$(mktemp -d)
     trap 'rm -rf "$TMP"' EXIT
     git clone --quiet "$url" "$TMP/$label"
     cd "$TMP/$label" && git checkout --quiet "$rev" && cd "$REPO_ROOT"
     for patch in "$patches_dir"/*.patch; do
-      echo "    patch --dry-run: $(basename "$patch")"
+      step "patch --dry-run: $(basename "$patch")"
       patch --dry-run -p1 -d "$TMP/$label" < "$patch"
     done
-    echo "    All patches apply cleanly."
+    step "All patches apply cleanly."
     return
   fi
 
-  echo "    Removing old $vendor_dir..."
+  step "Removing old $vendor_dir…"
   rm -rf "$vendor_dir"
 
-  echo "    Cloning upstream..."
-  git clone --quiet "$url" "$vendor_dir"
-  cd "$vendor_dir"
-  git checkout --quiet "$rev"
-  rm -rf .git .cargo-ok
-  cd "$REPO_ROOT"
+  spin_cmd "Cloning $label @ $rev…" \
+      bash -c 'set -e
+               git clone --quiet "$1" "$2"
+               cd "$2"
+               git checkout --quiet "$3"
+               rm -rf .git .cargo-ok' \
+      -- "$url" "$vendor_dir" "$rev"
 
-  echo "    Applying patches..."
+  step "Applying patches…"
   for patch in "$patches_dir"/*.patch; do
-    echo "    $(basename "$patch")"
+    step "  $(basename "$patch")"
     patch -p1 -d "$vendor_dir" < "$patch"
   done
 }
@@ -70,5 +94,4 @@ vendor_one() {
 vendor_one "baseview"  "$BASEVIEW_URL"  "$BASEVIEW_REV"  "vendor/baseview"  "patches/baseview"
 vendor_one "nih-plug"  "$NIH_PLUG_URL"  "$NIH_PLUG_REV"  "vendor/nih-plug"  "patches/nih-plug"
 
-echo ""
-echo "Done. Run 'cargo check' to verify."
+ok "Vendor ready — run 'cargo check' to verify"

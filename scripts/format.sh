@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# Start the EtherTap standalone GUI without automatically launching the mock mixer.
+# format.sh — run cargo fmt --all with gum-styled status output.
+#
+# Usage:
+#   ./scripts/format.sh
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
 
-cd "$REPO_ROOT"
-
-# ── Output helpers (gum when available; plain fallback) ───────────────────────
 if command -v gum &>/dev/null; then
     step()     { gum log --level info "$*"; }
+    err()      { gum log --level error "$*"; }
+    ok()       { printf '\n'; gum style --foreground 2 --bold "  ✓  $*"; printf '\n'; }
     bail()     { printf '\n'; gum style --foreground 1 --bold "  ✗  $*"; printf '\n'; }
     spin_cmd() {
         local _t="$1"; shift
@@ -27,14 +29,11 @@ if command -v gum &>/dev/null; then
     }
 else
     step()     { echo "  → $*"; }
+    err()      { echo "ERROR: $*" >&2; }
+    ok()       { echo; echo "✓ $*"; echo; }
     bail()     { echo; echo "✗ $*"; }
     spin_cmd() { local _t="$1"; shift; step "$_t"; "$@"; }
 fi
 
-spin_cmd "Building standalone GUI…" \
-    cargo build --bin ethertap-gui --features standalone --quiet || {
-    bail "Build failed"
-    exit 2
-}
-step "Launching standalone GUI"
-cargo run --bin ethertap-gui --features standalone --quiet
+spin_cmd "Formatting…" cargo fmt --all
+ok "Format done"

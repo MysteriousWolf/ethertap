@@ -10,17 +10,26 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-echo "==> Removing vendor/..."
+# ── Output helpers (gum when available; plain fallback) ───────────────────────
+if command -v gum &>/dev/null; then
+    step() { gum log --level info "$*"; }
+    ok()   { printf '\n'; gum style --foreground 2 --bold "  ✓  $*"; printf '\n'; }
+else
+    step() { echo "  → $*"; }
+    ok()   { echo; echo "✓ $*"; echo; }
+fi
+
+step "Removing vendor/..."
 rm -rf vendor/
 
 for arg in "$@"; do
   case $arg in
     --all)
-      echo "==> Removing target/..."
+      step "Removing target/..."
       rm -rf target/
       ;;
     *) echo "Unknown argument: $arg"; exit 1 ;;
   esac
 done
 
-echo "Done. Run './scripts/setup.sh' to repopulate vendor/."
+ok "Done — run './scripts/setup.sh' to repopulate vendor/"
