@@ -1,9 +1,11 @@
 #[cfg(not(target_os = "macos"))]
 use crossbeam_channel::tick;
 use crossbeam_channel::{Receiver, Sender, bounded};
+use nice_plug::nice_error;
+#[cfg(target_os = "macos")]
+use nice_plug::nice_trace;
 #[cfg(not(target_os = "macos"))]
 use nice_plug::nice_warn;
-use nice_plug::{nice_error, nice_trace};
 use std::sync::Arc;
 /// MIDI device hot-plug watcher.
 ///
