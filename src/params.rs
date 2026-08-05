@@ -3,19 +3,9 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU8, AtomicU32},
 };
 
-use nih_plug::prelude::*;
-use nih_plug_iced::{Font, IcedState};
+use nice_plug::{editor::dpi::LogicalSize, prelude::*};
+use nice_plug_iced::WindowState;
 use parking_lot::Mutex;
-
-// ─── UI font ─────────────────────────────────────────────────────────────────
-
-/// Monospace font used for the MIDI clock stats row (and any other
-/// fixed-width text).  Swap the `bytes` path to change the font family;
-/// the file must be a valid TTF/OTF at compile time.
-pub const MONO_FONT: Font = Font::External {
-    name: "JetBrains Mono",
-    bytes: include_bytes!("../assets/JetBrainsMono-Regular.ttf"),
-};
 
 // ─── Sync mode enum ──────────────────────────────────────────────────────────
 
@@ -138,7 +128,7 @@ pub struct EtherTapParams {
     /// back the way the user left it instead of snapping to the default size
     /// on every session load.
     #[persist = "editor-state"]
-    pub editor_state: Arc<IcedState>,
+    pub editor_state: Arc<WindowState>,
 
     // ── Network configuration (persisted, not automatable) ───────────────
     #[persist = "target-ip"]
@@ -298,9 +288,9 @@ impl Default for EtherTapParams {
     fn default() -> Self {
         Self {
             #[cfg(not(feature = "standalone"))]
-            editor_state: IcedState::from_size(360, 280),
+            editor_state: WindowState::from_size(LogicalSize::new(360.0, 280.0)),
             #[cfg(feature = "standalone")]
-            editor_state: IcedState::from_size(500, 620),
+            editor_state: WindowState::from_size(LogicalSize::new(500.0, 620.0)),
             target_ip: Arc::new(Mutex::new(if cfg!(feature = "standalone") {
                 "127.0.0.1".to_owned()
             } else {

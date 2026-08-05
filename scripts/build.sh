@@ -81,12 +81,6 @@ case "$OS" in
 esac
 step "Platform: $PLATFORM"
 
-# ── Vendor ─────────────────────────────────────────────────────────────────────
-if [ ! -d "vendor/baseview" ]; then
-  step "Running setup..."
-  bash ./scripts/setup.sh
-fi
-
 # ── Build ──────────────────────────────────────────────────────────────────────
 BUNDLE_DIR="target/bundled"
 BUNDLE_NAME="ethertap.vst3"

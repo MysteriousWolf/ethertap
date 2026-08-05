@@ -1,8 +1,8 @@
-//! Headless in-process driver for Rust-native [`nih_plug::Plugin`] implementations.
+//! Headless in-process driver for Rust-native [`nice_plug::Plugin`] implementations.
 //!
 //! `Harness<P>` mirrors the construction → process → teardown sequence that
-//! `nih_export_standalone<P: Plugin>()` runs
-//! (`vendor/nih-plug/src/wrapper/standalone/wrapper.rs:178-300` for construction,
+//! `nice_export_standalone<P: Plugin>()` runs
+//! (`nice-plug/src/wrapper/standalone/wrapper.rs:178-300` for construction,
 //! `:521-536` for the process loop), but drives the plugin directly through its
 //! trait methods instead of spinning up an audio backend or a window. This lets
 //! a test script sequence `process()` calls over caller-supplied buffers and
@@ -10,16 +10,16 @@
 //! plugin linked as a crate.
 //!
 //! Headless by construction: this crate never references `Plugin::editor()` or
-//! `nih_plug_iced`.
+//! `nice_plug_iced`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Re-exported so integration tests can import `ProcessStatus` and `Transport`
-/// from `vst_runtime` without adding a separate `nih_plug` dev-dependency.
-pub use nih_plug::prelude::ProcessStatus;
-pub use nih_plug::prelude::Transport;
-use nih_plug::prelude::{
+/// from `vst_runtime` without adding a separate `nice_plug` dev-dependency.
+pub use nice_plug::prelude::ProcessStatus;
+pub use nice_plug::prelude::Transport;
+use nice_plug::prelude::{
     AudioIOLayout, AuxiliaryBuffers, Buffer, BufferConfig, InitContext, ParamPtr, Params, Plugin,
     PluginApi, PluginNoteEvent, ProcessContext, ProcessMode,
 };
@@ -27,10 +27,10 @@ use nih_plug::prelude::{
 /// Drives a single `P: Plugin` instance through its lifecycle headlessly.
 ///
 /// Construction mirrors `Wrapper::new()`
-/// (`vendor/nih-plug/src/wrapper/standalone/wrapper.rs:184-300`): build
+/// (`nice-plug/src/wrapper/standalone/wrapper.rs:184-300`): build
 /// `P::default()`, pick the plugin's default [`AudioIOLayout`], call
 /// `initialize()`, then `reset()`. [`Harness::process`] then drives the
-/// plugin's `process()` directly — the same call nih-plug's standalone backend
+/// plugin's `process()` directly — the same call nice-plug's standalone backend
 /// makes per period (`wrapper.rs:521-536`) — over caller-supplied buffers.
 ///
 /// The harness's own driving loop is test/dev tooling, not RT-constrained: it
@@ -41,7 +41,7 @@ pub struct Harness<P: Plugin> {
     audio_io_layout: AudioIOLayout,
     sample_rate: f32,
     /// Kept alive for the harness's lifetime — `param_ptrs` point into this
-    /// object, mirroring how nih-plug's wrappers hold the `Arc` to keep
+    /// object, mirroring how nice-plug's wrappers hold the `Arc` to keep
     /// [`ParamPtr`]s valid.
     #[allow(dead_code)]
     params: Arc<dyn Params>,
@@ -150,9 +150,9 @@ pub struct ScenarioResult<P: Plugin> {
 ///
 /// Transport position can be driven two ways: supply a fully-populated
 /// [`Transport`] via `.transport()` before a `.step()` (position fields are
-/// settable via the patched-public [`Transport::set_song_position`]), or use
-/// [`ScenarioBuilder::advance_playing`] to auto-accumulate position across
-/// consecutive playing steps the way nih-plug's standalone backend does.
+/// public and directly settable), or use [`ScenarioBuilder::advance_playing`]
+/// to auto-accumulate position across consecutive playing steps the way
+/// nice-plug's standalone backend does.
 pub struct ScenarioBuilder<'h, P: Plugin> {
     harness: &'h mut Harness<P>,
     buffer_size: usize,
@@ -222,7 +222,7 @@ impl<'h, P: Plugin> ScenarioBuilder<'h, P> {
     }
 
     /// Drive `n` consecutive playing steps with an auto-advancing transport at
-    /// `tempo` BPM and `time_sig`, mirroring how nih-plug's standalone backend
+    /// `tempo` BPM and `time_sig`, mirroring how nice-plug's standalone backend
     /// accumulates `pos_samples` per period (`wrapper.rs:521-536`) and derives
     /// beats/bar from it.  Position persists across multiple
     /// `advance_playing` calls on the same builder.
@@ -239,13 +239,11 @@ impl<'h, P: Plugin> ScenarioBuilder<'h, P> {
             let bar_len_qn = time_sig.0 as f64 * 4.0 / time_sig.1 as f64;
             let bar_number = (pos_beats / bar_len_qn).floor() as i32;
             let bar_start = bar_number as f64 * bar_len_qn;
-            t.set_song_position(
-                Some(pos_samples),
-                Some(pos_beats),
-                Some(bar_start),
-                Some(bar_number),
-                None,
-            );
+            t.pos_samples = Some(pos_samples);
+            t.pos_beats = Some(pos_beats);
+            t.bar_start_pos_beats = Some(bar_start);
+            t.bar_number = Some(bar_number);
+            t.loop_range_beats = None;
 
             self = self.transport(t).step();
             self.auto_pos_samples += self.buffer_size as i64;
@@ -346,16 +344,15 @@ impl<P: Plugin> Harness<P> {
     /// a host automation lane would — through the param's internal atomic, not
     /// the GUI.  Returns `false` when the id is unknown.
     ///
-    /// Relies on the vendored-nih-plug patch widening
-    /// `ParamPtr::set_normalized_value` / `update_smoother` to `pub`
-    /// (`patches/nih-plug/params_internals_set_normalized_pub.patch`).
+    /// Relies on nice-plug's pub `ParamPtr::_internal_set_normalized_value` /
+    /// `_internal_update_smoother`.
     pub fn set_param_normalized(&self, id: &str, normalized: f32) -> bool {
         match self.param_ptrs.get(id) {
             // SAFETY: the pointer targets a field of `self.params`, which the
             // harness keeps alive for its whole lifetime.
             Some(ptr) => unsafe {
-                if ptr.set_normalized_value(normalized) {
-                    ptr.update_smoother(self.sample_rate, false);
+                if ptr._internal_set_normalized_value(normalized) {
+                    ptr._internal_update_smoother(self.sample_rate, false);
                 }
                 true
             },
@@ -383,7 +380,7 @@ impl<P: Plugin> Harness<P> {
     /// plugin emitted.
     ///
     /// `main_io` holds one `Vec<f32>` per main-output channel — processed
-    /// in-place, matching nih-plug's in-place buffer convention. Auxiliary
+    /// in-place, matching nice-plug's in-place buffer convention. Auxiliary
     /// buffers are not modeled in this checkpoint; an empty [`AuxiliaryBuffers`]
     /// is passed (the plugin sees zero aux ports either way unless its layout
     /// declares them, in which case this harness presents empty slices for
@@ -471,7 +468,7 @@ impl<P: Plugin> Harness<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nih_plug::prelude::*;
+    use nice_plug::prelude::*;
     use std::sync::Arc;
 
     /// Trivial mock plugin: one stereo in/out port, no params, no MIDI. Its

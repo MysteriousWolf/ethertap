@@ -13,7 +13,7 @@ name = "ethertap"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-standalone = ["nih_plug/standalone"]
+standalone = ["nice-plug/standalone"]
 
 [[bin]]
 name = "ethertap-gui"
@@ -21,8 +21,8 @@ path = "src/bin/gui_test.rs"
 required-features = ["standalone"]
 
 [dependencies]
-nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["vst3"] }
-nih_plug_iced = { git = "https://github.com/robbert-vdh/nih-plug.git" }
+nice-plug = { git = "https://github.com/MysteriousWolf/nice-plug", branch = "ethertap", features = ["vst3"] }
+nice-plug-iced = { git = "https://github.com/MysteriousWolf/nice-plug", branch = "ethertap" }
 crossbeam-channel = "0.5"
 rosc = "0.11"
 parking_lot = "0.12"
@@ -44,25 +44,6 @@ harness = false
 [target.'cfg(target_os = "macos")'.dependencies]
 coremidi = "0.9"
 core-foundation = "0.10"
-
-# Pin both baseview revisions (579130e used by nih-plug standalone, 1d9806d5
-# used by iced_baseview) to the newer revision.  The older one crashes on ARM64
-# macOS in become_first_responder when [view window] returns nil during
-# setContentView_.  The newer revision removes that callback entirely.
-[patch."https://github.com/RustAudio/baseview.git"]
-baseview = { path = "vendor/baseview" }
-
-# Vendor nih-plug to apply the ProcessContext::set_parameter patch.
-# Run ./scripts/setup.sh after cloning to populate vendor/nih-plug.
-[patch."https://github.com/robbert-vdh/nih-plug.git"]
-nih_plug      = { path = "vendor/nih-plug" }
-nih_plug_iced = { path = "vendor/nih-plug/nih_plug_iced" }
-
-# Replace copypasta 0.7.1 (pulled in by iced_baseview) with an arboard-backed
-# shim. copypasta 0.7.1 depends on objc-foundation → block 0.1.6, which will
-# become a hard error in a future Rust release. arboard 3.x uses objc2 only.
-[patch.crates-io]
-copypasta = { path = "vendor/copypasta" }
 
 [profile.release]
 lto = "thin"

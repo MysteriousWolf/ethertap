@@ -9,7 +9,7 @@
 ///
 /// (Audio I/O is optional; the GUI opens even if no audio device is found.)
 fn main() {
-    if !nih_plug::nih_export_standalone::<ethertap::EtherTap>() {
+    if !nice_plug::nice_export_standalone::<ethertap::EtherTap>() {
         eprintln!("[EtherTap] standalone init failed");
         std::process::exit(1);
     }

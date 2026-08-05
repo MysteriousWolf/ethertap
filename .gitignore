@@ -1,11 +1,6 @@
 # Build artifacts
 /target/
 
-# Vendored dependencies cloned by scripts/setup.sh (not committed)
-/vendor/baseview/
-/vendor/nih-plug/
-# vendor/copypasta/ is a local hand-written shim and IS committed
-
 # Distribution artifacts
 /dist/
 

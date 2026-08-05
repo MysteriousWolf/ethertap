@@ -53,18 +53,20 @@ EtherTap is a **Status-Aware Proxy** with a "Human-in-the-loop" approach:
 
 **Never** add a `std::sync::Mutex` or `tokio::sync::Mutex` to the hot path.
 
-## nih-plug-iced API Notes (this version uses old stateful-widget API)
+## nice-plug-iced API Notes (Elm-style, iced 0.14)
 
-- `Button::new(&mut self.state, content)` — needs a `button::State` field per button
-- `TextInput::new(&mut self.state, placeholder, value, closure)` — same pattern
-- `view(&mut self)` — takes `&mut self`, not `&self`
-- `context()` returns `&dyn GuiContext`, not `Arc<dyn GuiContext>`
-- `IcedState::from_size(w, h)` already returns `Arc<IcedState>` — do not wrap
-- `Space::with_height(n.into())` or `Length::Units(n)` — not plain integers
-- `ProcessContext::set_parameter()` is **not implemented** in this nih-plug version;
-  use `Arc<AtomicBool>` for UI→audio momentary triggers instead
-- Button style: create a single enum-based `StyleSheet` struct to avoid
-  type mismatches in `if/else` expressions passed to `.style()`
+- Widgets are stateless functions (`button(content)`, `text_input(placeholder, value)`)
+  — no per-widget `button::State`/`TextInput::State` fields to thread through
+- `view(&self)` — takes `&self`, not `&mut self`; state lives in `Message`-driven updates
+- `WindowState::from_size(LogicalSize::new(w, h))` — not `IcedState::from_size(w, h)`
+- Fonts are resolved by `(family, weight, style)` against bytes registered via
+  `Application::font()` — the family name must match the font file's own `name`
+  table (id 1), not an arbitrary label (see `src/editor.rs` Fonts section)
+- `ProcessContext::set_parameter()` **is** implemented — via the fork's patch — used
+  only inside `process()`: momentary-trigger self-reset and telemetry write-back to the
+  host (see Inter-Thread table). UI→audio stays on `ParamSetter` as before
+- `vst-runtime` harness drives params/state through the fork's `_internal_set_normalized_value`
+  / `_internal_update_smoother` setters (upstream renamed these from the old `pub(crate)` names)
 
 ## Commit Standards
 

@@ -26,7 +26,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering},
 };
 
-use nih_plug::prelude::*;
+use nice_plug::prelude::*;
 use parking_lot::Mutex;
 
 mod editor;
@@ -445,7 +445,7 @@ impl Plugin for EtherTap {
         {
             let ins = layout.main_input_channels.map_or(0, |n| n.get());
             let outs = layout.main_output_channels.map_or(0, |n| n.get());
-            nih_log!("EtherTap standalone — audio I/O: {ins} in / {outs} out");
+            nice_log!("EtherTap standalone — audio I/O: {ins} in / {outs} out");
 
             // Automated test hook: ETHERTAP_TEST_PORT=<port> pre-sets the
             // target to 127.0.0.1:<port> and triggers an immediate connect,
@@ -1294,7 +1294,7 @@ impl Vst3Plugin for EtherTap {
         &[Vst3SubCategory::Fx, Vst3SubCategory::Tools];
 }
 
-nih_export_vst3!(EtherTap);
+nice_export_vst3!(EtherTap);
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
@@ -1345,8 +1345,8 @@ mod tests {
     }
 
     impl ProcessContext<EtherTap> for MockProcessContext {
-        fn plugin_api(&self) -> nih_plug::context::PluginApi {
-            nih_plug::context::PluginApi::Vst3
+        fn plugin_api(&self) -> nice_plug::context::PluginApi {
+            nice_plug::context::PluginApi::Vst3
         }
         fn execute_background(&self, _task: ()) {}
         fn execute_gui(&self, _task: ()) {}
@@ -1655,7 +1655,7 @@ mod tests {
             .unwrap_or_else(|| panic!("no parameter with id {id}"));
         // SAFETY: `ptr` points into `plugin.params`, which outlives this call.
         unsafe {
-            ptr.set_normalized_value(normalized);
+            let _ = ptr._internal_set_normalized_value(normalized);
         }
     }
 

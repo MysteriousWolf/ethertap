@@ -101,12 +101,11 @@ This re-anchors the hardware delay buffer and eliminates phase drift.
 
 ## Building from source
 
-**Prerequisites:** Rust (stable), Git, `patch`
+**Prerequisites:** Rust (stable), Git
 
 ```sh
 git clone <repo-url>
 cd ethertap
-./scripts/setup.sh                             # vendor baseview, apply patches
 cargo run -p xtask -- bundle ethertap --release
 # → target/bundled/ethertap.vst3
 ```

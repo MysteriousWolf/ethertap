@@ -1,8 +1,0 @@
-[package]
-name = "copypasta"
-version = "0.7.1"
-edition = "2021"
-description = "copypasta shim — wraps arboard (objc2) to replace block-based 0.7.1 for iced_baseview"
-
-[dependencies]
-arboard = "3"

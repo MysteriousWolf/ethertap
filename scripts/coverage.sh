@@ -72,7 +72,7 @@ OPEN_FLAG=()
 #   mock-suite/src/main  — CLI entry point (binary main); not library logic
 #   mock-suite/src/clock_sink — Unix-only virtual MIDI port (OS device driver
 #                               layer); the equivalent loopback_sink IS tested
-IGNORE_REGEX='src/editor\.rs|src/midi_hw\.rs|mock-suite/src/tui\.rs|mock-suite/src/main\.rs|mock-suite/src/clock_sink\.rs|vendor/'
+IGNORE_REGEX='src/editor\.rs|src/midi_hw\.rs|mock-suite/src/tui\.rs|mock-suite/src/main\.rs|mock-suite/src/clock_sink\.rs'
 
 # Filter the benign "N functions have mismatched data" llvm-cov warning.
 # Root cause: tests/common/mod.rs is compiled into multiple test binaries and

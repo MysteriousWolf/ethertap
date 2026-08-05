@@ -204,13 +204,11 @@ pub mod harness_util {
         t.time_sig_denominator = Some(4);
         let pos_beats = pos_samples as f64 / 44_100.0 / 60.0 * tempo;
         let bar_number = (pos_beats / 4.0).floor() as i32;
-        t.set_song_position(
-            Some(pos_samples),
-            Some(pos_beats),
-            Some(bar_number as f64 * 4.0),
-            Some(bar_number),
-            None,
-        );
+        t.pos_samples = Some(pos_samples);
+        t.pos_beats = Some(pos_beats);
+        t.bar_start_pos_beats = Some(bar_number as f64 * 4.0);
+        t.bar_number = Some(bar_number);
+        t.loop_range_beats = None;
         let mut io = vec![vec![0.0f32; 256]; 2];
         let _ = harness.process(&mut io, t, &[]);
     }
@@ -323,13 +321,11 @@ pub mod harness_util {
         let bar_len_qn = ts_num as f64 * (4.0 / ts_den as f64);
         let bar_number = (pos_beats / bar_len_qn).floor() as i32;
         let bar_start = bar_number as f64 * bar_len_qn;
-        t.set_song_position(
-            Some(pos_samples),
-            Some(pos_beats),
-            Some(bar_start),
-            Some(bar_number),
-            loop_range,
-        );
+        t.pos_samples = Some(pos_samples);
+        t.pos_beats = Some(pos_beats);
+        t.bar_start_pos_beats = Some(bar_start);
+        t.bar_number = Some(bar_number);
+        t.loop_range_beats = loop_range;
         let mut io = vec![vec![0.0f32; 256]; 2];
         let _ = harness.process(&mut io, t, &[]);
     }
