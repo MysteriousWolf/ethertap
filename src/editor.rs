@@ -287,6 +287,50 @@ fn vgap(px: f32) -> Space {
     Space::new().height(px)
 }
 
+// ─── Bounded-width MIDI clock stat formatters ────────────────────────────────
+// Real hardware jitter tops out around 10ms; the dummy/mock backend used in
+// tests can emit pathological 6-digit µs jitter. Formatting raw µs/ms values
+// with a fixed-width spec (`{:5}`) only pads the *minimum* width — it doesn't
+// cap the maximum, so a 6-digit value still overflows the row and wraps/clips
+// past the 360px plugin frame. These formatters instead cap the *maximum*
+// rendered width by changing units or falling back to a literal once a value
+// would otherwise grow unbounded.
+
+/// Bounded-width jitter-value formatter (input in µs).
+///
+/// Width budget (never exceeded):
+/// - `us < 10_000`   → `"{:4}µs"`  → 4 digits + "µs"      = 6 chars max
+/// - `us < 99_500`   → `"{:4.1}ms"` → up to "99.4ms"      = 6 chars max
+/// - `us >= 99_500`  → literal `">99ms"`                  = 5 chars
+///
+/// The 99_500 cutoff (rather than 100_000) avoids the case where `{:4.1}`
+/// rounding pushes "99.95ms"-ish inputs to "100.0ms" (5-char number, blowing
+/// the 4-char budget).
+fn format_jitter_us(us: u32) -> String {
+    if us < 10_000 {
+        format!("{us:4}\u{b5}s")
+    } else if us < 99_500 {
+        format!("{:4.1}ms", us as f32 / 1_000.0)
+    } else {
+        ">99ms".to_string()
+    }
+}
+
+/// Bounded-width average-interval formatter (input already in ms).
+///
+/// Width budget: `"{:5.1}"` is 5 chars for any value below 1000.0; MIDI
+/// clock intervals realistically never approach 1s (that would mean the
+/// clock stalled outright), but the pathological dummy backend can still
+/// produce huge intervals, so values ≥1000ms fall back to the 5-char
+/// literal `" >999"` to keep the same bound.
+fn format_avg_ms(ms: f32) -> String {
+    if ms < 1000.0 {
+        format!("{ms:5.1}")
+    } else {
+        " >999".to_string()
+    }
+}
+
 // ─── Button stylesheet ───────────────────────────────────────────────────────
 
 #[derive(Clone, Copy)]
@@ -1734,10 +1778,21 @@ impl EtherTapEditor {
             .align_y(Alignment::Center);
 
         // ── Telemetry (host + mixer on one line) ──────────────────────────
+        // Realistic BPM range is 000.00-999.99, i.e. the numeric part never
+        // exceeds 6 chars — `{:>6.2}` fits it exactly with zero wasted
+        // padding (the old `{:>7.2}` always wasted at least 1 leading-space
+        // column). The disconnected placeholder is padded to that same
+        // 6-char numeric width rather than its own wider literal — an
+        // oversized placeholder was quietly eating into the row's tight
+        // width budget even while idle. The trailing " BPM" unit suffix is
+        // dropped entirely: at cosmic-text's rendered width the full row
+        // (both halves + the trailing sync badge) doesn't fit the 360px
+        // frame with it present, and "Host"/"Mixer" already establish that
+        // these are BPM readouts.
         let host_bpm_str = if host_bpm_f > 0.0 {
-            format!("{host_bpm_f:>7.2} BPM")
+            format!("{host_bpm_f:>6.2}")
         } else {
-            "     --- BPM".into()
+            "   ---".to_string()
         };
         let host_float_str = if host_bpm_f > 0.0 {
             format!("{host_float:.4}")
@@ -1745,9 +1800,9 @@ impl EtherTapEditor {
             "------".into()
         };
         let hw_bpm_str = if has_hw {
-            format!("{:>7.2} BPM", hw_bpm)
+            format!("{hw_bpm:>6.2}")
         } else {
-            "     --- BPM".into()
+            "   ---".to_string()
         };
         let hw_float_str = if has_hw {
             format!("{hw_float:.4}")
@@ -1781,28 +1836,35 @@ impl EtherTapEditor {
         let telem_row = Row::new()
             .push(t!("Host ").size(11).color(PALETTE.text_dim))
             .push(t!(host_bpm_str).size(11).color(PALETTE.text))
-            .push(hgap(4.0))
+            .push(hgap(2.0))
             .push(
                 t!(icon::ARROW_RIGHT)
                     .size(13)
                     .font(SOLAR_BOLD)
                     .color(PALETTE.text_dim),
             )
-            .push(hgap(4.0))
+            .push(hgap(2.0))
             .push(t!(host_float_str).size(11).color(PALETTE.text))
+            // Guaranteed minimum separation between the halves: a plain
+            // `Length::Fill` spacer collapses to 0px once the two halves'
+            // content over-budgets the frame, leaving "Mixer" glued to the
+            // float above it with no breathing room. The fixed `hgap` below
+            // survives that collapse; the `Fill` after it still absorbs any
+            // leftover space when the halves fit comfortably.
+            .push(hgap(4.0))
             .push(Space::new().width(Length::Fill))
             .push(t!("Mixer ").size(11).color(PALETTE.text_dim))
             .push(t!(hw_bpm_str).size(11).color(PALETTE.text))
-            .push(hgap(4.0))
+            .push(hgap(2.0))
             .push(
                 t!(icon::ARROW_LEFT)
                     .size(13)
                     .font(SOLAR_BOLD)
                     .color(PALETTE.text_dim),
             )
-            .push(hgap(4.0))
+            .push(hgap(2.0))
             .push(t!(hw_float_str).size(11).color(PALETTE.text))
-            .push(hgap(10.0))
+            .push(hgap(4.0))
             .push(sync_badge)
             .align_y(Alignment::Center);
 
@@ -1962,16 +2024,15 @@ impl EtherTapEditor {
         // ── MIDI clock timing stats (jitter percentiles) ──────────────────
         //
         // Always rendered — shows placeholder dashes until 48 samples (2 beats)
-        // are collected.  A single monospace string guarantees pixel-perfect
-        // column alignment regardless of how the numbers change width.
+        // are collected.
         //
-        // Format (size 8, MONO_FONT, right-aligned):
-        //   "avg  20.8ms  p50±    0µs  p95±  450µs  p99± 1234µs  max± 5678µs"
-        //   "avg   --.-ms  p50±   --µs  p95±   --µs  p99±   --µs  max±   --µs"
-        //
-        // Field widths (fixed, guaranteed by {:5.1} / {:5}):
-        //   avg value  = 5 chars + "ms"
-        //   jitter val = 5 chars + "µs"
+        // Realistic hardware jitter tops out around 10ms (10281µs seen on
+        // real devices); the dummy/mock backend used for testing can emit
+        // pathological 6-digit µs jitter.  Fixed-width `{:5}` formatting of
+        // raw µs values wraps/clips the row once a field grows past 5
+        // digits, so each field is rendered through `format_jitter_us` /
+        // `format_avg_ms` below, which bound the rendered width instead of
+        // just padding it — see their doc comments for the exact budget.
         let clock_stats_row: Element<'_, Message> = {
             let stats = data.midi_clock_stats.load();
             let has_data = clock_on && stats.sample_n >= 48;
@@ -1996,62 +2057,58 @@ impl EtherTapEditor {
                 PALETTE.ok
             };
 
-            // Pre-format every field to a fixed character count so that the
-            // monospace Row never shifts even as values change magnitude.
-            // avg: {:5.1} → "  8.3" … "125.0"  (5 chars)
-            // jitter: {:5} → "    0" … "99999"  (5 chars)
             let avg_str = if has_data {
-                format!("{:5.1}", stats.interval_us as f32 / 1_000.0)
+                format_avg_ms(stats.interval_us as f32 / 1_000.0)
             } else {
                 " --.-".to_string()
             };
             let p50_str = if has_data {
-                format!("{:5}", stats.p50_us)
+                format_jitter_us(stats.p50_us)
             } else {
                 "   --".to_string()
             };
             let p95_str = if has_data {
-                format!("{:5}", stats.p95_us)
+                format_jitter_us(stats.p95_us)
             } else {
                 "   --".to_string()
             };
             let p99_str = if has_data {
-                format!("{:5}", stats.p99_us)
+                format_jitter_us(stats.p99_us)
             } else {
                 "   --".to_string()
             };
             let max_str = if has_data {
-                format!("{:5}", stats.max_us)
+                format_jitter_us(stats.max_us)
             } else {
                 "   --".to_string()
             };
 
             // Split into dim labels + variably-coloured values so p99/max
             // can turn yellow/red while keeping a single monospace typeface.
-            // Every string literal here has a fixed char count; values are
-            // pre-formatted above to the same width, so columns are stable.
+            // Unlike the old layout, the unit ("ms"/"µs") now lives *inside*
+            // each jitter value string (it can switch per-field), so the
+            // separator labels below carry no trailing unit of their own.
             Row::new()
                 .push(midi_clk_btn)
                 .push(Space::new().width(Length::Fill))
                 .push(t!("avg ").size(9).color(PALETTE.text_dim))
                 .push(t!(avg_str).size(9).color(PALETTE.text_dim))
-                .push(t!("ms  p50\u{b1}").size(9).color(PALETTE.text_dim))
+                .push(t!("ms p50\u{b1}").size(9).color(PALETTE.text_dim))
                 .push(t!(p50_str).size(9).color(if has_data {
                     PALETTE.ok
                 } else {
                     PALETTE.text_dim
                 }))
-                .push(t!("\u{b5}s  p95\u{b1}").size(9).color(PALETTE.text_dim))
+                .push(t!(" p95\u{b1}").size(9).color(PALETTE.text_dim))
                 .push(t!(p95_str).size(9).color(if has_data {
                     PALETTE.ok
                 } else {
                     PALETTE.text_dim
                 }))
-                .push(t!("\u{b5}s  p99\u{b1}").size(9).color(PALETTE.text_dim))
+                .push(t!(" p99\u{b1}").size(9).color(PALETTE.text_dim))
                 .push(t!(p99_str).size(9).color(p99_color))
-                .push(t!("\u{b5}s  max\u{b1}").size(9).color(PALETTE.text_dim))
+                .push(t!(" max\u{b1}").size(9).color(PALETTE.text_dim))
                 .push(t!(max_str).size(9).color(max_color))
-                .push(t!("\u{b5}s").size(9).color(PALETTE.text_dim))
                 .align_y(Alignment::Center)
                 .into()
         };
@@ -2655,5 +2712,61 @@ fn lighten(style: button::Style, delta: f32) -> button::Style {
             other => other,
         }),
         ..style
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // format_jitter_us must never render past its documented 7-char budget,
+    // regardless of how pathological the input (the mock/dummy MIDI backend
+    // used in testing can emit 6-digit µs jitter that the real formatter
+    // used to render as an unbounded 5-6 digit string, wrapping/clipping the
+    // MIDI stats row past the 360px plugin frame).
+    #[test]
+    fn format_jitter_us_stays_within_width_budget() {
+        for us in [
+            0u32, 1, 128, 9_999, 10_000, 50_000, 99_499, 99_500, 250_000, 999_999,
+        ] {
+            let s = format_jitter_us(us);
+            assert!(
+                s.chars().count() <= 7,
+                "format_jitter_us({us}) = {s:?} ({} chars) exceeds 7-char budget",
+                s.chars().count()
+            );
+        }
+    }
+
+    #[test]
+    fn format_jitter_us_uses_expected_tiers() {
+        assert_eq!(format_jitter_us(0), "   0\u{b5}s");
+        assert_eq!(format_jitter_us(507), " 507\u{b5}s");
+        assert_eq!(format_jitter_us(9_999), "9999\u{b5}s");
+        assert_eq!(format_jitter_us(10_281), "10.3ms");
+        assert_eq!(format_jitter_us(100_000), ">99ms");
+        assert_eq!(format_jitter_us(999_999), ">99ms");
+    }
+
+    // format_avg_ms must never render past its documented 5-char budget even
+    // for pathological (dummy-backend) input intervals.
+    #[test]
+    fn format_avg_ms_stays_within_width_budget() {
+        for ms in [0.0f32, 8.3, 20.9, 999.9, 1_000.0, 171_900.0] {
+            let s = format_avg_ms(ms);
+            assert!(
+                s.chars().count() <= 5,
+                "format_avg_ms({ms}) = {s:?} ({} chars) exceeds 5-char budget",
+                s.chars().count()
+            );
+        }
+    }
+
+    #[test]
+    fn format_avg_ms_uses_expected_tiers() {
+        assert_eq!(format_avg_ms(20.9), " 20.9");
+        assert_eq!(format_avg_ms(999.9), "999.9");
+        assert_eq!(format_avg_ms(1_000.0), " >999");
+        assert_eq!(format_avg_ms(171_900.0), " >999");
     }
 }
