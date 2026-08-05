@@ -315,6 +315,7 @@ impl Default for EtherTap {
             midi_bridge_connecting.clone(),
             midi_clock_stats.clone(),
             initial_ppq,
+            params.midi_out_device.clone(),
         );
         std::thread::Builder::new()
             .name("ethertap-midi-clk".into())
@@ -1000,9 +1001,13 @@ impl Plugin for EtherTap {
                         self.standalone_tick_samples += buf_len as f64;
                         while self.standalone_tick_samples >= tick_interval_f {
                             let on_beat = self.midi_clock_pulse_count == 0;
-                            let _ = self
+                            if self
                                 .midi_clock_tx
-                                .try_send(midi_clock::ClockMsg::Tick { on_beat });
+                                .try_send(midi_clock::ClockMsg::Tick { on_beat })
+                                .is_err()
+                            {
+                                self.midi_clock_drop_count.fetch_add(1, Ordering::Relaxed);
+                            }
                             self.standalone_tick_samples -= tick_interval_f;
                             self.midi_clock_pulse_count += 1;
                             if self.midi_clock_pulse_count >= midi_ppq {
@@ -1474,6 +1479,47 @@ mod tests {
         assert_eq!(
             pos, 0.0,
             "Stop-while-paused must still zero position, got {pos}"
+        );
+    }
+
+    /// The DAW-transport clock path counts dropped ticks via
+    /// `midi_clock_drop_count` (see the `NetworkStatus`-adjacent tick loop
+    /// above); the standalone accumulator path silently discarded
+    /// `try_send` failures with `let _ = ...`, leaving the drop counter blind
+    /// to standalone overflow. Forces the bounded(256) clock channel to
+    /// overflow (no receiver draining it) in a single oversized buffer and
+    /// asserts the drop counter reflects it — encodes WHY both tick paths
+    /// must count drops identically: a silently-blind counter would hide a
+    /// real overflow from the editor's telemetry.
+    #[cfg(feature = "standalone")]
+    #[test]
+    fn standalone_tick_path_counts_channel_overflow_drops() {
+        let mut plugin = EtherTap::default();
+        plugin.standalone_playing.store(true, Ordering::Relaxed);
+        plugin
+            .standalone_bpm
+            .store(120.0f32.to_bits(), Ordering::Relaxed);
+        let mut ctx = MockProcessContext::new(120.0, true);
+
+        // At 44100 Hz / 120 BPM / 24 PPQ, one tick every 918.75 samples.
+        // 300 ticks' worth comfortably overflows the bounded(256) channel
+        // since nothing drains it in this unit test.
+        let tick_interval_samples = 918.75;
+        let num_samples = (320.0 * tick_interval_samples) as usize;
+        let mut channel_data = vec![0.0f32; num_samples];
+        let mut buffer = Buffer::default();
+        unsafe {
+            buffer.set_slices(num_samples, |slices| {
+                *slices = vec![&mut channel_data[..]];
+            });
+        }
+        let mut aux = make_aux();
+
+        plugin.process(&mut buffer, &mut aux, &mut ctx);
+
+        assert!(
+            plugin.midi_clock_drop_count.load(Ordering::Relaxed) > 0,
+            "standalone tick path must count channel-overflow drops, not silently discard them"
         );
     }
 

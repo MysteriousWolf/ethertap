@@ -171,6 +171,10 @@ pub struct MidiClockWorker {
     pub clock_stats: Arc<AtomicClockStats>,
     /// Pulses per quarter note — used to gate stats updates at beat boundaries.
     pub midi_ppq: u8,
+    /// GUI-visible device selection — write-through target for auto-connect
+    /// picks, mirroring the network worker's `last_device` pattern (see
+    /// CLAUDE.md). Read by the editor's Select button / device picker.
+    midi_out_device: Arc<parking_lot::Mutex<Option<String>>>,
 }
 
 impl MidiClockWorker {
@@ -186,6 +190,7 @@ impl MidiClockWorker {
         bridge_connecting: Arc<AtomicBool>,
         clock_stats: Arc<AtomicClockStats>,
         midi_ppq: u8,
+        midi_out_device: Arc<parking_lot::Mutex<Option<String>>>,
     ) -> Self {
         Self {
             enabled,
@@ -198,6 +203,7 @@ impl MidiClockWorker {
             bridge_connecting,
             clock_stats,
             midi_ppq,
+            midi_out_device,
         }
     }
 
@@ -672,7 +678,8 @@ fn handle_port_scan(
             "[EtherTap] handle_port_scan: auto_connect ON, no device selected — \
                     auto-picking '{picked}'"
         );
-        *current_device = Some(picked);
+        *current_device = Some(picked.clone());
+        *worker.midi_out_device.lock() = Some(picked);
         backoff.reset();
     }
 
@@ -828,6 +835,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicClockStats::default()),
             24,
+            Arc::new(parking_lot::Mutex::new(None)),
         )
     }
 
@@ -863,6 +871,11 @@ mod tests {
             current_device,
             Some("Fake Device 1".to_string()),
             "auto_connect ON + no device selected must auto-pick the first available device"
+        );
+        assert_eq!(
+            worker.midi_out_device.lock().as_deref(),
+            Some("Fake Device 1"),
+            "auto-pick must write through to midi_out_device so the GUI Select button reflects it"
         );
     }
 
@@ -1267,6 +1280,7 @@ mod tests {
             bridge_connecting.clone(),
             Arc::new(AtomicClockStats::default()),
             24,
+            Arc::new(parking_lot::Mutex::new(None)),
         );
 
         let bc = bridge_connected.clone();
@@ -1326,6 +1340,7 @@ mod tests {
             bridge_connecting.clone(),
             Arc::new(AtomicClockStats::default()),
             24,
+            Arc::new(parking_lot::Mutex::new(None)),
         );
 
         let bc = bridge_connected.clone();
