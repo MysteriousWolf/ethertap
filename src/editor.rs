@@ -741,8 +741,8 @@ pub fn create(data: Arc<EditorData>) -> Option<Box<dyn Editor>> {
             .theme(EtherTapEditor::theme)
             .subscription(EtherTapEditor::subscription)
             .font(SOLAR_BOLD_BYTES)
-            .font(LOGO_FONT_BYTES)
             .font(MONO_FONT_BYTES)
+            .font(LOGO_FONT_BYTES)
             .run()
         },
     )
@@ -1779,30 +1779,30 @@ impl EtherTapEditor {
         };
 
         let telem_row = Row::new()
-            .push(t!("Host ").size(10).color(PALETTE.text_dim))
-            .push(t!(host_bpm_str).size(10).color(PALETTE.text))
-            .push(hgap(3.0))
+            .push(t!("Host ").size(11).color(PALETTE.text_dim))
+            .push(t!(host_bpm_str).size(11).color(PALETTE.text))
+            .push(hgap(4.0))
             .push(
                 t!(icon::ARROW_RIGHT)
-                    .size(12)
+                    .size(13)
                     .font(SOLAR_BOLD)
                     .color(PALETTE.text_dim),
             )
-            .push(hgap(3.0))
-            .push(t!(host_float_str).size(10).color(PALETTE.text))
+            .push(hgap(4.0))
+            .push(t!(host_float_str).size(11).color(PALETTE.text))
             .push(Space::new().width(Length::Fill))
-            .push(t!("Mixer ").size(10).color(PALETTE.text_dim))
-            .push(t!(hw_bpm_str).size(10).color(PALETTE.text))
-            .push(hgap(3.0))
+            .push(t!("Mixer ").size(11).color(PALETTE.text_dim))
+            .push(t!(hw_bpm_str).size(11).color(PALETTE.text))
+            .push(hgap(4.0))
             .push(
                 t!(icon::ARROW_LEFT)
-                    .size(12)
+                    .size(13)
                     .font(SOLAR_BOLD)
                     .color(PALETTE.text_dim),
             )
-            .push(hgap(3.0))
-            .push(t!(hw_float_str).size(10).color(PALETTE.text))
-            .push(hgap(6.0))
+            .push(hgap(4.0))
+            .push(t!(hw_float_str).size(11).color(PALETTE.text))
+            .push(hgap(10.0))
             .push(sync_badge)
             .align_y(Alignment::Center);
 
@@ -2033,32 +2033,32 @@ impl EtherTapEditor {
             Row::new()
                 .push(midi_clk_btn)
                 .push(Space::new().width(Length::Fill))
-                .push(t!("avg").size(7).color(PALETTE.text_dim))
-                .push(t!(avg_str).size(7).color(PALETTE.text_dim))
-                .push(t!("ms p50\u{b1}").size(7).color(PALETTE.text_dim))
-                .push(t!(p50_str).size(7).color(if has_data {
+                .push(t!("avg ").size(9).color(PALETTE.text_dim))
+                .push(t!(avg_str).size(9).color(PALETTE.text_dim))
+                .push(t!("ms  p50\u{b1}").size(9).color(PALETTE.text_dim))
+                .push(t!(p50_str).size(9).color(if has_data {
                     PALETTE.ok
                 } else {
                     PALETTE.text_dim
                 }))
-                .push(t!("\u{b5}s p95\u{b1}").size(7).color(PALETTE.text_dim))
-                .push(t!(p95_str).size(7).color(if has_data {
+                .push(t!("\u{b5}s  p95\u{b1}").size(9).color(PALETTE.text_dim))
+                .push(t!(p95_str).size(9).color(if has_data {
                     PALETTE.ok
                 } else {
                     PALETTE.text_dim
                 }))
-                .push(t!("\u{b5}s p99\u{b1}").size(7).color(PALETTE.text_dim))
-                .push(t!(p99_str).size(7).color(p99_color))
-                .push(t!("\u{b5}s max\u{b1}").size(7).color(PALETTE.text_dim))
-                .push(t!(max_str).size(7).color(max_color))
-                .push(t!("\u{b5}s").size(7).color(PALETTE.text_dim))
+                .push(t!("\u{b5}s  p99\u{b1}").size(9).color(PALETTE.text_dim))
+                .push(t!(p99_str).size(9).color(p99_color))
+                .push(t!("\u{b5}s  max\u{b1}").size(9).color(PALETTE.text_dim))
+                .push(t!(max_str).size(9).color(max_color))
+                .push(t!("\u{b5}s").size(9).color(PALETTE.text_dim))
                 .align_y(Alignment::Center)
                 .into()
         };
 
         // ── Rate Sync row ─────────────────────────────────────────────────
         let rate_row = Row::new()
-            .push(t!("RATE").size(8).color(PALETTE.text_dim))
+            .push(t!("RATE").size(9).color(PALETTE.text_dim))
             .push(hgap(2.0))
             .push(sync_btn(
                 "Man",
@@ -2080,7 +2080,7 @@ impl EtherTapEditor {
             .push(hgap(2.0))
             .push(force_icon_btn(Message::ForceRateSync))
             .push(Space::new().width(Length::Fill))
-            .push(t!("PHASE").size(8).color(PALETTE.text_dim))
+            .push(t!("PHASE").size(9).color(PALETTE.text_dim))
             .push(hgap(2.0))
             .push(sync_btn(
                 "Man",
