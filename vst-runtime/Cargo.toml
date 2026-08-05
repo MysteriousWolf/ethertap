@@ -3,6 +3,7 @@ name = "vst-runtime"
 version = "0.1.0"
 edition = "2024"
 description = "Headless in-process driver for Rust-native nice_plug::Plugin impls — directed test automation, zero IPC"
+publish = false
 
 [dependencies]
 nice-plug = { git = "https://github.com/MysteriousWolf/nice-plug", branch = "ethertap", features = ["vst3"] }

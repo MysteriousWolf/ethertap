@@ -10,6 +10,7 @@ use std::sync::{
 };
 
 use crossbeam_channel::Sender;
+use nice_plug::{nice_log, nice_warn};
 
 /// Try to open `device_name` as a midir hardware MIDI output port.
 /// Returns `None` if no matching port is found or the connection fails.
@@ -17,7 +18,7 @@ pub(crate) fn try_hw_out(device_name: &str) -> Option<midir::MidiOutputConnectio
     let out = match midir::MidiOutput::new("EtherTap-PhysOut") {
         Ok(o) => o,
         Err(e) => {
-            log::warn!("[EtherTap] try_connect_out: MidiOutput::new failed: {e}");
+            nice_warn!("[EtherTap] try_connect_out: MidiOutput::new failed: {e}");
             return None;
         }
     };
@@ -28,17 +29,17 @@ pub(crate) fn try_hw_out(device_name: &str) -> Option<midir::MidiOutputConnectio
     {
         Some(p) => p,
         None => {
-            log::warn!("[EtherTap] try_connect_out: port '{device_name}' not found");
+            nice_warn!("[EtherTap] try_connect_out: port '{device_name}' not found");
             return None;
         }
     };
     match out.connect(&port, "EtherTap-PhysOut") {
         Ok(c) => {
-            log::info!("[EtherTap] try_connect_out: connected to '{device_name}'");
+            nice_log!("[EtherTap] try_connect_out: connected to '{device_name}'");
             Some(c)
         }
         Err(e) => {
-            log::warn!("[EtherTap] try_connect_out: connect to '{device_name}' failed: {e}");
+            nice_warn!("[EtherTap] try_connect_out: connect to '{device_name}' failed: {e}");
             None
         }
     }
@@ -56,7 +57,7 @@ pub(crate) fn try_hw_in(
     let inp = match MidiInput::new("EtherTap-PhysIn") {
         Ok(i) => i,
         Err(e) => {
-            log::warn!("[EtherTap] try_connect_in: MidiInput::new failed: {e}");
+            nice_warn!("[EtherTap] try_connect_in: MidiInput::new failed: {e}");
             return None;
         }
     };
@@ -67,7 +68,7 @@ pub(crate) fn try_hw_in(
     {
         Some(p) => p,
         None => {
-            log::warn!("[EtherTap] try_connect_in: port '{device_name}' not found");
+            nice_warn!("[EtherTap] try_connect_in: port '{device_name}' not found");
             return None;
         }
     };
@@ -82,11 +83,11 @@ pub(crate) fn try_hw_in(
         (),
     ) {
         Ok(c) => {
-            log::info!("[EtherTap] try_connect_in: connected input to '{device_name}'");
+            nice_log!("[EtherTap] try_connect_in: connected input to '{device_name}'");
             Some(c)
         }
         Err(e) => {
-            log::warn!("[EtherTap] try_connect_in: connect to '{device_name}' failed: {e}");
+            nice_warn!("[EtherTap] try_connect_in: connect to '{device_name}' failed: {e}");
             None
         }
     }

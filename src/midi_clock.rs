@@ -43,6 +43,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
+use nice_plug::{nice_error, nice_log, nice_trace, nice_warn};
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -216,7 +217,7 @@ impl MidiClockWorker {
         let output = match MidiOutput::new("EtherTap") {
             Ok(o) => Some(o),
             Err(e) => {
-                log::warn!("[EtherTap] MIDI clock: virtual port host init failed: {e}");
+                nice_warn!("[EtherTap] MIDI clock: virtual port host init failed: {e}");
                 None
             }
         };
@@ -301,7 +302,7 @@ fn set_realtime_priority() {
             THREAD_TIME_CONSTRAINT_POLICY_COUNT,
         );
         if ret != 0 {
-            log::warn!("[EtherTap] MIDI RT thread priority failed (kern={ret})");
+            nice_warn!("[EtherTap] MIDI RT thread priority failed (kern={ret})");
         }
     }
 }
@@ -356,7 +357,7 @@ fn run_worker(worker: MidiClockWorker, output: Option<midir::MidiOutput>) {
 
     set_realtime_priority();
 
-    log::info!(
+    nice_log!(
         "[EtherTap] MidiClockWorker starting: initial_device={:?}",
         worker.initial_device
     );
@@ -367,10 +368,10 @@ fn run_worker(worker: MidiClockWorker, output: Option<midir::MidiOutput>) {
         match output.create_virtual("EtherTap MIDI Clock") {
             Ok(c) => Some(c),
             Err(e) => {
-                log::error!("[EtherTap] MIDI clock: virtual port failed: {e:?}");
-                log::error!("[EtherTap] The port may already exist from a previous run.");
-                log::error!("[EtherTap] Try: killall CoreMIDI 2>/dev/null; or reboot.");
-                log::error!(
+                nice_error!("[EtherTap] MIDI clock: virtual port failed: {e:?}");
+                nice_error!("[EtherTap] The port may already exist from a previous run.");
+                nice_error!("[EtherTap] Try: killall CoreMIDI 2>/dev/null; or reboot.");
+                nice_error!(
                     "[EtherTap] MIDI clock will NOT be emitted until EtherTap is restarted."
                 );
                 None
@@ -400,13 +401,13 @@ fn run_worker(worker: MidiClockWorker, output: Option<midir::MidiOutput>) {
 
     // ── Initial physical device connection ────────────────────────────────────
     if let Some(name) = current_device.as_deref() {
-        log::info!("[EtherTap] run_worker: initial_device = {:?}", name);
+        nice_log!("[EtherTap] run_worker: initial_device = {:?}", name);
         phys_out = try_connect_out(name);
         if phys_out.is_some() {
             phys_in = try_connect_in(name, pass_tx.clone(), pass_drop_count.clone());
         }
     } else {
-        log::info!("[EtherTap] run_worker: no initial_device (user must select)");
+        nice_log!("[EtherTap] run_worker: no initial_device (user must select)");
     }
     worker
         .bridge_connected
@@ -523,13 +524,13 @@ fn run_worker(worker: MidiClockWorker, output: Option<midir::MidiOutput>) {
                                 last_send = Some(Instant::now());
                                 tick_count = tick_count.wrapping_add(1);
                                 if tick_count.is_multiple_of(DEBUG_LOG_INTERVAL_TICKS) {
-                                    log::debug!("[EtherTap] tick #{} to virtual port, enabled={}", tick_count, worker.enabled.load(Ordering::Relaxed));
+                                    nice_trace!("[EtherTap] tick #{} to virtual port, enabled={}", tick_count, worker.enabled.load(Ordering::Relaxed));
                                 }
                                 #[cfg(unix)]
                                 if let Some(ref mut vc) = virt_conn
                                     && vc.send(CLOCK_BYTE).is_err()
                                 {
-                                    log::warn!("[EtherTap] virtual port send failed — port may be disconnected");
+                                    nice_warn!("[EtherTap] virtual port send failed — port may be disconnected");
                                 }
                                 if let Some(ref mut out) = phys_out
                                     && out.send(CLOCK_BYTE).is_err()
@@ -546,7 +547,7 @@ fn run_worker(worker: MidiClockWorker, output: Option<midir::MidiOutput>) {
                     recv(pass_rx) -> msg => {
                         let drops = pass_drop_count.swap(0, Ordering::Relaxed);
                         if drops > 0 {
-                            log::warn!("[EtherTap] MIDI passthrough: {drops} byte(s) dropped (pass channel full)");
+                            nice_warn!("[EtherTap] MIDI passthrough: {drops} byte(s) dropped (pass channel full)");
                         }
                         if let Ok(bytes) = msg {
                             #[cfg(unix)]
@@ -561,7 +562,7 @@ fn run_worker(worker: MidiClockWorker, output: Option<midir::MidiOutput>) {
         // ── Device selection changed by editor ────────────────────────────
                     recv(worker.device_change_rx) -> dev => {
                         let Ok(new_device) = dev else { break };
-                        log::info!("[EtherTap] device_change_rx: {:?}", new_device.as_deref());
+                        nice_log!("[EtherTap] device_change_rx: {:?}", new_device.as_deref());
                         phys_in  = None;
                         phys_out = None;
                         current_device = new_device;
@@ -572,7 +573,7 @@ fn run_worker(worker: MidiClockWorker, output: Option<midir::MidiOutput>) {
                             if phys_out.is_some() {
                                 phys_in = try_connect_in(name, pass_tx.clone(), pass_drop_count.clone());
                                 if phys_in.is_none() {
-                                    log::warn!("[EtherTap] MIDI passthrough unavailable: \
+                                    nice_warn!("[EtherTap] MIDI passthrough unavailable: \
                                                 no input port matching '{name}'");
                                 }
                             }
@@ -649,7 +650,7 @@ fn handle_port_scan(
     worker: &MidiClockWorker,
 ) {
     if backoff.is_cooling_down() {
-        log::debug!("[EtherTap] handle_port_scan: backoff cooling down, skipping");
+        nice_trace!("[EtherTap] handle_port_scan: backoff cooling down, skipping");
         return;
     }
 
@@ -674,7 +675,7 @@ fn handle_port_scan(
         && !known_ports.is_empty()
     {
         let picked = known_ports[0].clone();
-        log::info!(
+        nice_log!(
             "[EtherTap] handle_port_scan: auto_connect ON, no device selected — \
                     auto-picking '{picked}'"
         );
@@ -685,7 +686,7 @@ fn handle_port_scan(
 
     if let Some(name) = current_device.as_deref() {
         let present = known_ports.iter().any(|p| p == name);
-        log::debug!(
+        nice_trace!(
             "[EtherTap] handle_port_scan: device={:?}, present={}, phys_out.is_some()={}",
             name,
             present,
@@ -693,7 +694,7 @@ fn handle_port_scan(
         );
 
         if present && phys_out.is_none() {
-            log::info!(
+            nice_log!(
                 "[EtherTap] handle_port_scan: attempting to connect to {:?}",
                 name
             );
@@ -703,7 +704,7 @@ fn handle_port_scan(
                 backoff.record_success();
                 *phys_in = try_connect_in(name, pass_tx.clone(), pass_drop_count.clone());
                 if phys_in.is_none() {
-                    log::warn!(
+                    nice_warn!(
                         "[EtherTap] MIDI passthrough unavailable: \
                                 no input port matching '{name}'"
                     );
@@ -739,7 +740,7 @@ fn handle_port_scan(
 /// port is registered.
 fn try_connect_out(device_name: &str) -> Option<PhysOutput> {
     if let Ok(tx) = midi_loopback::connect(device_name) {
-        log::info!("[EtherTap] try_connect_out: connected to loopback port '{device_name}'");
+        nice_log!("[EtherTap] try_connect_out: connected to loopback port '{device_name}'");
         return Some(PhysOutput::Loopback(tx));
     }
     crate::midi_hw::try_hw_out(device_name).map(PhysOutput::Hardware)
@@ -759,7 +760,7 @@ fn try_connect_in(
     drop_count: Arc<AtomicU32>,
 ) -> Option<midir::MidiInputConnection<()>> {
     if midi_loopback::connect(device_name).is_ok() {
-        log::info!(
+        nice_log!(
             "[EtherTap] try_connect_in: '{device_name}' is a loopback port — no input passthrough"
         );
         return None;

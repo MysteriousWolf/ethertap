@@ -67,7 +67,7 @@ OPEN_FLAG=()
 [[ $OPEN -eq 1 ]] && OPEN_FLAG=(--open)
 
 # Excluded from coverage — these surfaces have no headless test path:
-#   src/editor.rs        — nih-plug-iced GUI rendering; no headless path exists
+#   src/editor.rs        — nice-plug-iced GUI rendering; no headless path exists
 #   mock-suite/src/tui   — ratatui TUI rendering; widget impl blocks are UI-only
 #   mock-suite/src/main  — CLI entry point (binary main); not library logic
 #   mock-suite/src/clock_sink — Unix-only virtual MIDI port (OS device driver

@@ -1152,7 +1152,6 @@ dependencies = [
  "criterion",
  "crossbeam-channel",
  "if-addrs",
- "log",
  "midi-loopback",
  "midir",
  "mock-suite",

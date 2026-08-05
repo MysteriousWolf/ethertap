@@ -19,6 +19,7 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
+use nice_plug::{nice_log, nice_trace, nice_warn};
 use parking_lot::Mutex;
 use rosc::{OscMessage, OscPacket, OscType, decoder};
 
@@ -189,7 +190,7 @@ impl ScanPublisher {
             if let Some((generation, expected)) = guard
                 && generation.load(Ordering::Acquire) != expected
             {
-                log::debug!("[EtherTap] scan: generation changed, discarding stale results");
+                nice_trace!("[EtherTap] scan: generation changed, discarding stale results");
                 return None;
             }
             merge_devices(&mut list, devices.iter().cloned());
@@ -215,7 +216,7 @@ impl ScanPublisher {
         };
         self.scan_health.store(health as u8, Ordering::Relaxed);
 
-        log::debug!(
+        nice_trace!(
             "[EtherTap] scan: {} iface(s), {} probe(s), {} reply(ies) → {} device(s), health {health:?}",
             stats.ifaces(),
             stats.probes,
@@ -223,7 +224,7 @@ impl ScanPublisher {
             devices.len(),
         );
         if health == ScanHealth::NoReplies {
-            log::warn!(
+            nice_warn!(
                 "[EtherTap] {empty_run} consecutive scans probed {} interface(s) and got no \
                  reply. If a console is powered on and cabled, the probes are most likely \
                  being discarded — on macOS check the host application's Local Network \
@@ -532,7 +533,7 @@ impl NetworkWorker {
                     if self.socket.is_none() && !self.rebind() {
                         // Bind failed — count as a connection attempt failure so
                         // exponential backoff applies instead of spinning at 10 ms.
-                        log::debug!(
+                        nice_trace!(
                             "[EtherTap] UDP rebind failed — backoff {}ms",
                             self.backoff.next_delay_ms()
                         );
@@ -580,7 +581,7 @@ impl NetworkWorker {
                 // Count as a failure so the auto-resume throttle backs off
                 // instead of retrying an unparseable address at loop cadence.
                 self.backoff.record_failure();
-                log::warn!("[EtherTap] invalid target: {ip}:{port}");
+                nice_warn!("[EtherTap] invalid target: {ip}:{port}");
             }
         }
     }
@@ -613,7 +614,7 @@ impl NetworkWorker {
         }
         self.last_auto_attempt = Some(Instant::now());
         self.target_from_auto = true;
-        log::info!("[EtherTap] auto_reconnect: resuming last target {ip}:{port}");
+        nice_log!("[EtherTap] auto_reconnect: resuming last target {ip}:{port}");
         self.connect(ip, port);
     }
 
@@ -791,7 +792,7 @@ impl NetworkWorker {
                     let expected = self.last_device.lock().clone();
                     let known = !expected.0.is_empty() || !expected.1.is_empty();
                     if known && (expected.0 != name || expected.1 != model) {
-                        log::warn!(
+                        nice_warn!(
                             "[EtherTap] auto_reconnect: expected {expected:?}, got \
                              ({name:?}, {model:?}) — rescanning for the device"
                         );
@@ -920,7 +921,7 @@ impl NetworkWorker {
         // launched before DHCP finished doesn't sit out a 30 s interval.
         let ifaces_changed = stats.addrs != self.last_iface_set;
         if ifaces_changed {
-            log::info!(
+            nice_log!(
                 "[EtherTap] discovery: interfaces changed → {:?}",
                 stats.addrs
             );
@@ -960,7 +961,7 @@ impl NetworkWorker {
                 (self.discovery_interval * 2).min(DISCOVERY_INTERVAL_MAX)
             };
             if identity_known {
-                log::debug!(
+                nice_trace!(
                     "[EtherTap] discovery: {expected:?} not found ({} device(s) seen)",
                     devices.len()
                 );
@@ -983,7 +984,7 @@ impl NetworkWorker {
             return;
         }
 
-        log::info!(
+        nice_log!(
             "[EtherTap] discovery: adopting {} at {}:{}",
             dev.display_name(),
             dev.ip,
@@ -1043,7 +1044,7 @@ impl NetworkWorker {
             };
 
             if sock.send_to(&osc::query_fx_type(slot), target).is_err() {
-                log::warn!("[EtherTap] audit: failed to send slot-{slot} query");
+                nice_warn!("[EtherTap] audit: failed to send slot-{slot} query");
                 continue;
             }
             let mut buf = [0u8; 256];
@@ -1063,13 +1064,13 @@ impl NetworkWorker {
         }
 
         if interrupted {
-            log::info!(
+            nice_log!(
                 "[EtherTap] audit_slots: interrupted (disconnect mid-audit), discarding partial results"
             );
             return;
         }
 
-        log::info!("[EtherTap] FX slot audit:");
+        nice_log!("[EtherTap] FX slot audit:");
         for slot in 1u8..=8 {
             match slot_types[(slot - 1) as usize] {
                 Some(type_id) => {
@@ -1080,12 +1081,12 @@ impl NetworkWorker {
                     } else {
                         ""
                     };
-                    log::info!("  Slot {slot}: {short}  ({long}){tag}");
+                    nice_log!("  Slot {slot}: {short}  ({long}){tag}");
                 }
-                None => log::info!("  Slot {slot}: no response"),
+                None => nice_log!("  Slot {slot}: no response"),
             }
         }
-        log::info!("  Compatible: {:?}  Occupied: {:?}", compatible, occupied);
+        nice_log!("  Compatible: {:?}  Occupied: {:?}", compatible, occupied);
 
         // Write atomically — no allocation or lock on the audio thread.
         // slot_types stores each element individually; i32::MIN = not yet queried.
@@ -1353,7 +1354,7 @@ impl NetworkWorker {
                 true
             }
             Err(e) => {
-                log::warn!("[EtherTap] failed to bind UDP socket: {e}");
+                nice_warn!("[EtherTap] failed to bind UDP socket: {e}");
                 false
             }
         }
@@ -1394,7 +1395,7 @@ impl NetworkWorker {
             i32::MIN
         };
         if raw == i32::MIN {
-            log::warn!(
+            nice_warn!(
                 "[EtherTap] slot_type_for: slot {slot} type unknown (audit pending), \
                  defaulting to DLY — wrong par address if slot holds a different effect"
             );

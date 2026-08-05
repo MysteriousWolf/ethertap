@@ -1,6 +1,9 @@
 #[cfg(not(target_os = "macos"))]
 use crossbeam_channel::tick;
 use crossbeam_channel::{Receiver, Sender, bounded};
+#[cfg(not(target_os = "macos"))]
+use nice_plug::nice_warn;
+use nice_plug::{nice_error, nice_trace};
 use std::sync::Arc;
 /// MIDI device hot-plug watcher.
 ///
@@ -237,7 +240,7 @@ fn spawn_macos(
             ) {
                 Ok(c) => c,
                 Err(e) => {
-                    log::error!("[EtherTap] CoreMIDI notification client: {e}");
+                    nice_error!("[EtherTap] CoreMIDI notification client: {e}");
                     return;
                 }
             };
@@ -301,12 +304,12 @@ fn spawn_macos(
                     // the drop self-heals within one `SAFETY_POLL_MS`
                     // window at the latest.
                     if ed_tx.try_send(devices.clone()).is_err() {
-                        log::debug!(
+                        nice_trace!(
                             "[EtherTap] MIDI device list: editor channel full, broadcast dropped (self-heals via safety poll)"
                         );
                     }
                     if wk_tx.try_send(devices).is_err() {
-                        log::debug!(
+                        nice_trace!(
                             "[EtherTap] MIDI device list: worker channel full, broadcast dropped (self-heals via safety poll)"
                         );
                     }
@@ -314,7 +317,7 @@ fn spawn_macos(
             }
         })
     {
-        log::error!("[EtherTap] failed to spawn MIDI watcher thread: {e}");
+        nice_error!("[EtherTap] failed to spawn MIDI watcher thread: {e}");
     }
 }
 
@@ -330,7 +333,7 @@ fn scan_ports() -> Vec<String> {
             .filter(|n| n != "EtherTap MIDI Clock")
             .collect(),
         Err(e) => {
-            log::warn!(
+            nice_warn!(
                 "[EtherTap] MIDI port scan failed: {e} \
                         (is ALSA/JACK available?)"
             );
@@ -377,7 +380,7 @@ fn spawn_polling(
             }
         })
     {
-        log::error!("[EtherTap] failed to spawn MIDI poll thread: {e}");
+        nice_error!("[EtherTap] failed to spawn MIDI poll thread: {e}");
     }
 }
 

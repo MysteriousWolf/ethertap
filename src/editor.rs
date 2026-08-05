@@ -1036,7 +1036,7 @@ impl EtherTapEditor {
                     // starts fresh; the first scan result arrives within ~600 ms.
                     data.scan_targets.lock().clear();
                     if data.cmd_tx.try_send(NetworkCommand::ScanTargets).is_err() {
-                        log::warn!("[EtherTap] editor: ScanTargets dropped (worker channel full)");
+                        nice_warn!("[EtherTap] editor: ScanTargets dropped (worker channel full)");
                     }
                     self.last_scan_trigger_ms = now_ms();
                 }
@@ -1067,7 +1067,7 @@ impl EtherTapEditor {
                 // Drain MIDI clock drop counter written by the audio thread.
                 let drops = data.midi_clock_drop_count.swap(0, Ordering::Relaxed);
                 if drops > 0 {
-                    log::warn!(
+                    nice_warn!(
                         "[EtherTap] {drops} MIDI clock message(s) dropped (worker stalled?)"
                     );
                 }
@@ -1971,7 +1971,7 @@ impl EtherTapEditor {
                 icon,
                 color,
                 current_out_device.unwrap_or_else(|| {
-                    log::error!("[EtherTap] device_selected=true but current_out_device is None");
+                    nice_error!("[EtherTap] device_selected=true but current_out_device is None");
                     String::new()
                 }),
             )

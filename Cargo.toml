@@ -26,7 +26,6 @@ nice-plug-iced = { git = "https://github.com/MysteriousWolf/nice-plug", branch =
 crossbeam-channel = "0.5"
 rosc = "0.11"
 parking_lot = "0.12"
-log = "0.4"
 if-addrs = "0.15"
 midir = "0.11"
 midi-loopback = { path = "midi-loopback" }
