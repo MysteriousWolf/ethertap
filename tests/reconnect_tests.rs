@@ -174,7 +174,10 @@ fn identity_mismatch_rescans_to_matching_device() {
     // local interface address (e.g. a WiFi IP) instead of 127.0.0.1, even though
     // it's the same physical mock. What matters is that the retarget reached a
     // real, non-empty address and heartbeats are flowing there.
-    assert!(!fx.target_ip.lock().is_empty(), "target_ip must be set after retarget");
+    assert!(
+        !fx.target_ip.lock().is_empty(),
+        "target_ip must be set after retarget"
+    );
     assert!(
         real.wait_for_addr("/info", Duration::from_secs(2)),
         "real device should be receiving heartbeats after retarget"
