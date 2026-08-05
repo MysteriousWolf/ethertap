@@ -91,3 +91,5 @@ Built across 7 iterations of /subagent-implementation on branch `nice-plug-migra
 - F-2: in-DAW VST3 embedding + live window resize not empirically verified (manual DAW pass needed) — triaged at finalize
 - Upstream PR of the `set_parameter` patch to codeberg.org/RustAudio/nice-plug (retires the fork) — user-driven, needs Codeberg identity
 - CI 3-OS matrix green verifies on first push (local 1-OS equivalent gates all green 2026-08-05)
+
+**Squashed to 9a1efda — 2026-08-05.** Per-iteration SHAs above are historical (unreachable from any branch).
