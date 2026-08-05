@@ -29,11 +29,15 @@ const SLICE_MS: u64 = 300;
 ///
 /// Not cfg-gated: `BroadcastPlanner` below is platform-independent so it can
 /// be unit-tested on every CI runner; only its macOS wiring is cfg-gated.
+// On non-macOS the only non-test consumer (`spawn_macos`'s slice loop) is
+// cfg'd out, so allow dead_code there to keep the cross-platform unit tests.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const SAFETY_POLL_MS: u64 = 15_000;
 
 // ─── Broadcast decision logic (platform-independent, unit-testable) ────────────
 
 /// What a slice-boundary tick should do.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TickAction {
     /// Broadcast `current` to both channels and record it as the last-sent
@@ -49,6 +53,7 @@ pub(crate) enum TickAction {
 /// instance, unlike the old `static LAST_MS: OnceLock<AtomicU64>` which was
 /// shared process-wide and let multiple plugin instances suppress each
 /// other's broadcasts.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct BroadcastPlanner {
     /// Set by the CoreMIDI notification callback; cleared on the next
     /// `decide()` call. A notification observed anywhere within a slice
@@ -64,6 +69,7 @@ struct BroadcastPlanner {
     next_safety_due_ms: u64,
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 impl BroadcastPlanner {
     fn new(now_ms: u64) -> Self {
         Self {
