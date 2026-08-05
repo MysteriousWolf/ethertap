@@ -107,6 +107,12 @@ filter_report_warnings() {
     return "$_rc"
 }
 
+# Step 0: drop stale profiling data. Restored CI target caches (and local
+# incremental runs) can carry profdata for files that no longer exist —
+# e.g. the deleted vendor/ crates — which llvm-cov would still fold into the
+# report as 0%-covered entries, silently dragging the total below threshold.
+cargo llvm-cov clean --workspace
+
 # Step 1: pre-count tests with a live spinner, then run with always-spinning progress.
 # --list just prints test names (no execution) so it's fast on a warm cache.
 # The llvm-cov instrumented build shares the same source, so the count is valid.
