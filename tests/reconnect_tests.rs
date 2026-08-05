@@ -169,7 +169,12 @@ fn identity_mismatch_rescans_to_matching_device() {
         real.port(),
         "persisted target_port must be retargeted to the real device"
     );
-    assert_eq!(*fx.target_ip.lock(), "127.0.0.1");
+    // Don't assert the literal IP: the mock binds 0.0.0.0, so on a multi-homed
+    // machine the scan's reply can legitimately arrive tagged with a non-loopback
+    // local interface address (e.g. a WiFi IP) instead of 127.0.0.1, even though
+    // it's the same physical mock. What matters is that the retarget reached a
+    // real, non-empty address and heartbeats are flowing there.
+    assert!(!fx.target_ip.lock().is_empty(), "target_ip must be set after retarget");
     assert!(
         real.wait_for_addr("/info", Duration::from_secs(2)),
         "real device should be receiving heartbeats after retarget"

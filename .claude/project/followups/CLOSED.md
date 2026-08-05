@@ -1,2 +1,3 @@
 - 2026-06-10 vst-runtime-transport-pos — "Transport position auto-advance blocked by pub(crate) fields in nih-plug" — *(closed 2026-06-10)*
 - 2026-06-10 build-vst3-inner-patch-malformed — "patches/nih-plug/vst3_inner_rs.patch has wrong hunk header — fails on fresh setup.sh checkouts" — *(closed 2026-06-10)*
+- 2026-08-05 nice-plug-migration-f-1 — "Reconnect rescan test flaky on multi-homed machines (self-IP via WiFi)" — *(closed 2026-08-05)*
