@@ -65,10 +65,18 @@ const LOGO_FONT: Font = Font {
 // Every text element in the UI uses MONO_FONT.  `t!(expr)` expands to
 // `text(expr).font(MONO_FONT)` so callers can still chain `.size()`,
 // `.color()`, and `.font(SOLAR_BOLD)` (the last overrides for icon glyphs).
-
+//
+// `.line_height(1.0)` pins every text node to a 1:1 (size == line height)
+// box. iced 0.14's default is `LineHeight::Relative(1.3)` — every pixel
+// value in this file (button padding, row/column spacing, section heights)
+// was tuned against the iced 0.4 editor's 1:1 line height, so the 1.3x
+// default alone was enough to blow every section's fixed-height budget and
+// clip/overflow the 360x280 frame.
 macro_rules! t {
     ($s:expr) => {
-        nice_plug_iced::iced::widget::text($s).font(MONO_FONT)
+        nice_plug_iced::iced::widget::text($s)
+            .font(MONO_FONT)
+            .line_height(1.0)
     };
 }
 
@@ -1771,30 +1779,30 @@ impl EtherTapEditor {
         };
 
         let telem_row = Row::new()
-            .push(t!("Host ").size(11).color(PALETTE.text_dim))
-            .push(t!(host_bpm_str).size(11).color(PALETTE.text))
-            .push(hgap(4.0))
+            .push(t!("Host ").size(10).color(PALETTE.text_dim))
+            .push(t!(host_bpm_str).size(10).color(PALETTE.text))
+            .push(hgap(3.0))
             .push(
                 t!(icon::ARROW_RIGHT)
-                    .size(13)
+                    .size(12)
                     .font(SOLAR_BOLD)
                     .color(PALETTE.text_dim),
             )
-            .push(hgap(4.0))
-            .push(t!(host_float_str).size(11).color(PALETTE.text))
+            .push(hgap(3.0))
+            .push(t!(host_float_str).size(10).color(PALETTE.text))
             .push(Space::new().width(Length::Fill))
-            .push(t!("Mixer ").size(11).color(PALETTE.text_dim))
-            .push(t!(hw_bpm_str).size(11).color(PALETTE.text))
-            .push(hgap(4.0))
+            .push(t!("Mixer ").size(10).color(PALETTE.text_dim))
+            .push(t!(hw_bpm_str).size(10).color(PALETTE.text))
+            .push(hgap(3.0))
             .push(
                 t!(icon::ARROW_LEFT)
-                    .size(13)
+                    .size(12)
                     .font(SOLAR_BOLD)
                     .color(PALETTE.text_dim),
             )
-            .push(hgap(4.0))
-            .push(t!(hw_float_str).size(11).color(PALETTE.text))
-            .push(hgap(10.0))
+            .push(hgap(3.0))
+            .push(t!(hw_float_str).size(10).color(PALETTE.text))
+            .push(hgap(6.0))
             .push(sync_badge)
             .align_y(Alignment::Center);
 
@@ -1873,14 +1881,14 @@ impl EtherTapEditor {
         };
         let midi_clk_btn: Element<'_, Message> = Button::new(
             Row::new()
-                .push(t!(icon::CLOCK).size(11).font(SOLAR_BOLD))
-                .push(hgap(4.0))
-                .push(t!(clk_text).size(10))
+                .push(t!(icon::CLOCK).size(10).font(SOLAR_BOLD))
+                .push(hgap(3.0))
+                .push(t!(clk_text).size(9))
                 .align_y(Alignment::Center),
         )
         .on_press(Message::ToggleMidiClock)
         .style(ether_btn_style(clk_style))
-        .padding([4, 8])
+        .padding([3, 6])
         .into();
 
         // Device selector on the left, PPQ on the right.
@@ -2025,73 +2033,73 @@ impl EtherTapEditor {
             Row::new()
                 .push(midi_clk_btn)
                 .push(Space::new().width(Length::Fill))
-                .push(t!("avg ").size(9).color(PALETTE.text_dim))
-                .push(t!(avg_str).size(9).color(PALETTE.text_dim))
-                .push(t!("ms  p50\u{b1}").size(9).color(PALETTE.text_dim))
-                .push(t!(p50_str).size(9).color(if has_data {
+                .push(t!("avg").size(7).color(PALETTE.text_dim))
+                .push(t!(avg_str).size(7).color(PALETTE.text_dim))
+                .push(t!("ms p50\u{b1}").size(7).color(PALETTE.text_dim))
+                .push(t!(p50_str).size(7).color(if has_data {
                     PALETTE.ok
                 } else {
                     PALETTE.text_dim
                 }))
-                .push(t!("\u{b5}s  p95\u{b1}").size(9).color(PALETTE.text_dim))
-                .push(t!(p95_str).size(9).color(if has_data {
+                .push(t!("\u{b5}s p95\u{b1}").size(7).color(PALETTE.text_dim))
+                .push(t!(p95_str).size(7).color(if has_data {
                     PALETTE.ok
                 } else {
                     PALETTE.text_dim
                 }))
-                .push(t!("\u{b5}s  p99\u{b1}").size(9).color(PALETTE.text_dim))
-                .push(t!(p99_str).size(9).color(p99_color))
-                .push(t!("\u{b5}s  max\u{b1}").size(9).color(PALETTE.text_dim))
-                .push(t!(max_str).size(9).color(max_color))
-                .push(t!("\u{b5}s").size(9).color(PALETTE.text_dim))
+                .push(t!("\u{b5}s p99\u{b1}").size(7).color(PALETTE.text_dim))
+                .push(t!(p99_str).size(7).color(p99_color))
+                .push(t!("\u{b5}s max\u{b1}").size(7).color(PALETTE.text_dim))
+                .push(t!(max_str).size(7).color(max_color))
+                .push(t!("\u{b5}s").size(7).color(PALETTE.text_dim))
                 .align_y(Alignment::Center)
                 .into()
         };
 
         // ── Rate Sync row ─────────────────────────────────────────────────
         let rate_row = Row::new()
-            .push(t!("RATE").size(9).color(PALETTE.text_dim))
-            .push(hgap(4.0))
+            .push(t!("RATE").size(8).color(PALETTE.text_dim))
+            .push(hgap(2.0))
             .push(sync_btn(
                 "Man",
                 rate_mode == SyncMode::Manual,
                 Message::SetRateSyncMode(SyncMode::Manual),
             ))
-            .push(hgap(4.0))
+            .push(hgap(2.0))
             .push(sync_btn(
                 "BPM",
                 rate_mode == SyncMode::OnChange,
                 Message::SetRateSyncMode(SyncMode::OnChange),
             ))
-            .push(hgap(4.0))
+            .push(hgap(2.0))
             .push(sync_btn(
                 "Cont",
                 rate_mode == SyncMode::Continuous,
                 Message::SetRateSyncMode(SyncMode::Continuous),
             ))
-            .push(hgap(4.0))
+            .push(hgap(2.0))
             .push(force_icon_btn(Message::ForceRateSync))
             .push(Space::new().width(Length::Fill))
-            .push(t!("PHASE").size(9).color(PALETTE.text_dim))
-            .push(hgap(4.0))
+            .push(t!("PHASE").size(8).color(PALETTE.text_dim))
+            .push(hgap(2.0))
             .push(sync_btn(
                 "Man",
                 phase_mode == SyncMode::Manual,
                 Message::SetPhaseSyncMode(SyncMode::Manual),
             ))
-            .push(hgap(4.0))
+            .push(hgap(2.0))
             .push(sync_btn(
                 "BPM",
                 phase_mode == SyncMode::OnChange,
                 Message::SetPhaseSyncMode(SyncMode::OnChange),
             ))
-            .push(hgap(4.0))
+            .push(hgap(2.0))
             .push(sync_btn(
                 "Cont",
                 phase_mode == SyncMode::Continuous,
                 Message::SetPhaseSyncMode(SyncMode::Continuous),
             ))
-            .push(hgap(4.0))
+            .push(hgap(2.0))
             .push(force_icon_btn(Message::ForcePhaseSync))
             .align_y(Alignment::Center);
 
@@ -2480,7 +2488,7 @@ fn toggle_fx_filter_param(setter: &ParamSetter, params: &EtherTapParams, bit: u8
 
 /// Compact radio-style sync mode button (Man / BPM / Cont).
 fn sync_btn<'a>(label: &'static str, selected: bool, msg: Message) -> Button<'a, Message> {
-    Button::new(Container::new(t!(label).size(10).color(if selected {
+    Button::new(Container::new(t!(label).size(9).color(if selected {
         PALETTE.selected_text
     } else {
         PALETTE.muted
@@ -2491,20 +2499,20 @@ fn sync_btn<'a>(label: &'static str, selected: bool, msg: Message) -> Button<'a,
     } else {
         BtnKind::Idle
     }))
-    .padding([4, 8])
+    .padding([3, 6])
 }
 
 /// Bolt-only force-sync button (no text label).
 fn force_icon_btn<'a>(msg: Message) -> Button<'a, Message> {
     Button::new(
         t!(icon::BOLT)
-            .size(11)
+            .size(10)
             .font(SOLAR_BOLD)
             .color(PALETTE.accent),
     )
     .on_press(msg)
     .style(ether_btn_style(BtnKind::Force))
-    .padding([4, 8])
+    .padding([3, 6])
 }
 
 /// Momentary trigger button for the DAW parameters-in footer.
