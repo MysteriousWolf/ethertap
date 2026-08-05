@@ -93,3 +93,5 @@ Built across 7 iterations of /subagent-implementation on branch `nice-plug-migra
 - CI 3-OS matrix green verifies on first push (local 1-OS equivalent gates all green 2026-08-05)
 
 **Squashed to 9a1efda — 2026-08-05.** Per-iteration SHAs above are historical (unreachable from any branch).
+
+**Merged into main as a950d1e — 2026-08-05** (fast-forward; squash commit 9a1efda + spec-log and lint/signals follow-ups).
